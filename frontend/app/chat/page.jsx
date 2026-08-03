@@ -10,6 +10,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     // Buat satu chat baru saat halaman dibuka (versi sederhana untuk F1)
@@ -39,6 +40,31 @@ export default function ChatPage() {
       setMessages((prev) => [...prev, { sender: "assistant", content: `Error: ${err.message}` }]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    try {
+      const result = await api.uploadDocument(file);
+      setMessages((prev) => [
+        ...prev,
+        {
+          sender: "assistant",
+          content: `✅ Dokumen "${result.filename}" berhasil diunggah dan diindeks (${result.chunks_indexed} potongan teks).`,
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { sender: "assistant", content: `❌ Gagal mengunggah dokumen: ${err.message}` },
+      ]);
+    } finally {
+      setUploading(false);
+      e.target.value = null; // reset input
     }
   }
 
@@ -77,6 +103,28 @@ export default function ChatPage() {
           placeholder="Ketik pertanyaan..."
           style={{ flex: 1, padding: 10 }}
         />
+        <input
+          type="file"
+          accept=".pdf"
+          id="file-upload"
+          style={{ display: "none" }}
+          onChange={handleFileUpload}
+          disabled={uploading}
+        />
+        <label
+          htmlFor="file-upload"
+          style={{
+            padding: "10px 16px",
+            background: "#eee",
+            border: "1px solid #ccc",
+            cursor: uploading ? "wait" : "pointer",
+            borderRadius: 4,
+            display: "flex",
+            alignItems: "center"
+          }}
+        >
+          {uploading ? "Mengunggah..." : "📄 Upload PDF"}
+        </label>
         <button type="submit" disabled={loading}>
           Kirim
         </button>

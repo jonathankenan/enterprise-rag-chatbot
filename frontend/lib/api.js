@@ -57,4 +57,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ chat_id: chatId, content }),
     }),
+
+  uploadDocument: (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const token = getToken();
+    return fetch(`${API_URL}/api/documents/upload`, {
+      method: "POST",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Upload gagal (${res.status})`);
+      }
+      return res.json();
+    });
+  },
 };
