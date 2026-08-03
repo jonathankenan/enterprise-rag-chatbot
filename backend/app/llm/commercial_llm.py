@@ -16,7 +16,10 @@ async def _call_gemini(prompt: str) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             url,
-            params={"key": settings.gemini_api_key},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": settings.gemini_api_key,
+            },
             json={"contents": [{"parts": [{"text": prompt}]}]},
         )
         response.raise_for_status()
