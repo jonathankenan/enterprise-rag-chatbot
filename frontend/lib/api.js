@@ -6,9 +6,18 @@
  */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// Endpoint yang TIDAK boleh memicu auto-logout kalau gagal —
+// karena 401 di sini artinya "email/password salah", bukan "token expired"
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register"];
+
 function getToken() {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("access_token");
+}
+
+function clearToken() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("access_token");
 }
 
 async function request(path, options = {}) {
@@ -23,6 +32,15 @@ async function request(path, options = {}) {
   });
 
   if (!res.ok) {
+    // Token invalid/expired terdeteksi di endpoint mana pun yang butuh login
+    const isAuthEndpoint = AUTH_ENDPOINTS.some((ep) => path.startsWith(ep));
+    if (res.status === 401 && !isAuthEndpoint) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        window.location.href = "/login?expired=true";
+      }
+    }
+
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.detail || `Request gagal (${res.status})`);
   }
@@ -43,7 +61,7 @@ export const api = {
     }),
 
   logout: () => {
-    localStorage.removeItem("access_token");
+    clearToken();
   },
 
   isLoggedIn: () => {

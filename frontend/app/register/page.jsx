@@ -6,10 +6,21 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
 
+function getPasswordError(password) {
+  if (password.length < 8) {
+    return "Password minimal 8 karakter";
+  }
+  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+    return "Password harus mengandung huruf dan angka";
+  }
+  return null;
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -17,10 +28,23 @@ export default function RegisterPage() {
   async function handleRegister(e) {
     e.preventDefault();
     setError("");
+
+    // Validasi kekuatan password
+    const passwordError = getPasswordError(password);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+
+    // Validasi konfirmasi password
+    if (password !== confirmPassword) {
+      setError("Konfirmasi password tidak cocok");
+      return;
+    }
+
     setLoading(true);
     try {
       await api.register(email, password, fullName);
-      // Registrasi berhasil -> arahkan ke halaman login, user input manual
       router.push("/login?registered=true");
     } catch (err) {
       setError(err.message);
@@ -54,7 +78,17 @@ export default function RegisterPage() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           required
-          minLength={6}
+          style={{ width: "100%", padding: 8, marginBottom: 4 }}
+        />
+        <p style={{ fontSize: 12, color: "#888", marginTop: 0, marginBottom: 12 }}>
+          Minimal 8 karakter, kombinasi huruf dan angka
+        </p>
+        <input
+          type="password"
+          placeholder="Konfirmasi Password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          required
           style={{ width: "100%", padding: 8, marginBottom: 12 }}
         />
         {error && <p style={{ color: "red" }}>{error}</p>}
