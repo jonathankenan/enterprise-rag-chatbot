@@ -6,8 +6,6 @@
  */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// Endpoint yang TIDAK boleh memicu auto-logout kalau gagal —
-// karena 401 di sini artinya "email/password salah", bukan "token expired"
 const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register"];
 
 function getToken() {
@@ -18,6 +16,27 @@ function getToken() {
 function clearToken() {
   if (typeof window === "undefined") return;
   localStorage.removeItem("access_token");
+}
+
+/**
+ * FastAPI mengembalikan error dalam beberapa bentuk berbeda:
+ * 1. String biasa: {"detail": "Email sudah terdaftar"}
+ * 2. Array validasi Pydantic: {"detail": [{"msg": "...", "loc": [...], ...}]}
+ * Fungsi ini menyeragamkan keduanya jadi satu string yang mudah dibaca user.
+ */
+function extractErrorMessage(errorBody, statusCode) {
+  const detail = errorBody?.detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail) && detail.length > 0) {
+    // Ambil pesan error pertama saja, cukup untuk ditampilkan ke user
+    return detail[0].msg || "Data yang dimasukkan tidak valid";
+  }
+
+  return `Terjadi kesalahan (kode ${statusCode})`;
 }
 
 async function request(path, options = {}) {
@@ -32,7 +51,6 @@ async function request(path, options = {}) {
   });
 
   if (!res.ok) {
-    // Token invalid/expired terdeteksi di endpoint mana pun yang butuh login
     const isAuthEndpoint = AUTH_ENDPOINTS.some((ep) => path.startsWith(ep));
     if (res.status === 401 && !isAuthEndpoint) {
       clearToken();
@@ -42,7 +60,7 @@ async function request(path, options = {}) {
     }
 
     const errorBody = await res.json().catch(() => ({}));
-    throw new Error(errorBody.detail || `Request gagal (${res.status})`);
+    throw new Error(extractErrorMessage(errorBody, res.status));
   }
   return res.json();
 }
@@ -69,6 +87,12 @@ export const api = {
   },
 
   getMe: () => request("/api/auth/me"),
+
+  changePassword: (oldPassword, newPassword) =>
+    request("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
 
   createChat: (title) =>
     request("/api/chat", {

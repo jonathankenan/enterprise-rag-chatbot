@@ -4,6 +4,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api } from "../../lib/api";
 
 export default function ChatPage() {
@@ -13,24 +14,24 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
-    // Proteksi halaman: kalau belum login, tendang ke halaman login
     if (!api.isLoggedIn()) {
       router.push("/login");
       return;
     }
 
-    // Ambil info user yang sedang login
     api.getMe()
-      .then((user) => setCurrentUser(user))
+      .then((user) => {
+        setCurrentUser(user);
+        setCheckingSession(false);
+      })
       .catch(() => {
-        // Token invalid/expired -> paksa logout
         api.logout();
         router.push("/login");
       });
 
-    // Buat satu chat baru saat halaman dibuka (versi sederhana untuk F1)
     api.createChat("Percakapan Baru").then((chat) => setChatId(chat.id));
   }, []);
 
@@ -55,7 +56,7 @@ export default function ChatPage() {
         {
           sender: "assistant",
           content: result.reply,
-          llm_used: result.llm_used, // "on-prem" atau "commercial" — tampilkan sebagai label kecil
+          llm_used: result.llm_used,
         },
       ]);
     } catch (err) {
@@ -63,6 +64,16 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // Tampilkan indikator loading selama sesi masih diperiksa,
+  // supaya tidak ada "kedipan" tampilan kosong sebelum redirect/data siap
+  if (checkingSession) {
+    return (
+      <div style={{ maxWidth: 700, margin: "80px auto", textAlign: "center" }}>
+        <p style={{ color: "#888" }}>Memeriksa sesi...</p>
+      </div>
+    );
   }
 
   return (
@@ -73,6 +84,8 @@ export default function ChatPage() {
           {currentUser && (
             <p style={{ margin: "4px 0 0", fontSize: 13, color: "#666" }}>
               Masuk sebagai: {currentUser.full_name || currentUser.email}
+              {" · "}
+              <Link href="/change-password">Ganti Password</Link>
             </p>
           )}
         </div>
