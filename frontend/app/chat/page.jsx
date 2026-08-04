@@ -17,6 +17,7 @@ export default function ChatPage() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
+  // Load chat history on mount
   useEffect(() => {
     if (!api.isLoggedIn()) {
       router.push("/login");
