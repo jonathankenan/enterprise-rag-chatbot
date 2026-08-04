@@ -29,7 +29,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list[str]:
     """
     Pecah teks panjang jadi potongan-potongan kecil (chunk).
     Overlap = sedikit tumpang tindih antar chunk, supaya konteks di
@@ -60,7 +60,7 @@ def index_document(text: str, doc_id: str, filename: str, collection_name: str =
     return len(chunks)
 
 
-def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int = 3) -> list[str]:
+def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int = 10) -> list[str]:
     """
     Fungsi RETRIEVAL — inti dari "R" di RAG.
     Cari potongan teks yang paling relevan secara makna dengan pertanyaan user.
@@ -71,4 +71,11 @@ def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int
 
     results = collection.query(query_texts=[query], n_results=min(top_k, collection.count()))
     documents = results.get("documents", [[]])[0]
-    return documents
+    metadatas = results.get("metadatas", [[]])[0]
+    
+    formatted_chunks = []
+    for doc, meta in zip(documents, metadatas):
+        filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
+        formatted_chunks.append(f"[Source: {filename}]\n{doc}")
+        
+    return formatted_chunks

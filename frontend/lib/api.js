@@ -50,6 +50,8 @@ export const api = {
 
   getChatHistory: () => request("/api/chat/history"),
 
+  deleteChat: (chatId) => request(`/api/chat/${chatId}`, { method: "DELETE" }),
+
   getMessages: (chatId) => request(`/api/chat/${chatId}/messages`),
 
   sendMessage: (chatId, content) =>
