@@ -1,13 +1,6 @@
 """
 [PENANGGUNG JAWAB: Anggota A]
 INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
-
-Logika: kalau prompt terindikasi mengandung data sensitif -> paksa pakai
-on-prem (Ollama, tidak pernah keluar server). Kalau tidak, boleh pakai
-commercial (Gemini/Groq) yang biasanya lebih cepat/berkualitas.
-
-Untuk Tingkat 1, deteksi sensitivitas masih sederhana (keyword matching).
-Di Tingkat 2 baru diperhalus pakai PII detector (Presidio, dsb).
 """
 from dataclasses import dataclass
 
@@ -24,10 +17,6 @@ class LLMResult:
 
 
 def detect_sensitive(text: str) -> bool:
-    """
-    Deteksi sederhana: cek apakah prompt mengandung kata kunci sensitif.
-    (Versi Tingkat 2 nanti diganti dengan PII detector yang lebih andal.)
-    """
     lowered = text.lower()
     return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
 
@@ -69,7 +58,7 @@ async def route_and_generate(user_message: str, context_chunks: list[str], chat_
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
     1. Deteksi apakah prompt sensitif
-    2. Susun prompt akhir (gabung dengan hasil RAG)
+    2. Susun prompt akhir (gabung dengan hasil RAG + history)
     3. Pilih LLM yang sesuai dan panggil
     """
     is_sensitive = detect_sensitive(user_message)

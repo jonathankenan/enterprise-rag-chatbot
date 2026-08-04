@@ -3,8 +3,6 @@
 Endpoint ini menggabungkan:
 - Fungsi dari Anggota B: autentikasi (get_current_user), simpan/ambil dari database
 - Fungsi dari Anggota A: retrieval RAG, LLM switching (on-prem/commercial)
-
-Kerjakan file ini BERSAMA setelah masing-masing fungsi dasar (auth & RAG) siap.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -52,7 +50,7 @@ def delete_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depend
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
-    
+
     db.query(Message).filter(Message.chat_id == chat.id).delete()
     db.delete(chat)
     db.commit()

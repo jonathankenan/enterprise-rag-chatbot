@@ -6,9 +6,30 @@
  */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register"];
+
 function getToken() {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("access_token");
+}
+
+function clearToken() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("access_token");
+}
+
+function extractErrorMessage(errorBody, statusCode) {
+  const detail = errorBody?.detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail[0].msg || "Data yang dimasukkan tidak valid";
+  }
+
+  return `Terjadi kesalahan (kode ${statusCode})`;
 }
 
 async function request(path, options = {}) {
@@ -23,8 +44,16 @@ async function request(path, options = {}) {
   });
 
   if (!res.ok) {
+    const isAuthEndpoint = AUTH_ENDPOINTS.some((ep) => path.startsWith(ep));
+    if (res.status === 401 && !isAuthEndpoint) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        window.location.href = "/login?expired=true";
+      }
+    }
+
     const errorBody = await res.json().catch(() => ({}));
-    throw new Error(errorBody.detail || `Request gagal (${res.status})`);
+    throw new Error(extractErrorMessage(errorBody, res.status));
   }
   return res.json();
 }
@@ -40,6 +69,22 @@ export const api = {
     request("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+
+  logout: () => {
+    clearToken();
+  },
+
+  isLoggedIn: () => {
+    return !!getToken();
+  },
+
+  getMe: () => request("/api/auth/me"),
+
+  changePassword: (oldPassword, newPassword) =>
+    request("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
     }),
 
   createChat: (title) =>
