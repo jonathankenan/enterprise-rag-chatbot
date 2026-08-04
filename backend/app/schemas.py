@@ -98,3 +98,4 @@ class ChatReplyResponse(BaseModel):
     llm_used: str          # "on-prem" atau "commercial"
     is_sensitive: bool     # apakah terdeteksi sebagai data sensitif
     sources: list[str] = []  # potongan referensi dari RAG (opsional untuk F1)
+    new_title: str | None = None  # Judul baru jika baru saja di-generate

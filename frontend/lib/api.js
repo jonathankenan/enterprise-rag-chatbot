@@ -18,12 +18,6 @@ function clearToken() {
   localStorage.removeItem("access_token");
 }
 
-/**
- * FastAPI mengembalikan error dalam beberapa bentuk berbeda:
- * 1. String biasa: {"detail": "Email sudah terdaftar"}
- * 2. Array validasi Pydantic: {"detail": [{"msg": "...", "loc": [...], ...}]}
- * Fungsi ini menyeragamkan keduanya jadi satu string yang mudah dibaca user.
- */
 function extractErrorMessage(errorBody, statusCode) {
   const detail = errorBody?.detail;
 
@@ -32,7 +26,6 @@ function extractErrorMessage(errorBody, statusCode) {
   }
 
   if (Array.isArray(detail) && detail.length > 0) {
-    // Ambil pesan error pertama saja, cukup untuk ditampilkan ke user
     return detail[0].msg || "Data yang dimasukkan tidak valid";
   }
 
@@ -102,6 +95,8 @@ export const api = {
 
   getChatHistory: () => request("/api/chat/history"),
 
+  deleteChat: (chatId) => request(`/api/chat/${chatId}`, { method: "DELETE" }),
+
   getMessages: (chatId) => request(`/api/chat/${chatId}/messages`),
 
   sendMessage: (chatId, content) =>
@@ -109,4 +104,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ chat_id: chatId, content }),
     }),
+
+  uploadDocument: (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const token = getToken();
+    return fetch(`${API_URL}/api/documents/upload`, {
+      method: "POST",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Upload gagal (${res.status})`);
+      }
+      return res.json();
+    });
+  },
 };

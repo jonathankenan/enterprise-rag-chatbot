@@ -9,8 +9,6 @@ from pypdf import PdfReader
 
 from app.config import settings
 
-# Model embedding lokal, gratis, jalan di CPU — cocok untuk skala internship.
-# Model ini yang mengubah teks menjadi vektor (representasi angka).
 _embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="all-MiniLM-L6-v2"
 )
@@ -19,17 +17,15 @@ _client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
 
 
 def get_collection(name: str = "kb_general"):
-    """Ambil (atau buat baru) satu koleksi vector DB."""
     return _client.get_or_create_collection(name=name, embedding_function=_embedding_fn)
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Ambil teks mentah dari file PDF."""
     reader = PdfReader(file_bytes)  # type: ignore
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list[str]:
     """
     Pecah teks panjang jadi potongan-potongan kecil (chunk).
     Overlap = sedikit tumpang tindih antar chunk, supaya konteks di
@@ -46,10 +42,6 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
 
 
 def index_document(text: str, doc_id: str, filename: str, collection_name: str = "kb_general"):
-    """
-    Alur lengkap: teks -> chunk -> simpan ke vector DB.
-    Dipanggil setelah dokumen diunggah (lihat app/rag/routes.py).
-    """
     collection = get_collection(collection_name)
     chunks = chunk_text(text)
 
@@ -60,7 +52,7 @@ def index_document(text: str, doc_id: str, filename: str, collection_name: str =
     return len(chunks)
 
 
-def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int = 3) -> list[str]:
+def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int = 10) -> list[str]:
     """
     Fungsi RETRIEVAL — inti dari "R" di RAG.
     Cari potongan teks yang paling relevan secara makna dengan pertanyaan user.
@@ -71,4 +63,11 @@ def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int
 
     results = collection.query(query_texts=[query], n_results=min(top_k, collection.count()))
     documents = results.get("documents", [[]])[0]
-    return documents
+    metadatas = results.get("metadatas", [[]])[0]
+
+    formatted_chunks = []
+    for doc, meta in zip(documents, metadatas):
+        filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
+        formatted_chunks.append(f"[Source: {filename}]\n{doc}")
+
+    return formatted_chunks

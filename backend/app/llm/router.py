@@ -1,13 +1,6 @@
 """
 [PENANGGUNG JAWAB: Anggota A]
 INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
-
-Logika: kalau prompt terindikasi mengandung data sensitif -> paksa pakai
-on-prem (Ollama, tidak pernah keluar server). Kalau tidak, boleh pakai
-commercial (Gemini/Groq) yang biasanya lebih cepat/berkualitas.
-
-Untuk Tingkat 1, deteksi sensitivitas masih sederhana (keyword matching).
-Di Tingkat 2 baru diperhalus pakai PII detector (Presidio, dsb).
 """
 from dataclasses import dataclass
 
@@ -24,38 +17,52 @@ class LLMResult:
 
 
 def detect_sensitive(text: str) -> bool:
-    """
-    Deteksi sederhana: cek apakah prompt mengandung kata kunci sensitif.
-    (Versi Tingkat 2 nanti diganti dengan PII detector yang lebih andal.)
-    """
     lowered = text.lower()
     return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
 
 
-def build_prompt(user_message: str, context_chunks: list[str]) -> str:
+def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None) -> str:
     """Gabungkan hasil retrieval (RAG) dengan pertanyaan user jadi satu prompt."""
-    if not context_chunks:
-        return user_message
+    history_text = ""
+    if chat_history:
+        history_text = "CONVERSATION HISTORY:\n"
+        for msg in chat_history:
+            sender = "User" if msg.sender.value == "user" else "Assistant"
+            history_text += f"{sender}: {msg.content}\n"
+        history_text += "\n"
 
-    context_text = "\n\n".join(f"- {c}" for c in context_chunks)
+    context_text = ""
+    if context_chunks:
+        raw_context = "\n\n".join(f"- {c}" for c in context_chunks)
+        if len(raw_context) > 15000:
+            raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
+        context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
+
     return (
-        "Gunakan konteks berikut untuk menjawab pertanyaan. "
-        "Jika konteks tidak relevan, jawab berdasarkan pengetahuan umum.\n\n"
-        f"KONTEKS:\n{context_text}\n\n"
-        f"PERTANYAAN: {user_message}\n\n"
-        "JAWABAN:"
+        "You are a helpful and conversational AI assistant.\n"
+        "You will be provided with a CONVERSATION HISTORY and some PROVIDED CONTEXT.\n\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "1. If the PROVIDED CONTEXT is NOT directly relevant to the user's latest message, you MUST completely ignore it.\n"
+        "2. Do NOT mention the context, do NOT offer to help with topics from the context, and do NOT apologize for the context being irrelevant. Just act like the context doesn't exist and answer naturally.\n"
+        "3. You MUST respond in the exact same language that the user used in their latest message.\n"
+        "4. NEVER parrot or simply repeat what the user said. You must actually respond to it. If the user makes a statement, acknowledge it conversationally.\n"
+        "5. When answering based on the PROVIDED CONTEXT, be eloquent, professional, and thorough. Use complete sentences instead of short fragments. For example, instead of '99.5% uptime', say 'According to the provided document, the required system uptime is 99.5%.'\n\n"
+        f"{history_text}"
+        f"{context_text}"
+        f"USER LATEST MESSAGE: {user_message}\n\n"
+        "YOUR RESPONSE:"
     )
 
 
-async def route_and_generate(user_message: str, context_chunks: list[str]) -> LLMResult:
+async def route_and_generate(user_message: str, context_chunks: list[str], chat_history: list = None) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
     1. Deteksi apakah prompt sensitif
-    2. Susun prompt akhir (gabung dengan hasil RAG)
+    2. Susun prompt akhir (gabung dengan hasil RAG + history)
     3. Pilih LLM yang sesuai dan panggil
     """
     is_sensitive = detect_sensitive(user_message)
-    final_prompt = build_prompt(user_message, context_chunks)
+    final_prompt = build_prompt(user_message, context_chunks, chat_history)
 
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
