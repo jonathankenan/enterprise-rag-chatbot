@@ -42,6 +42,16 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
+  logout: () => {
+    localStorage.removeItem("access_token");
+  },
+
+  isLoggedIn: () => {
+    return !!getToken();
+  },
+
+  getMe: () => request("/api/auth/me"),
+
   createChat: (title) =>
     request("/api/chat", {
       method: "POST",

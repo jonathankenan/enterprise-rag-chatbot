@@ -1,6 +1,6 @@
 """
 [PENANGGUNG JAWAB: Anggota B]
-Endpoint: POST /api/auth/register, POST /api/auth/login
+Endpoint: POST /api/auth/register, POST /api/auth/login, GET /api/auth/me
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import UserRegister, UserLogin, TokenResponse, UserResponse
-from app.auth.utils import hash_password, verify_password, create_access_token
+from app.auth.utils import hash_password, verify_password, create_access_token, get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -38,3 +38,8 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 
     token = create_access_token(user_id=user.id)
     return TokenResponse(access_token=token)
+
+
+@router.get("/me", response_model=UserResponse)
+def get_me(user: User = Depends(get_current_user)):
+    return user
