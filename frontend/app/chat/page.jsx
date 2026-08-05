@@ -283,7 +283,7 @@ export default function ChatPage() {
             style={{ padding: 10, borderRadius: 4, border: "1px solid #ccc" }}
           >
             <option value="on-prem">On-Premise (Ollama)</option>
-            <option value="groq">Llama 3.1 8B (Groq)</option>
+            <option value="groq">GPT-OSS 120B (Groq)</option>
             <option value="gemini">Gemini Flash (Google)</option>
             <option value="mistral">Mistral Small</option>
             <option value="cloudflare">Llama 3.3 70B (Cloudflare)</option>
