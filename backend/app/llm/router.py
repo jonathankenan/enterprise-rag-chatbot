@@ -2,12 +2,10 @@
 [PENANGGUNG JAWAB: Anggota A]
 INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
 
-Logika: kalau prompt terindikasi mengandung data sensitif -> paksa pakai
-on-prem (Ollama, tidak pernah keluar server). Kalau tidak, boleh pakai
-commercial (Gemini/Groq) yang biasanya lebih cepat/berkualitas.
-
-Untuk Tingkat 1, deteksi sensitivitas masih sederhana (keyword matching).
-Di Tingkat 2 baru diperhalus pakai PII detector (Presidio, dsb).
+Logika:
+1. Kalau prompt terindikasi sensitif -> PAKSA on-prem, apa pun pilihan user
+   (ini prioritas keamanan, tidak bisa dilewati user).
+2. Kalau tidak sensitif -> ikuti pilihan user.
 """
 from dataclasses import dataclass
 
@@ -15,28 +13,26 @@ from app.config import settings
 from app.llm.local_llm import call_local_llm
 from app.llm.commercial_llm import call_commercial_llm
 
+# Provider commercial yang valid dipilih user (di luar "on-prem")
+COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
+
 
 import re
 
 @dataclass
 class LLMResult:
     reply: str
-    llm_used: str       # "on-prem" | "commercial"
+    llm_used: str
     is_sensitive: bool
     confidence_score: int | None = None
 
 
 def detect_sensitive(text: str) -> bool:
-    """
-    Deteksi sederhana: cek apakah prompt mengandung kata kunci sensitif.
-    (Versi Tingkat 2 nanti diganti dengan PII detector yang lebih andal.)
-    """
     lowered = text.lower()
     return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
 
 
 def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None) -> str:
-    """Gabungkan hasil retrieval (RAG) dengan pertanyaan user jadi satu prompt."""
     history_text = ""
     if chat_history:
         history_text = "CONVERSATION HISTORY:\n"
@@ -69,22 +65,31 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
     )
 
 
-async def route_and_generate(user_message: str, context_chunks: list[str], chat_history: list = None) -> LLMResult:
+async def route_and_generate(
+    user_message: str,
+    context_chunks: list[str],
+    chat_history: list = None,
+    preferred_provider: str = "on-prem",
+) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
-    1. Deteksi apakah prompt sensitif
-    2. Susun prompt akhir (gabung dengan hasil RAG)
-    3. Pilih LLM yang sesuai dan panggil
+    preferred_provider: "on-prem" | "groq" | "gemini" | "mistral" | "cloudflare"
     """
     is_sensitive = detect_sensitive(user_message)
     final_prompt = build_prompt(user_message, context_chunks, chat_history)
 
+    # ATURAN KEAMANAN: data sensitif WAJIB on-prem, tidak peduli pilihan user
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
-        llm_used = "on-prem"
-    else:
-        reply = await call_commercial_llm(final_prompt)
-        llm_used = "commercial"
+        return LLMResult(reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True)
+
+    if preferred_provider == "on-prem":
+        reply = await call_local_llm(final_prompt)
+        return LLMResult(reply=reply, llm_used="on-prem", is_sensitive=False)
+
+    if preferred_provider in COMMERCIAL_PROVIDERS:
+        reply = await call_commercial_llm(final_prompt, provider=preferred_provider)
+        return LLMResult(reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False)
 
     confidence_score = None
     match = re.search(r"\[CONFIDENCE:\s*(\d+)\]", reply, re.IGNORECASE)

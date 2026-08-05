@@ -3,7 +3,21 @@
 Skema Pydantic — bentuk data yang masuk (request) & keluar (response) dari API.
 """
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
+
+
+def validate_password_strength(password: str) -> str:
+    """
+    Aturan password — sama persis dengan validasi di frontend (register/page.jsx),
+    supaya tidak bisa "dilewati" dengan memanggil API langsung tanpa lewat UI.
+    """
+    if len(password) < 8:
+        raise ValueError("Password minimal 8 karakter")
+    if not any(c.isalpha() for c in password):
+        raise ValueError("Password harus mengandung huruf")
+    if not any(c.isdigit() for c in password):
+        raise ValueError("Password harus mengandung angka")
+    return password
 
 
 # ---- Auth ----
@@ -12,10 +26,25 @@ class UserRegister(BaseModel):
     password: str
     full_name: str | None = None
 
+    @field_validator("password")
+    @classmethod
+    def check_password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)
+
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def check_password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)
 
 
 class TokenResponse(BaseModel):
@@ -50,6 +79,7 @@ class ChatResponse(BaseModel):
 class MessageCreate(BaseModel):
     chat_id: str
     content: str
+    llm_provider: str = "auto"  # "auto" | "on-prem" | "groq" | "gemini"
 
 
 class MessageResponse(BaseModel):
@@ -67,7 +97,7 @@ class MessageResponse(BaseModel):
 class ChatReplyResponse(BaseModel):
     """Dikembalikan setelah user kirim pesan — berisi jawaban AI + metadata."""
     reply: str
-    llm_used: str          # "on-prem" atau "commercial"
+    llm_used: str          # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
     is_sensitive: bool     # apakah terdeteksi sebagai data sensitif
     confidence_score: int | None = None
     sources: list[str] = []  # potongan referensi dari RAG (opsional untuk F1)

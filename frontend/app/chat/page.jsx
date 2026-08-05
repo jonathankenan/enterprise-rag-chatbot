@@ -1,27 +1,52 @@
 "use client";
-// [PENANGGUNG JAWAB: Anggota B]
+// [PENANGGUNG JAWAB: Anggota A & B]
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api } from "../../lib/api";
 
 export default function ChatPage() {
+  const router = useRouter();
   const [chatId, setChatId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [chatHistory, setChatHistory] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [llmProvider, setLlmProvider] = useState("on-prem");
 
-  // Load chat history on mount
   useEffect(() => {
+    if (!api.isLoggedIn()) {
+      router.push("/login");
+      return;
+    }
+
+    api.getMe()
+      .then((user) => {
+        setCurrentUser(user);
+        setCheckingSession(false);
+      })
+      .catch(() => {
+        api.logout();
+        router.push("/login");
+      });
+
     loadChatHistory();
   }, []);
+
+  function handleLogout() {
+    api.logout();
+    router.push("/login");
+  }
 
   async function loadChatHistory() {
     try {
       const history = await api.getChatHistory();
       setChatHistory(history);
-      
+
       if (history.length > 0 && !chatId) {
         selectChat(history[0].id);
       } else if (history.length === 0) {
@@ -81,8 +106,8 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const result = await api.sendMessage(chatId, userMessage.content);
-      
+      const result = await api.sendMessage(chatId, userMessage.content, llmProvider);
+
       if (result.new_title) {
         loadChatHistory();
       }
@@ -124,30 +149,38 @@ export default function ChatPage() {
       ]);
     } finally {
       setUploading(false);
-      e.target.value = null; // reset input
+      e.target.value = null;
     }
+  }
+
+  if (checkingSession) {
+    return (
+      <div style={{ maxWidth: 700, margin: "80px auto", textAlign: "center" }}>
+        <p style={{ color: "#888" }}>Memeriksa sesi...</p>
+      </div>
+    );
   }
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
       {/* SIDEBAR */}
-      <div style={{ 
-        width: "280px", 
-        borderRight: "1px solid #ddd", 
-        padding: "20px", 
-        display: "flex", 
+      <div style={{
+        width: "280px",
+        borderRight: "1px solid #ddd",
+        padding: "20px",
+        display: "flex",
         flexDirection: "column",
         background: "#f9f9f9"
       }}>
         <h2>Riwayat Chat</h2>
-        <button 
+        <button
           onClick={handleNewChat}
-          style={{ 
-            padding: "10px", 
-            marginBottom: "20px", 
-            background: "#0070f3", 
-            color: "white", 
-            border: "none", 
+          style={{
+            padding: "10px",
+            marginBottom: "20px",
+            background: "#0070f3",
+            color: "white",
+            border: "none",
             borderRadius: "4px",
             cursor: "pointer"
           }}>
@@ -155,8 +188,8 @@ export default function ChatPage() {
         </button>
         <div style={{ overflowY: "auto", flex: 1 }}>
           {chatHistory.map((chat) => (
-            <div 
-              key={chat.id} 
+            <div
+              key={chat.id}
               onClick={() => selectChat(chat.id)}
               style={{
                 padding: "12px",
@@ -168,7 +201,7 @@ export default function ChatPage() {
               }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div style={{ fontWeight: "bold", fontSize: "14px", flex: 1, paddingRight: "8px" }}>{chat.title}</div>
-                <button 
+                <button
                   onClick={(e) => handleDeleteChat(e, chat.id)}
                   style={{
                     background: "transparent",
@@ -189,6 +222,23 @@ export default function ChatPage() {
               </div>
             </div>
           ))}
+        </div>
+
+        {/* Info user + logout, diletakkan di bawah sidebar */}
+        <div style={{ borderTop: "1px solid #ddd", paddingTop: 12, marginTop: 12 }}>
+          {currentUser && (
+            <p style={{ margin: "0 0 8px", fontSize: 13, color: "#666" }}>
+              {currentUser.full_name || currentUser.email}
+              <br />
+              <Link href="/change-password">Ganti Password</Link>
+            </p>
+          )}
+          <button
+            onClick={handleLogout}
+            style={{ width: "100%", padding: "8px", background: "#eee", border: "1px solid #ccc", borderRadius: 4, cursor: "pointer" }}
+          >
+            Keluar
+          </button>
         </div>
       </div>
 
@@ -227,6 +277,17 @@ export default function ChatPage() {
         </div>
 
         <form onSubmit={handleSend} style={{ display: "flex", gap: 8 }}>
+          <select
+            value={llmProvider}
+            onChange={(e) => setLlmProvider(e.target.value)}
+            style={{ padding: 10, borderRadius: 4, border: "1px solid #ccc" }}
+          >
+            <option value="on-prem">On-Premise (Ollama)</option>
+            <option value="groq">Llama 3.1 8B (Groq)</option>
+            <option value="gemini">Gemini Flash (Google)</option>
+            <option value="mistral">Mistral Small</option>
+            <option value="cloudflare">Llama 3.3 70B (Cloudflare)</option>
+          </select>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -255,14 +316,14 @@ export default function ChatPage() {
           >
             {uploading ? "Mengunggah..." : "📄 Upload PDF"}
           </label>
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             disabled={loading}
-            style={{ 
-              padding: "10px 20px", 
-              background: "#0070f3", 
-              color: "white", 
-              border: "none", 
+            style={{
+              padding: "10px 20px",
+              background: "#0070f3",
+              color: "white",
+              border: "none",
               borderRadius: "4px",
               cursor: loading ? "not-allowed" : "pointer"
             }}>
