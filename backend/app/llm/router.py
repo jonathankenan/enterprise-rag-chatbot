@@ -5,7 +5,7 @@ INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
 Logika:
 1. Kalau prompt terindikasi sensitif -> PAKSA on-prem, apa pun pilihan user
    (ini prioritas keamanan, tidak bisa dilewati user).
-2. Kalau tidak sensitif -> ikuti pilihan user (on-prem / groq / gemini / auto).
+2. Kalau tidak sensitif -> ikuti pilihan user.
 """
 from dataclasses import dataclass
 
@@ -13,25 +13,23 @@ from app.config import settings
 from app.llm.local_llm import call_local_llm
 from app.llm.commercial_llm import call_commercial_llm
 
+# Provider commercial yang valid dipilih user (di luar "on-prem")
+COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
+
 
 @dataclass
 class LLMResult:
     reply: str
-    llm_used: str        # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
+    llm_used: str
     is_sensitive: bool
 
 
 def detect_sensitive(text: str) -> bool:
-    """
-    Deteksi sederhana: cek apakah prompt mengandung kata kunci sensitif.
-    (Versi Tingkat 2 nanti diganti dengan PII detector yang lebih andal.)
-    """
     lowered = text.lower()
     return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
 
 
 def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None) -> str:
-    """Gabungkan hasil retrieval (RAG) dengan pertanyaan user jadi satu prompt."""
     history_text = ""
     if chat_history:
         history_text = "CONVERSATION HISTORY:\n"
@@ -67,16 +65,11 @@ async def route_and_generate(
     user_message: str,
     context_chunks: list[str],
     chat_history: list = None,
-    preferred_provider: str = "auto",
+    preferred_provider: str = "on-prem",
 ) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
-    preferred_provider: pilihan user -> "auto" | "on-prem" | "groq" | "gemini"
-
-    1. Deteksi apakah prompt sensitif -> kalau ya, PAKSA on-prem
-    2. Kalau tidak sensitif, ikuti pilihan user
-    3. Susun prompt akhir (gabung dengan hasil RAG + history)
-    4. Panggil LLM yang sesuai
+    preferred_provider: "on-prem" | "groq" | "gemini" | "mistral" | "cloudflare"
     """
     is_sensitive = detect_sensitive(user_message)
     final_prompt = build_prompt(user_message, context_chunks, chat_history)
@@ -86,19 +79,14 @@ async def route_and_generate(
         reply = await call_local_llm(final_prompt)
         return LLMResult(reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True)
 
-    # Tidak sensitif -> ikuti pilihan user
     if preferred_provider == "on-prem":
         reply = await call_local_llm(final_prompt)
         return LLMResult(reply=reply, llm_used="on-prem", is_sensitive=False)
 
-    if preferred_provider == "groq":
-        reply = await call_commercial_llm(final_prompt, provider="groq")
-        return LLMResult(reply=reply, llm_used="commercial (groq)", is_sensitive=False)
+    if preferred_provider in COMMERCIAL_PROVIDERS:
+        reply = await call_commercial_llm(final_prompt, provider=preferred_provider)
+        return LLMResult(reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False)
 
-    if preferred_provider == "gemini":
-        reply = await call_commercial_llm(final_prompt, provider="gemini")
-        return LLMResult(reply=reply, llm_used="commercial (gemini)", is_sensitive=False)
-
-    # "auto" atau nilai tidak dikenali -> pakai default dari .env
-    reply = await call_commercial_llm(final_prompt, provider=None)
-    return LLMResult(reply=reply, llm_used=f"commercial ({settings.commercial_provider})", is_sensitive=False)
+    # Nilai tidak dikenali -> fallback aman ke on-prem
+    reply = await call_local_llm(final_prompt)
+    return LLMResult(reply=reply, llm_used="on-prem (fallback)", is_sensitive=False)

@@ -14,7 +14,7 @@ from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked
 from app.rag.vectorstore import retrieve_context
 from app.llm.router import route_and_generate
-from app.llm.commercial_llm import call_commercial_llm
+from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -79,7 +79,6 @@ async def send_message(
     if is_prompt_blocked(payload.content):
         raise HTTPException(status_code=400, detail="Pertanyaan mengandung konten yang tidak diizinkan")
 
-    # Ambil riwayat chat (maksimal 6 pesan / 3 pasang tanya jawab) sebelum menyimpan pesan baru
     chat_history = db.query(Message).filter(Message.chat_id == chat.id).order_by(Message.created_at.desc()).limit(6).all()
     chat_history.reverse()
 
@@ -87,9 +86,12 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    # Limit top_k to 5 to avoid 413 Payload Too Large from Groq API
     context_chunks = retrieve_context(payload.content, collection_name="kb_general", top_k=5)
-    result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
+
+    try:
+        result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
+    except CommercialLLMError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
     ai_msg = Message(
         chat_id=chat.id,
