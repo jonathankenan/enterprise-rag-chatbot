@@ -99,7 +99,7 @@ export const api = {
 
   getMessages: (chatId) => request(`/api/chat/${chatId}/messages`),
 
-  sendMessage: (chatId, content, llmProvider = "auto") =>
+  sendMessage: (chatId, content, llmProvider = "on-prem") =>
     request("/api/chat/message", {
       method: "POST",
       body: JSON.stringify({ chat_id: chatId, content, llm_provider: llmProvider }),

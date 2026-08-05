@@ -3,21 +3,20 @@
 INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
 
 Logika:
-1. Kalau prompt terindikasi sensitif -> PAKSA on-prem, apa pun pilihan user
-   (ini prioritas keamanan, tidak bisa dilewati user).
+1. Kalau prompt terindikasi sensitif (kata kunci ATAU PII, F2-04) -> PAKSA on-prem,
+   apa pun pilihan user (ini prioritas keamanan, tidak bisa dilewati user).
 2. Kalau tidak sensitif -> ikuti pilihan user.
 """
+import re
 from dataclasses import dataclass
 
 from app.config import settings
 from app.llm.local_llm import call_local_llm
 from app.llm.commercial_llm import call_commercial_llm
+from app.guardrail.pii_detector import contains_pii
 
-# Provider commercial yang valid dipilih user (di luar "on-prem")
 COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
-
-import re
 
 @dataclass
 class LLMResult:
@@ -28,8 +27,15 @@ class LLMResult:
 
 
 def detect_sensitive(text: str) -> bool:
+    """
+    Prompt dianggap sensitif kalau salah satu dari dua kondisi terpenuhi:
+    1. Mengandung kata kunci sensitif (misal "rahasia", "internal")
+    2. Mengandung PII (NIK, NPWP, kartu kredit, dll) — F2-04
+    """
     lowered = text.lower()
-    return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
+    has_keyword = any(keyword in lowered for keyword in settings.sensitive_keyword_list)
+    has_pii = contains_pii(text)
+    return has_keyword or has_pii
 
 
 def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None) -> str:
@@ -65,6 +71,15 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
     )
 
 
+def _extract_confidence(reply: str) -> tuple[str, int | None]:
+    confidence_score = None
+    match = re.search(r"\[CONFIDENCE:\s*(\d+)\]", reply, re.IGNORECASE)
+    if match:
+        confidence_score = int(match.group(1))
+        reply = re.sub(r"\[CONFIDENCE:\s*\d+\]", "", reply, flags=re.IGNORECASE).strip()
+    return reply, confidence_score
+
+
 async def route_and_generate(
     user_message: str,
     context_chunks: list[str],
@@ -78,23 +93,33 @@ async def route_and_generate(
     is_sensitive = detect_sensitive(user_message)
     final_prompt = build_prompt(user_message, context_chunks, chat_history)
 
-    # ATURAN KEAMANAN: data sensitif WAJIB on-prem, tidak peduli pilihan user
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
-        return LLMResult(reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True)
+        reply, confidence_score = _extract_confidence(reply)
+        return LLMResult(
+            reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True,
+            confidence_score=confidence_score,
+        )
 
     if preferred_provider == "on-prem":
         reply = await call_local_llm(final_prompt)
-        return LLMResult(reply=reply, llm_used="on-prem", is_sensitive=False)
+        reply, confidence_score = _extract_confidence(reply)
+        return LLMResult(
+            reply=reply, llm_used="on-prem", is_sensitive=False,
+            confidence_score=confidence_score,
+        )
 
     if preferred_provider in COMMERCIAL_PROVIDERS:
         reply = await call_commercial_llm(final_prompt, provider=preferred_provider)
-        return LLMResult(reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False)
+        reply, confidence_score = _extract_confidence(reply)
+        return LLMResult(
+            reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False,
+            confidence_score=confidence_score,
+        )
 
-    confidence_score = None
-    match = re.search(r"\[CONFIDENCE:\s*(\d+)\]", reply, re.IGNORECASE)
-    if match:
-        confidence_score = int(match.group(1))
-        reply = re.sub(r"\[CONFIDENCE:\s*\d+\]", "", reply, flags=re.IGNORECASE).strip()
-
-    return LLMResult(reply=reply, llm_used=llm_used, is_sensitive=is_sensitive, confidence_score=confidence_score)
+    reply = await call_local_llm(final_prompt)
+    reply, confidence_score = _extract_confidence(reply)
+    return LLMResult(
+        reply=reply, llm_used="on-prem (fallback)", is_sensitive=False,
+        confidence_score=confidence_score,
+    )
