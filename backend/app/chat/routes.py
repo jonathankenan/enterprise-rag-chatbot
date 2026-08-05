@@ -98,6 +98,7 @@ async def send_message(
         sender=SenderType.assistant,
         content=result.reply,
         llm_used=result.llm_used,
+        confidence_score=result.confidence_score,
     )
     db.add(ai_msg)
     db.commit()
@@ -116,6 +117,7 @@ async def send_message(
         reply=result.reply,
         llm_used=result.llm_used,
         is_sensitive=result.is_sensitive,
+        confidence_score=result.confidence_score,
         sources=context_chunks,
         new_title=new_title,
     )

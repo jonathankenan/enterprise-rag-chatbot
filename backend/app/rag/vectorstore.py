@@ -69,12 +69,18 @@ def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int
     if collection.count() == 0:
         return []
 
-    results = collection.query(query_texts=[query], n_results=min(top_k, collection.count()))
+    results = collection.query(
+        query_texts=[query], 
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas", "distances"]
+    )
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
-    
+    distances = results.get("distances", [[]])[0]
+
     formatted_chunks = []
-    for doc, meta in zip(documents, metadatas):
+    for doc, meta, dist in zip(documents, metadatas, distances):
+        
         filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
         formatted_chunks.append(f"[Source: {filename}]\n{doc}")
         

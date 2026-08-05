@@ -7,7 +7,7 @@ Ini menyimpan data TERSTRUKTUR: user, chat, pesan, metadata dokumen.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import enum
@@ -58,6 +58,7 @@ class Message(Base):
     content = Column(Text, nullable=False)
     # jejak dari mana jawaban berasal — berguna untuk debugging & transparansi
     llm_used = Column(String, nullable=True)      # "on-prem" | "commercial"
+    confidence_score = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     chat = relationship("Chat", back_populates="messages")
