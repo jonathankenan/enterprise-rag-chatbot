@@ -87,6 +87,7 @@ class MessageResponse(BaseModel):
     sender: str
     content: str
     llm_used: str | None
+    confidence_score: int | None = None
     created_at: datetime
 
     class Config:
@@ -98,5 +99,6 @@ class ChatReplyResponse(BaseModel):
     reply: str
     llm_used: str          # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
     is_sensitive: bool     # apakah terdeteksi sebagai data sensitif
+    confidence_score: int | None = None
     sources: list[str] = []  # potongan referensi dari RAG (opsional untuk F1)
     new_title: str | None = None  # Judul baru jika baru saja di-generate

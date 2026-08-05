@@ -17,11 +17,14 @@ from app.llm.commercial_llm import call_commercial_llm
 COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
 
+import re
+
 @dataclass
 class LLMResult:
     reply: str
     llm_used: str
     is_sensitive: bool
+    confidence_score: int | None = None
 
 
 def detect_sensitive(text: str) -> bool:
@@ -49,11 +52,12 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
         "You are a helpful and conversational AI assistant.\n"
         "You will be provided with a CONVERSATION HISTORY and some PROVIDED CONTEXT.\n\n"
         "CRITICAL INSTRUCTIONS:\n"
-        "1. If the PROVIDED CONTEXT is NOT directly relevant to the user's latest message, you MUST completely ignore it.\n"
-        "2. Do NOT mention the context, do NOT offer to help with topics from the context, and do NOT apologize for the context being irrelevant. Just act like the context doesn't exist and answer naturally.\n"
-        "3. You MUST respond in the exact same language that the user used in their latest message.\n"
-        "4. NEVER parrot or simply repeat what the user said. You must actually respond to it. If the user makes a statement, acknowledge it conversationally.\n"
-        "5. When answering based on the PROVIDED CONTEXT, be eloquent, professional, and thorough. Use complete sentences instead of short fragments. For example, instead of '99.5% uptime', say 'According to the provided document, the required system uptime is 99.5%.'\n\n"
+        "1. If the context information provided below contains the answer, use it to answer the question.\n"
+        "2. If the context is irrelevant or missing, you MUST still answer the user's question using your own internal knowledge as a general AI.\n"
+        "3. NEVER mention the words 'context', 'provided context', 'document', or explain how you got the answer. Just give the answer naturally.\n"
+        "4. You MUST respond in the exact same language that the user used in their latest message.\n"
+        "5. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n"
+        "6. IMPORTANT: You must self-evaluate your confidence in the answer. Your confidence score MUST reflect ONLY how helpful the provided context was. If you had to use your internal knowledge because the context was useless, your confidence score MUST be very low (e.g., 0-10). Append your confidence score at the very end of your response EXACTLY in this format: [CONFIDENCE: 85]. Do not add any extra text inside or around the brackets.\n\n"
         f"{history_text}"
         f"{context_text}"
         f"USER LATEST MESSAGE: {user_message}\n\n"
@@ -87,6 +91,10 @@ async def route_and_generate(
         reply = await call_commercial_llm(final_prompt, provider=preferred_provider)
         return LLMResult(reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False)
 
-    # Nilai tidak dikenali -> fallback aman ke on-prem
-    reply = await call_local_llm(final_prompt)
-    return LLMResult(reply=reply, llm_used="on-prem (fallback)", is_sensitive=False)
+    confidence_score = None
+    match = re.search(r"\[CONFIDENCE:\s*(\d+)\]", reply, re.IGNORECASE)
+    if match:
+        confidence_score = int(match.group(1))
+        reply = re.sub(r"\[CONFIDENCE:\s*\d+\]", "", reply, flags=re.IGNORECASE).strip()
+
+    return LLMResult(reply=reply, llm_used=llm_used, is_sensitive=is_sensitive, confidence_score=confidence_score)
