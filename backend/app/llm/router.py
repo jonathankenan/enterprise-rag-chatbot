@@ -1,6 +1,11 @@
 """
 [PENANGGUNG JAWAB: Anggota A]
 INI FUNGSI UTAMA F1-05: LLM Switching (On-Prem vs Commercial).
+
+Logika:
+1. Kalau prompt terindikasi sensitif -> PAKSA on-prem, apa pun pilihan user
+   (ini prioritas keamanan, tidak bisa dilewati user).
+2. Kalau tidak sensitif -> ikuti pilihan user (on-prem / groq / gemini / auto).
 """
 from dataclasses import dataclass
 
@@ -12,11 +17,15 @@ from app.llm.commercial_llm import call_commercial_llm
 @dataclass
 class LLMResult:
     reply: str
-    llm_used: str       # "on-prem" | "commercial"
+    llm_used: str        # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
     is_sensitive: bool
 
 
 def detect_sensitive(text: str) -> bool:
+    """
+    Deteksi sederhana: cek apakah prompt mengandung kata kunci sensitif.
+    (Versi Tingkat 2 nanti diganti dengan PII detector yang lebih andal.)
+    """
     lowered = text.lower()
     return any(keyword in lowered for keyword in settings.sensitive_keyword_list)
 
@@ -54,21 +63,42 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
     )
 
 
-async def route_and_generate(user_message: str, context_chunks: list[str], chat_history: list = None) -> LLMResult:
+async def route_and_generate(
+    user_message: str,
+    context_chunks: list[str],
+    chat_history: list = None,
+    preferred_provider: str = "auto",
+) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
-    1. Deteksi apakah prompt sensitif
-    2. Susun prompt akhir (gabung dengan hasil RAG + history)
-    3. Pilih LLM yang sesuai dan panggil
+    preferred_provider: pilihan user -> "auto" | "on-prem" | "groq" | "gemini"
+
+    1. Deteksi apakah prompt sensitif -> kalau ya, PAKSA on-prem
+    2. Kalau tidak sensitif, ikuti pilihan user
+    3. Susun prompt akhir (gabung dengan hasil RAG + history)
+    4. Panggil LLM yang sesuai
     """
     is_sensitive = detect_sensitive(user_message)
     final_prompt = build_prompt(user_message, context_chunks, chat_history)
 
+    # ATURAN KEAMANAN: data sensitif WAJIB on-prem, tidak peduli pilihan user
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
-        llm_used = "on-prem"
-    else:
-        reply = await call_commercial_llm(final_prompt)
-        llm_used = "commercial"
+        return LLMResult(reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True)
 
-    return LLMResult(reply=reply, llm_used=llm_used, is_sensitive=is_sensitive)
+    # Tidak sensitif -> ikuti pilihan user
+    if preferred_provider == "on-prem":
+        reply = await call_local_llm(final_prompt)
+        return LLMResult(reply=reply, llm_used="on-prem", is_sensitive=False)
+
+    if preferred_provider == "groq":
+        reply = await call_commercial_llm(final_prompt, provider="groq")
+        return LLMResult(reply=reply, llm_used="commercial (groq)", is_sensitive=False)
+
+    if preferred_provider == "gemini":
+        reply = await call_commercial_llm(final_prompt, provider="gemini")
+        return LLMResult(reply=reply, llm_used="commercial (gemini)", is_sensitive=False)
+
+    # "auto" atau nilai tidak dikenali -> pakai default dari .env
+    reply = await call_commercial_llm(final_prompt, provider=None)
+    return LLMResult(reply=reply, llm_used=f"commercial ({settings.commercial_provider})", is_sensitive=False)

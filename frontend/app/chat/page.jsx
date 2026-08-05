@@ -16,8 +16,8 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [llmProvider, setLlmProvider] = useState("on-prem");
 
-  // Load chat history on mount
   useEffect(() => {
     if (!api.isLoggedIn()) {
       router.push("/login");
@@ -106,7 +106,7 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const result = await api.sendMessage(chatId, userMessage.content);
+      const result = await api.sendMessage(chatId, userMessage.content, llmProvider);
 
       if (result.new_title) {
         loadChatHistory();
@@ -271,6 +271,15 @@ export default function ChatPage() {
         </div>
 
         <form onSubmit={handleSend} style={{ display: "flex", gap: 8 }}>
+          <select
+            value={llmProvider}
+            onChange={(e) => setLlmProvider(e.target.value)}
+            style={{ padding: 10, borderRadius: 4, border: "1px solid #ccc" }}
+          >
+            <option value="on-prem">On-Premise</option>
+            <option value="groq">Groq</option>
+            <option value="gemini">Gemini</option>
+          </select>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

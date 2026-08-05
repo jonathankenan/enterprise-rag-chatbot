@@ -99,10 +99,10 @@ export const api = {
 
   getMessages: (chatId) => request(`/api/chat/${chatId}/messages`),
 
-  sendMessage: (chatId, content) =>
+  sendMessage: (chatId, content, llmProvider = "auto") =>
     request("/api/chat/message", {
       method: "POST",
-      body: JSON.stringify({ chat_id: chatId, content }),
+      body: JSON.stringify({ chat_id: chatId, content, llm_provider: llmProvider }),
     }),
 
   uploadDocument: (file) => {
