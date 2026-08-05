@@ -16,8 +16,8 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [llmProvider, setLlmProvider] = useState("on-prem");
 
-  // Load chat history on mount
   useEffect(() => {
     if (!api.isLoggedIn()) {
       router.push("/login");
@@ -106,7 +106,7 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const result = await api.sendMessage(chatId, userMessage.content);
+      const result = await api.sendMessage(chatId, userMessage.content, llmProvider);
 
       if (result.new_title) {
         loadChatHistory();
@@ -118,6 +118,7 @@ export default function ChatPage() {
           sender: "assistant",
           content: result.reply,
           llm_used: result.llm_used,
+          confidence_score: result.confidence_score,
         },
       ]);
     } catch (err) {
@@ -263,6 +264,11 @@ export default function ChatPage() {
               {m.llm_used && (
                 <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
                   sumber: {m.llm_used}
+                  {m.confidence_score !== undefined && m.confidence_score !== null && (
+                    <span style={{ marginLeft: 8, fontWeight: "bold", color: m.confidence_score >= 80 ? "#2e7d32" : m.confidence_score >= 50 ? "#ed6c02" : "#d32f2f" }}>
+                      • Yakin: {m.confidence_score}%
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -271,6 +277,17 @@ export default function ChatPage() {
         </div>
 
         <form onSubmit={handleSend} style={{ display: "flex", gap: 8 }}>
+          <select
+            value={llmProvider}
+            onChange={(e) => setLlmProvider(e.target.value)}
+            style={{ padding: 10, borderRadius: 4, border: "1px solid #ccc" }}
+          >
+            <option value="on-prem">On-Premise (Ollama)</option>
+            <option value="groq">GPT-OSS 120B (Groq)</option>
+            <option value="gemini">Gemini Flash (Google)</option>
+            <option value="mistral">Mistral Small</option>
+            <option value="cloudflare">Llama 3.3 70B (Cloudflare)</option>
+          </select>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

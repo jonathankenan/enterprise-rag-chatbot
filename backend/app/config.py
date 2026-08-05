@@ -17,7 +17,10 @@ class Settings(BaseSettings):
     # LLM Commercial
     gemini_api_key: str = ""
     groq_api_key: str = ""
-    commercial_provider: str = "gemini"  # "gemini" | "groq"
+    mistral_api_key: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_account_id: str = ""
+    commercial_provider: str = "groq"  # default untuk fitur internal (mis. auto-generate judul chat)
 
     # LLM On-Premise
     ollama_base_url: str = "http://localhost:11434"

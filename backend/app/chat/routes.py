@@ -12,9 +12,10 @@ from app.models import Chat, Message, SenderType, User
 from app.schemas import ChatCreate, ChatResponse, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked
+from app.guardrail.prompt_injection import is_prompt_injection
 from app.rag.vectorstore import retrieve_context
 from app.llm.router import route_and_generate
-from app.llm.commercial_llm import call_commercial_llm
+from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -64,13 +65,14 @@ async def send_message(
     user: User = Depends(get_current_user),
 ):
     """
-    Endpoint utama chat — alur lengkap F1-03, F1-04, F1-05:
+    Endpoint utama chat — alur lengkap F1-03, F1-04, F1-05, F2-04:
     1. [B] Validasi chat milik user
-    2. [B] Guardrail — tolak kalau prompt terlarang
-    3. [B] Simpan pesan user ke database
-    4. [A] Retrieval — cari potongan dokumen relevan (RAG)
-    5. [A] LLM switching — pilih on-prem/commercial, hasilkan jawaban
-    6. [B] Simpan jawaban AI ke database
+    2. [B] Guardrail dasar — tolak kalau prompt terlarang (F1-04)
+    3. [B] Guardrail lanjutan — tolak kalau terdeteksi prompt injection (F2-04)
+    4. [B] Simpan pesan user ke database
+    5. [A] Retrieval — cari potongan dokumen relevan (RAG)
+    6. [A] LLM switching — pilih on-prem/commercial (PII otomatis dipaksa on-prem, F2-04)
+    7. [B] Simpan jawaban AI ke database
     """
     chat = db.query(Chat).filter(Chat.id == payload.chat_id, Chat.user_id == user.id).first()
     if not chat:
@@ -79,7 +81,9 @@ async def send_message(
     if is_prompt_blocked(payload.content):
         raise HTTPException(status_code=400, detail="Pertanyaan mengandung konten yang tidak diizinkan")
 
-    # Ambil riwayat chat (maksimal 6 pesan / 3 pasang tanya jawab) sebelum menyimpan pesan baru
+    if is_prompt_injection(payload.content):
+        raise HTTPException(status_code=400, detail="Prompt terdeteksi sebagai percobaan manipulasi instruksi sistem")
+
     chat_history = db.query(Message).filter(Message.chat_id == chat.id).order_by(Message.created_at.desc()).limit(6).all()
     chat_history.reverse()
 
@@ -87,15 +91,19 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    # Limit top_k to 5 to avoid 413 Payload Too Large from Groq API
     context_chunks = retrieve_context(payload.content, collection_name="kb_general", top_k=5)
-    result = await route_and_generate(payload.content, context_chunks, chat_history)
+
+    try:
+        result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
+    except CommercialLLMError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
     ai_msg = Message(
         chat_id=chat.id,
         sender=SenderType.assistant,
         content=result.reply,
         llm_used=result.llm_used,
+        confidence_score=result.confidence_score,
     )
     db.add(ai_msg)
     db.commit()
@@ -114,6 +122,7 @@ async def send_message(
         reply=result.reply,
         llm_used=result.llm_used,
         is_sensitive=result.is_sensitive,
+        confidence_score=result.confidence_score,
         sources=context_chunks,
         new_title=new_title,
     )

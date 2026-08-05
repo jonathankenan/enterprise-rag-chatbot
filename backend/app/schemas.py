@@ -79,6 +79,7 @@ class ChatResponse(BaseModel):
 class MessageCreate(BaseModel):
     chat_id: str
     content: str
+    llm_provider: str = "auto"  # "auto" | "on-prem" | "groq" | "gemini"
 
 
 class MessageResponse(BaseModel):
@@ -86,6 +87,7 @@ class MessageResponse(BaseModel):
     sender: str
     content: str
     llm_used: str | None
+    confidence_score: int | None = None
     created_at: datetime
 
     class Config:
@@ -95,7 +97,8 @@ class MessageResponse(BaseModel):
 class ChatReplyResponse(BaseModel):
     """Dikembalikan setelah user kirim pesan — berisi jawaban AI + metadata."""
     reply: str
-    llm_used: str          # "on-prem" atau "commercial"
+    llm_used: str          # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
     is_sensitive: bool     # apakah terdeteksi sebagai data sensitif
+    confidence_score: int | None = None
     sources: list[str] = []  # potongan referensi dari RAG (opsional untuk F1)
     new_title: str | None = None  # Judul baru jika baru saja di-generate
