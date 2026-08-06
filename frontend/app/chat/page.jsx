@@ -134,7 +134,7 @@ export default function ChatPage() {
 
     setUploading(true);
     try {
-      const result = await api.uploadDocument(file);
+      const result = await api.uploadDocument(file, chatId);
       setMessages((prev) => [
         ...prev,
         {
