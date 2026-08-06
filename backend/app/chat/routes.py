@@ -91,7 +91,15 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    context_chunks = retrieve_context(payload.content, chat_id=chat.id, collection_name="kb_general", top_k=5)
+    from app.llm.router import get_standalone_query
+    search_query = await get_standalone_query(payload.content, chat_history, payload.llm_provider)
+
+    query_lower = search_query.lower()
+    if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
+        from app.rag.vectorstore import get_all_session_chunks
+        context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
+    else:
+        context_chunks = retrieve_context(search_query, chat_id=chat.id, collection_name="kb_general", top_k=10)
 
     try:
         result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
