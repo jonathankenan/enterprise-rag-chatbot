@@ -78,3 +78,28 @@ def retrieve_context(query: str, chat_id: str, collection_name: str = "kb_genera
         formatted_chunks.append(f"[Source: {filename}]\n{doc}")
 
     return formatted_chunks
+
+
+def get_all_session_chunks(chat_id: str, collection_name: str = "kb_general", limit: int = 15) -> list[str]:
+    """
+    Bypass semantic search and retrieve chunks directly for a specific session.
+    Useful for 'summarize' queries di mana semantic match gagal.
+    """
+    collection = get_collection(collection_name)
+    if collection.count() == 0:
+        return []
+
+    results = collection.get(
+        where={"chat_id": chat_id},
+        limit=limit,
+        include=["documents", "metadatas"]
+    )
+    documents = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+
+    formatted_chunks = []
+    for doc, meta in zip(documents, metadatas):
+        filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
+        formatted_chunks.append(f"[Source: {filename}]\n{doc}")
+
+    return formatted_chunks
