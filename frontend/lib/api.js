@@ -105,9 +105,12 @@ export const api = {
       body: JSON.stringify({ chat_id: chatId, content, llm_provider: llmProvider }),
     }),
 
-  uploadDocument: (file) => {
+  uploadDocument: (file, chatId) => {
     const formData = new FormData();
     formData.append("file", file);
+    if (chatId) {
+      formData.append("chat_id", chatId);
+    }
     const token = getToken();
     return fetch(`${API_URL}/api/documents/upload`, {
       method: "POST",

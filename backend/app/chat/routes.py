@@ -91,7 +91,7 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    context_chunks = retrieve_context(payload.content, collection_name="kb_general", top_k=5)
+    context_chunks = retrieve_context(payload.content, chat_id=chat.id, collection_name="kb_general", top_k=5)
 
     try:
         result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
