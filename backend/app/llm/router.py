@@ -95,6 +95,8 @@ async def route_and_generate(
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
         reply, confidence_score = _extract_confidence(reply)
+        if not context_chunks:
+            confidence_score = None
         return LLMResult(
             reply=reply, llm_used="on-prem (data sensitif)", is_sensitive=True,
             confidence_score=confidence_score,
@@ -103,6 +105,8 @@ async def route_and_generate(
     if preferred_provider == "on-prem":
         reply = await call_local_llm(final_prompt)
         reply, confidence_score = _extract_confidence(reply)
+        if not context_chunks:
+            confidence_score = None
         return LLMResult(
             reply=reply, llm_used="on-prem", is_sensitive=False,
             confidence_score=confidence_score,
@@ -111,6 +115,8 @@ async def route_and_generate(
     if preferred_provider in COMMERCIAL_PROVIDERS:
         reply = await call_commercial_llm(final_prompt, provider=preferred_provider)
         reply, confidence_score = _extract_confidence(reply)
+        if not context_chunks:
+            confidence_score = None
         return LLMResult(
             reply=reply, llm_used=f"commercial ({preferred_provider})", is_sensitive=False,
             confidence_score=confidence_score,
@@ -118,6 +124,8 @@ async def route_and_generate(
 
     reply = await call_local_llm(final_prompt)
     reply, confidence_score = _extract_confidence(reply)
+    if not context_chunks:
+        confidence_score = None
     return LLMResult(
         reply=reply, llm_used="on-prem (fallback)", is_sensitive=False,
         confidence_score=confidence_score,

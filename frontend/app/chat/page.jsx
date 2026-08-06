@@ -264,7 +264,7 @@ export default function ChatPage() {
               {m.llm_used && (
                 <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
                   sumber: {m.llm_used}
-                  {m.confidence_score !== undefined && m.confidence_score !== null && (
+                  {m.confidence_score !== undefined && m.confidence_score !== null && m.confidence_score > 20 && (
                     <span style={{ marginLeft: 8, fontWeight: "bold", color: m.confidence_score >= 80 ? "#2e7d32" : m.confidence_score >= 50 ? "#ed6c02" : "#d32f2f" }}>
                       • Yakin: {m.confidence_score}%
                     </span>
