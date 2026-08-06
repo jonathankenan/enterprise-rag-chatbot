@@ -218,7 +218,7 @@ export default function ChatPage() {
                 </button>
               </div>
               <div style={{ fontSize: "11px", color: "#888", marginTop: "4px" }}>
-                {new Date(chat.created_at).toLocaleString()}
+                {new Date(chat.created_at.endsWith("Z") ? chat.created_at : chat.created_at + "Z").toLocaleString()}
               </div>
             </div>
           ))}
