@@ -73,3 +73,14 @@ class Document(Base):
     filename = Column(String, nullable=False)
     collection_name = Column(String, default="kb_general")  # nama koleksi di vector DB
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class AuditLog(Base):
+    """Jejak aktivitas guardrail — F2-04, untuk kebutuhan audit/compliance."""
+    __tablename__ = "audit_logs"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    event_type = Column(String, nullable=False)
+    severity = Column(String, nullable=False, default="low")
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

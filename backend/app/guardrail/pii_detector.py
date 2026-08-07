@@ -1,33 +1,173 @@
 """
 [PENANGGUNG JAWAB: Anggota B]
-Deteksi PII (Personally Identifiable Information) — bagian dari F2-04.
-Pendekatan berbasis regex untuk pola data pribadi umum di Indonesia,
-bukan NLP model besar — lebih ringan dan cukup akurat untuk pola terstruktur.
+Deteksi & masking PII (F2-04) — Microsoft Presidio + recognizer kustom
+untuk pola data identitas Indonesia yang lengkap.
+
+Catatan desain: entitas PERSON (nama orang) SENGAJA TIDAK dimasukkan ke
+_TARGET_ENTITIES. Model NLP Bahasa Inggris (en_core_web_sm) terbukti sering
+salah mengira kata/istilah Indonesia sebagai nama orang (mis. "NIK", "haloo"),
+dan whitelist manual tidak bisa mengejar semua variasi/typo yang mungkin
+muncul. Karena nama tunggal juga PII yang relatif lemah dibanding data
+terstruktur (NIK, email, kartu kredit, dll), risiko false-positive dianggap
+lebih merugikan (memaksa ke model kecil secara keliru) daripada manfaat
+proteksinya. Fokus deteksi tetap pada data terstruktur yang akurasinya tinggi.
+
+Prasyarat instalasi:
+    pip install presidio-analyzer spacy
+    python -m spacy download en_core_web_sm
 """
-import re
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-# Setiap pola dipasangkan dengan nama kategorinya, untuk keperluan logging/audit
-PII_PATTERNS = {
-    "NIK/KTP": re.compile(r"\b\d{16}\b"),
-    "NPWP": re.compile(r"\b\d{2}\.\d{3}\.\d{3}\.\d-\d{3}\.\d{3}\b|\b\d{15}\b"),
-    "Kartu Kredit": re.compile(r"\b(?:\d[ -]?){13,16}\b"),
-    "Nomor Telepon": re.compile(r"\b(?:\+62|62|0)8\d{8,11}\b"),
-    "Email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+_nlp_config = {
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
 }
+_nlp_engine = NlpEngineProvider(nlp_configuration=_nlp_config).create_engine()
+_analyzer = AnalyzerEngine(nlp_engine=_nlp_engine)
+
+# ---------- Recognizer kustom untuk pola identitas Indonesia ----------
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_NIK",
+    patterns=[Pattern(name="nik", regex=r"\b\d{16}\b", score=0.75)],
+    context=["nik", "ktp", "identitas"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_KK",
+    patterns=[Pattern(name="kk", regex=r"\b\d{16}\b", score=0.4)],
+    context=["kk", "kartu keluarga", "nomor kk"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_NPWP",
+    patterns=[
+        Pattern(name="npwp_formatted", regex=r"\b\d{2}\.\d{3}\.\d{3}\.\d-\d{3}\.\d{3}\b", score=0.9),
+        Pattern(name="npwp_plain", regex=r"\b\d{15,16}\b", score=0.3),
+    ],
+    context=["npwp", "pajak", "wajib pajak"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_PHONE",
+    patterns=[Pattern(name="id_phone", regex=r"\b(?:\+62|62|0)8\d{8,11}\b", score=0.8)],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_SIM",
+    patterns=[Pattern(name="sim", regex=r"\b\d{12,14}\b", score=0.3)],
+    context=["sim", "surat izin mengemudi"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_PASPOR",
+    patterns=[Pattern(name="paspor", regex=r"\b[A-Za-z]{1,2}\d{6,7}\b", score=0.55)],
+    context=["paspor", "passport"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_BPJS",
+    patterns=[Pattern(name="bpjs", regex=r"\b\d{13}\b", score=0.4)],
+    context=["bpjs", "jaminan kesehatan", "jaminan sosial"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_REKENING_BANK",
+    patterns=[Pattern(name="rekening", regex=r"\b\d{9,16}\b", score=0.25)],
+    context=["rekening", "no rek", "nomor rekening", "bank"],
+))
+
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="ID_PLAT_KENDARAAN",
+    patterns=[Pattern(
+        name="plat_nomor",
+        regex=r"\b[A-Z]{1,2}\s?\d{1,4}\s?[A-Z]{1,3}\b",
+        score=0.6,
+    )],
+    context=["plat", "nomor polisi", "kendaraan"],
+))
+
+# Recognizer email kustom dengan skor tinggi — mengalahkan skor entitas lain
+# yang mungkin tumpang tindih pada bagian username email.
+_analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="EMAIL_ADDRESS",
+    patterns=[Pattern(
+        name="email_custom_high_confidence",
+        regex=r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        score=0.95,
+    )],
+))
+
+# Entitas target — PERSON SENGAJA TIDAK disertakan (lihat catatan desain di atas).
+_TARGET_ENTITIES = [
+    "ID_NIK", "ID_KK", "ID_NPWP", "ID_PHONE", "ID_SIM", "ID_PASPOR",
+    "ID_BPJS", "ID_REKENING_BANK", "ID_PLAT_KENDARAAN",
+    "EMAIL_ADDRESS", "CREDIT_CARD", "PHONE_NUMBER", "IP_ADDRESS",
+]
 
 
-def detect_pii_types(text: str) -> list[str]:
+def _remove_overlaps(entities):
+    """Kalau ada beberapa entitas yang tumpang tindih posisinya, ambil yang skornya tertinggi."""
+    sorted_by_score = sorted(entities, key=lambda e: e.score, reverse=True)
+    selected = []
+    for e in sorted_by_score:
+        overlap = any(not (e.end <= s.start or e.start >= s.end) for s in selected)
+        if not overlap:
+            selected.append(e)
+    return selected
+
+
+def detect_pii_entities(text: str) -> list[dict]:
     """
-    Kembalikan daftar KATEGORI PII yang terdeteksi dalam teks
-    (bisa lebih dari satu kategori sekaligus).
+    Kembalikan daftar entitas PII yang terdeteksi (skor >= 0.5).
+    Ini SATU-SATUNYA fungsi yang menjalankan Presidio secara langsung —
+    dipakai baik untuk keputusan (apakah ada PII?), masking, maupun detail audit log,
+    supaya Presidio tidak dijalankan berulang kali untuk teks yang sama.
     """
-    found = []
-    for category, pattern in PII_PATTERNS.items():
-        if pattern.search(text):
-            found.append(category)
-    return found
+    raw = _analyzer.analyze(text=text, language="en", entities=_TARGET_ENTITIES)
+    clean = _remove_overlaps(raw)
+    return [
+        {"type": e.entity_type, "start": e.start, "end": e.end, "score": round(e.score, 2)}
+        for e in clean
+        if e.score >= 0.5
+    ]
 
 
-def contains_pii(text: str) -> bool:
-    """Cek cepat: apakah teks mengandung PII apa pun."""
-    return len(detect_pii_types(text)) > 0
+def mask_pii(text: str, entities: list[dict] | None = None) -> tuple[str, dict[str, str]]:
+    """
+    Ganti setiap PII dengan placeholder unik, mis. [ID_NIK_1].
+    Kembalikan teks yang sudah di-mask + mapping placeholder -> nilai asli
+    (dipakai nanti oleh demask() untuk mengembalikan ke nilai asli).
+
+    entities: kalau sudah dihitung sebelumnya lewat detect_pii_entities(),
+              berikan di sini supaya Presidio tidak dijalankan ulang.
+              Kalau None, akan dihitung otomatis di dalam fungsi ini.
+    """
+    if entities is None:
+        entities = detect_pii_entities(text)
+
+    counters: dict[str, int] = {}
+    mapping: dict[str, str] = {}
+    replacements = []
+
+    for e in sorted(entities, key=lambda x: x["start"]):
+        original_value = text[e["start"]:e["end"]]
+        counters[e["type"]] = counters.get(e["type"], 0) + 1
+        placeholder = f"[{e['type']}_{counters[e['type']]}]"
+        mapping[placeholder] = original_value
+        replacements.append((e["start"], e["end"], placeholder))
+
+    # Ganti dari BELAKANG ke DEPAN supaya index karakter tidak bergeser
+    masked_text = text
+    for start, end, placeholder in sorted(replacements, key=lambda r: r[0], reverse=True):
+        masked_text = masked_text[:start] + placeholder + masked_text[end:]
+
+    return masked_text, mapping
+
+
+def demask(text: str, mapping: dict[str, str]) -> str:
+    """Kembalikan semua placeholder [TYPE_n] jadi nilai aslinya."""
+    for placeholder, original_value in mapping.items():
+        text = text.replace(placeholder, original_value)
+    return text
