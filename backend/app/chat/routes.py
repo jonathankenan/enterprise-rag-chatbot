@@ -134,3 +134,46 @@ async def send_message(
         sources=context_chunks,
         new_title=new_title,
     )
+
+
+from fastapi.responses import Response
+from app.chat.pdf_export import generate_pdf
+
+@router.get("/{chat_id}/export-pdf")
+def export_chat_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """[B] Ekspor percakapan ke PDF."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+        
+    messages = chat.messages
+    if not messages:
+        raise HTTPException(status_code=400, detail="Tidak ada pesan untuk diekspor")
+
+    # Determine what models were used in this chat
+    models_used = set(msg.llm_used for msg in messages if msg.llm_used)
+    model_str = ", ".join(models_used) if models_used else "Various"
+
+    formatted_messages = []
+    for msg in messages:
+        formatted_messages.append({
+            "role": msg.sender.value,
+            "content": msg.content
+        })
+        
+    try:
+        pdf_bytes = generate_pdf(
+            session_title=chat.title or "Chat Session", 
+            messages=formatted_messages, 
+            model_used=model_str
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal generate PDF: {str(e)}")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="chat_{chat_id}_export.pdf"'
+        }
+    )
