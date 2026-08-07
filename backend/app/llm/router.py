@@ -100,6 +100,45 @@ def _extract_confidence(reply: str) -> tuple[str, int | None]:
     return reply, confidence_score
 
 
+async def get_standalone_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> str:
+    """
+    [DARI TEMAN ANDA] Kondensasikan riwayat chat + pertanyaan terbaru jadi satu
+    query pencarian mandiri. Membuang basa-basi percakapan (mis. "makasih",
+    "terus gimana") supaya hasil pencarian vector database lebih akurat.
+    """
+    if not chat_history:
+        return user_message
+
+    history_text = ""
+    for msg in chat_history:
+        sender = "User" if msg.sender.value == "user" else "Assistant"
+        history_text += f"{sender}: {msg.content}\n"
+
+    prompt = f"""
+Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone search query.
+Strip conversational filler like 'here it is', 'thanks', or 'can you tell me now'.
+Respond ONLY with the standalone query, nothing else.
+Chat History:
+{history_text}
+Follow-up Input: {user_message}
+Standalone Query:"""
+
+    if preferred_provider in COMMERCIAL_PROVIDERS:
+        try:
+            query = await call_commercial_llm(prompt, provider=preferred_provider)
+            return query.strip()
+        except Exception:
+            pass
+
+    try:
+        query = await call_local_llm(prompt)
+        return query.strip()
+    except Exception:
+        pass
+
+    return user_message
+
+
 async def route_and_generate(
     user_message: str,
     context_chunks: list[str],
@@ -141,6 +180,14 @@ async def route_and_generate(
         confidence_score = None
     else:
         reply, confidence_score = _extract_confidence(reply)
+
+        # [DARI TEMAN ANDA] Kalau tidak ada context sama sekali (mis. belum ada
+        # dokumen di-upload / retrieval kosong), confidence score tidak relevan
+        # untuk ditampilkan -> paksa None supaya badge "Yakin: X%" tidak muncul
+        # secara membingungkan pada percakapan santai/umum.
+        if not context_chunks:
+            confidence_score = None
+
         # ---------- AFTER LLM: demask PII kembali ke data asli ----------
         if pii_mapping:
             reply = demask(reply, pii_mapping)
