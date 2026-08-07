@@ -4,7 +4,7 @@ Endpoint ini menggabungkan:
 - Fungsi dari Anggota B: autentikasi, guardrail (F1-04, F2-04), audit log, simpan/ambil dari database
 - Fungsi dari Anggota A: retrieval RAG, LLM switching (F1-05)
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -17,6 +17,7 @@ from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.rag.vectorstore import retrieve_context
 from app.llm.router import route_and_generate
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
+from app.chat.pdf_export import generate_pdf
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -180,4 +181,33 @@ async def send_message(
         pii_detected=result.pii_detected,
         sources=context_chunks,
         new_title=new_title,
+    )
+
+@router.get("/{chat_id}/export-pdf")
+def export_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """[B] Ekspor riwayat percakapan menjadi PDF."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+
+    messages = [
+        {"role": "user" if msg.sender == SenderType.user else "assistant", "content": msg.content}
+        for msg in chat.messages
+    ]
+
+    model_used = "Various"
+    for msg in reversed(chat.messages):
+        if msg.sender == SenderType.assistant and msg.llm_used:
+            model_used = msg.llm_used
+            break
+
+    try:
+        pdf_bytes = generate_pdf(session_title=chat.title, messages=messages, model_used=model_used)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal generate PDF: {str(e)}")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="chat_{chat_id}.pdf"'}
     )
