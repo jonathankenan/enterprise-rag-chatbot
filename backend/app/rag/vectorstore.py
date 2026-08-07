@@ -41,18 +41,18 @@ def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list[str]
     return [c for c in chunks if c.strip()]
 
 
-def index_document(text: str, doc_id: str, filename: str, collection_name: str = "kb_general"):
+def index_document(text: str, doc_id: str, filename: str, chat_id: str, collection_name: str = "kb_general"):
     collection = get_collection(collection_name)
     chunks = chunk_text(text)
 
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
-    metadatas = [{"filename": filename, "doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
+    metadatas = [{"filename": filename, "doc_id": doc_id, "chunk_index": i, "chat_id": chat_id} for i in range(len(chunks))]
 
     collection.add(documents=chunks, ids=ids, metadatas=metadatas)
     return len(chunks)
 
 
-def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int = 10) -> list[str]:
+def retrieve_context(query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10) -> list[str]:
     """
     Fungsi RETRIEVAL — inti dari "R" di RAG.
     Cari potongan teks yang paling relevan secara makna dengan pertanyaan user.
@@ -64,6 +64,7 @@ def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int
     results = collection.query(
         query_texts=[query], 
         n_results=min(top_k, collection.count()),
+        where={"chat_id": chat_id},
         include=["documents", "metadatas", "distances"]
     )
     documents = results.get("documents", [[]])[0]
@@ -73,6 +74,31 @@ def retrieve_context(query: str, collection_name: str = "kb_general", top_k: int
     formatted_chunks = []
     for doc, meta, dist in zip(documents, metadatas, distances):
         
+        filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
+        formatted_chunks.append(f"[Source: {filename}]\n{doc}")
+
+    return formatted_chunks
+
+
+def get_all_session_chunks(chat_id: str, collection_name: str = "kb_general", limit: int = 15) -> list[str]:
+    """
+    Bypass semantic search and retrieve chunks directly for a specific session.
+    Useful for 'summarize' queries di mana semantic match gagal.
+    """
+    collection = get_collection(collection_name)
+    if collection.count() == 0:
+        return []
+
+    results = collection.get(
+        where={"chat_id": chat_id},
+        limit=limit,
+        include=["documents", "metadatas"]
+    )
+    documents = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+
+    formatted_chunks = []
+    for doc, meta in zip(documents, metadatas):
         filename = meta.get("filename", "Unknown Document") if meta else "Unknown Document"
         formatted_chunks.append(f"[Source: {filename}]\n{doc}")
 

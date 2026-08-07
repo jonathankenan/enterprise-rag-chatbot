@@ -134,7 +134,7 @@ export default function ChatPage() {
 
     setUploading(true);
     try {
-      const result = await api.uploadDocument(file);
+      const result = await api.uploadDocument(file, chatId);
       setMessages((prev) => [
         ...prev,
         {
@@ -218,7 +218,7 @@ export default function ChatPage() {
                 </button>
               </div>
               <div style={{ fontSize: "11px", color: "#888", marginTop: "4px" }}>
-                {new Date(chat.created_at).toLocaleString()}
+                {new Date(chat.created_at.endsWith("Z") ? chat.created_at : chat.created_at + "Z").toLocaleString()}
               </div>
             </div>
           ))}
@@ -264,9 +264,9 @@ export default function ChatPage() {
               {m.llm_used && (
                 <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
                   sumber: {m.llm_used}
-                  {m.confidence_score !== undefined && m.confidence_score !== null && (
+                  {m.confidence_score !== undefined && m.confidence_score !== null && m.confidence_score > 20 && (
                     <span style={{ marginLeft: 8, fontWeight: "bold", color: m.confidence_score >= 80 ? "#2e7d32" : m.confidence_score >= 50 ? "#ed6c02" : "#d32f2f" }}>
-                      • Yakin: {m.confidence_score}%
+                      • keyakinan: {m.confidence_score}%
                     </span>
                   )}
                 </div>
