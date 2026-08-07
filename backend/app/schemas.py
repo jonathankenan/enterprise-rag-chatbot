@@ -97,8 +97,9 @@ class MessageResponse(BaseModel):
 class ChatReplyResponse(BaseModel):
     """Dikembalikan setelah user kirim pesan — berisi jawaban AI + metadata."""
     reply: str
-    llm_used: str          # label yang ditampilkan ke user, mis. "on-prem", "commercial (groq)"
-    is_sensitive: bool     # apakah terdeteksi sebagai data sensitif
+    llm_used: str
+    is_sensitive: bool
     confidence_score: int | None = None
-    sources: list[str] = []  # potongan referensi dari RAG (opsional untuk F1)
-    new_title: str | None = None  # Judul baru jika baru saja di-generate
+    pii_detected: bool = False
+    sources: list[str] = []
+    new_title: str | None = None
