@@ -8,15 +8,40 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Integer
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import enum
 
 from app.database import Base
+from app.guardrail.encryption import encrypt_text, decrypt_text
 
 
 def gen_uuid():
     return str(uuid.uuid4())
+
+
+class EncryptedText(TypeDecorator):
+    """
+    Tipe kolom SQLAlchemy yang transparan mengenkripsi nilai saat ditulis ke
+    DB dan mendekripsi saat dibaca kembali — lihat app/guardrail/encryption.py
+    untuk penjelasan lengkap (SRS FCR-003 poin 3.k: enkripsi at-rest).
+    Dipakai untuk Message.content supaya kode di chat/routes.py TIDAK perlu
+    tahu apa pun soal enkripsi — cukup baca/tulis `message.content` seperti
+    string biasa, encrypt/decrypt terjadi otomatis di level ORM.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        return encrypt_text(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return decrypt_text(value)
 
 
 class User(Base):
@@ -55,7 +80,17 @@ class Message(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     chat_id = Column(UUID(as_uuid=False), ForeignKey("chats.id"), nullable=False)
     sender = Column(Enum(SenderType), nullable=False)
-    content = Column(Text, nullable=False)
+    # content menyimpan versi MASKED kalau ada PII (SRS FCR-003 poin 3.j:
+    # "data yang disimpan kedalam histori adalah informasi yang sudah
+    # dimasking"). Placeholder [TYPE_n] di sini dipetakan balik lewat
+    # pii_mapping saat perlu ditampilkan ke pemilik chat yang sah.
+    content = Column(EncryptedText, nullable=False)
+    # Mapping placeholder -> nilai asli, format JSON: {"[ID_NIK_1]": "3271...", ...}.
+    # None kalau pesan ini tidak mengandung PII sama sekali. WAJIB EncryptedText
+    # (bukan Text biasa) — kolom ini secara harfiah menyimpan nilai PII asli,
+    # jadi kalau tidak dienkripsi, tujuan masking content di atas jadi percuma
+    # (orang tinggal baca kolom sebelah).
+    pii_mapping = Column(EncryptedText, nullable=True)
     # jejak dari mana jawaban berasal — berguna untuk debugging & transparansi
     llm_used = Column(String, nullable=True)      # "on-prem" | "commercial"
     confidence_score = Column(Integer, nullable=True)

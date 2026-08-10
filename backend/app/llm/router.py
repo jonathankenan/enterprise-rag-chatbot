@@ -157,13 +157,20 @@ async def route_and_generate(
     context_chunks: list[str],
     chat_history: list = None,
     preferred_provider: str = "on-prem",
+    pii_entities: list[dict] | None = None,
 ) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
     preferred_provider: "on-prem" | "groq" | "gemini" | "mistral" | "cloudflare"
+    pii_entities: kalau caller (chat/routes.py) sudah menjalankan
+      detect_pii_entities(user_message) sendiri (mis. untuk keperluan masking
+      sebelum simpan ke histori — lihat SRS 3.j), berikan hasilnya di sini
+      supaya Presidio TIDAK dijalankan ulang untuk teks yang sama. Kalau None,
+      dihitung sendiri seperti sebelumnya (backward compatible).
     """
     # ---------- Deteksi PII SEKALI SAJA — hasilnya dipakai berulang di bawah ----------
-    pii_entities = detect_pii_entities(user_message)
+    if pii_entities is None:
+        pii_entities = detect_pii_entities(user_message)
     pii_detected = len(pii_entities) > 0
 
     is_sensitive = detect_sensitive(user_message, pii_entities)

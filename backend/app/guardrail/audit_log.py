@@ -17,7 +17,8 @@ class EventType:
     INJECTION_BLOCKED = "injection_blocked"      # F2-04: prompt injection
     PII_DETECTED = "pii_detected"                # F2-04: PII terdeteksi & di-mask
     OUTPUT_BLOCKED = "output_blocked"            # F2-04: jawaban AI diblokir
-    RATE_LIMIT_HIT = "rate_limit_hit"            # F1-01: login gagal berulang
+    DOCUMENT_BLOCKED = "document_blocked"        # F2-04: dokumen upload ditolak guardrail
+    RATE_LIMIT_HIT = "rate_limit_hit"            # F1-01 (login gagal berulang) & F2-04 (chat message rate limit)
     LOGIN_FAILED = "login_failed"
     LOGIN_SUCCESS = "login_success"
 
@@ -35,6 +36,7 @@ _SEVERITY_MAP = {
     EventType.INJECTION_BLOCKED: Severity.MEDIUM,
     EventType.PII_DETECTED: Severity.LOW,
     EventType.OUTPUT_BLOCKED: Severity.MEDIUM,
+    EventType.DOCUMENT_BLOCKED: Severity.MEDIUM,
     EventType.RATE_LIMIT_HIT: Severity.HIGH,
     EventType.LOGIN_FAILED: Severity.LOW,
     EventType.LOGIN_SUCCESS: Severity.LOW,

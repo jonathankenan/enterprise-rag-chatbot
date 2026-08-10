@@ -34,11 +34,16 @@ _analyzer.registry.add_recognizer(PatternRecognizer(
     context=["nik", "ktp", "identitas"],
 ))
 
-_analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="ID_KK",
-    patterns=[Pattern(name="kk", regex=r"\b\d{16}\b", score=0.4)],
-    context=["kk", "kartu keluarga", "nomor kk"],
-))
+# CATATAN (pasca-audit): recognizer ID_KK SENGAJA DIHAPUS. Nomor KK dan NIK
+# di Indonesia sama-sama 16 digit — regex-nya identik dengan ID_NIK di atas.
+# Karena _remove_overlaps() di bawah selalu memilih skor tertinggi saat dua
+# entitas bertumpuk posisinya, ID_KK (skor 0.4) tidak akan PERNAH menang
+# melawan ID_NIK (skor 0.75) untuk angka 16-digit manapun — recognizer ini
+# dulu ada di kode tapi secara efektif tidak pernah bisa terpicu (dead code).
+# Bukannya membiarkan recognizer yang terlihat aktif padahal tidak pernah
+# jalan, lebih jujur dihapus: angka 16-digit tetap terdeteksi sebagai PII
+# lewat ID_NIK, hanya labelnya generik karena pola angka semata memang
+# tidak bisa membedakan NIK vs KK tanpa kata konteks tambahan di sekitarnya.
 
 _analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="ID_NPWP",
@@ -101,7 +106,7 @@ _analyzer.registry.add_recognizer(PatternRecognizer(
 
 # Entitas target — PERSON SENGAJA TIDAK disertakan (lihat catatan desain di atas).
 _TARGET_ENTITIES = [
-    "ID_NIK", "ID_KK", "ID_NPWP", "ID_PHONE", "ID_SIM", "ID_PASPOR",
+    "ID_NIK", "ID_NPWP", "ID_PHONE", "ID_SIM", "ID_PASPOR",
     "ID_BPJS", "ID_REKENING_BANK", "ID_PLAT_KENDARAAN",
     "EMAIL_ADDRESS", "CREDIT_CARD", "PHONE_NUMBER", "IP_ADDRESS",
 ]

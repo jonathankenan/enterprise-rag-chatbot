@@ -74,7 +74,13 @@ async def _call_gemini(prompt: str) -> str:
             response = await client.post(
                 url,
                 params={"key": settings.gemini_api_key},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    # Guardrail SRS Model Usage Policy poin b: batasi panjang
+                    # response supaya token commercial tidak membengkak tanpa
+                    # kendali (sebelumnya tidak pernah diset sama sekali).
+                    "generationConfig": {"maxOutputTokens": settings.max_response_tokens_commercial},
+                },
             )
             response.raise_for_status()
             data = response.json()
@@ -116,6 +122,8 @@ async def _call_openai_compatible(
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
+                    # Guardrail SRS Model Usage Policy poin b (lihat catatan di _call_gemini)
+                    "max_tokens": settings.max_response_tokens_commercial,
                 },
             )
             response.raise_for_status()
@@ -173,7 +181,11 @@ async def _call_cloudflare(prompt: str) -> str:
             response = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {settings.cloudflare_api_token}"},
-                json={"messages": [{"role": "user", "content": prompt}]},
+                json={
+                    "messages": [{"role": "user", "content": prompt}],
+                    # Guardrail SRS Model Usage Policy poin b (lihat catatan di _call_gemini)
+                    "max_tokens": settings.max_response_tokens_commercial,
+                },
             )
             response.raise_for_status()
             data = response.json()

@@ -120,6 +120,7 @@ export default function ChatPage() {
           content: result.reply,
           llm_used: result.llm_used,
           confidence_score: result.confidence_score,
+          pii_detected: result.pii_detected,
         },
       ]);
     } catch (err) {
@@ -308,6 +309,11 @@ export default function ChatPage() {
                       • keyakinan: {m.confidence_score}%
                     </span>
                   )}
+                </div>
+              )}
+              {m.pii_detected && (
+                <div style={{ fontSize: 11, color: "#b45309", marginTop: 2, fontWeight: 500 }}>
+                  ⚠ Data pribadi terdeteksi pada pesan ini — disamarkan otomatis sebelum diproses AI.
                 </div>
               )}
             </div>

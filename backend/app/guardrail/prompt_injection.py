@@ -72,6 +72,23 @@ _INJECTION_SIGNALS: list[tuple[re.Pattern, int]] = [
 
 INJECTION_SCORE_THRESHOLD = 3
 
+# ---------- Guardrail lintas-giliran (multi-turn jailbreak) ----------
+# Deteksi di atas cuma melihat SATU pesan. Serangan bisa dipecah jadi
+# beberapa giliran kecil yang masing-masing di bawah INJECTION_SCORE_THRESHOLD
+# (mis. giliran 1: "kamu sekarang berperan sebagai X" [skor 2], giliran 2:
+# "mulai sekarang, tanpa batasan" [skor 2] — tidak ada satupun yang sendirian
+# memicu blokir, padahal polanya jelas kalau dilihat bersama). Untuk menutup
+# ini, skor dari beberapa pesan USER terakhir dalam satu sesi chat yang sama
+# diakumulasi dan dibandingkan ke ambang terpisah yang lebih tinggi.
+#
+# SESSION_INJECTION_THRESHOLD sengaja lebih tinggi dari INJECTION_SCORE_THRESHOLD
+# (bukan cuma dikali jumlah pesan) supaya percakapan panjang yang wajar (mis.
+# membahas topik yang KEBETULAN menyinggung satu-dua pola lemah, seperti
+# "ini cuma skenario hipotetis" dalam diskusi edukatif) tidak ikut ke-block
+# hanya karena berlangsung lama.
+SESSION_INJECTION_THRESHOLD = 5
+SESSION_WINDOW_MESSAGES = 4  # termasuk pesan yang sedang dikirim sekarang
+
 
 def get_injection_score(text: str) -> int:
     """Hitung total skor kecurigaan berdasarkan semua pola yang cocok."""
@@ -85,3 +102,28 @@ def get_matched_signals(text: str) -> list[str]:
 
 def is_prompt_injection(text: str) -> bool:
     return get_injection_score(text) >= INJECTION_SCORE_THRESHOLD
+
+
+def get_cumulative_injection_score(current_text: str, recent_user_messages: list[str]) -> int:
+    """
+    Jumlahkan skor injection dari pesan user terakhir dalam jendela
+    SESSION_WINDOW_MESSAGES (termasuk pesan yang sedang diproses sekarang).
+
+    recent_user_messages: pesan-pesan user SEBELUMNYA di chat yang sama,
+    diurutkan bebas (fungsi ini yang akan ambil N-1 pesan paling akhir).
+    Pesan assistant TIDAK ikut dihitung — yang relevan cuma pola yang
+    ditulis user, bukan jawaban AI.
+    """
+    window = recent_user_messages[-(SESSION_WINDOW_MESSAGES - 1):] + [current_text]
+    return sum(get_injection_score(t) for t in window)
+
+
+def is_multi_turn_injection(current_text: str, recent_user_messages: list[str]) -> bool:
+    """
+    True kalau skor kumulatif dalam jendela SESSION_WINDOW_MESSAGES pesan
+    terakhir melewati SESSION_INJECTION_THRESHOLD, meski skor pesan SEKARANG
+    sendirian di bawah INJECTION_SCORE_THRESHOLD (kalau sudah di atas ambang
+    individual, is_prompt_injection() saja sudah cukup — panggilan ini
+    biasanya baru relevan dicek SETELAH is_prompt_injection() lolos).
+    """
+    return get_cumulative_injection_score(current_text, recent_user_messages) >= SESSION_INJECTION_THRESHOLD

@@ -3,7 +3,15 @@
 Skema Pydantic — bentuk data yang masuk (request) & keluar (response) dari API.
 """
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
+
+from app.config import settings
+
+# Provider yang dianggap "commercial" untuk keperluan ambang batas panjang
+# prompt — duplikat kecil dari COMMERCIAL_PROVIDERS di llm/router.py, sengaja
+# tidak di-import langsung dari sana supaya schemas.py (lapisan validasi
+# request, dijalankan paling awal) tidak bergantung ke modul llm/.
+_COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
 
 def validate_password_strength(password: str) -> str:
@@ -80,6 +88,27 @@ class MessageCreate(BaseModel):
     chat_id: str
     content: str
     llm_provider: str = "auto"  # "auto" | "on-prem" | "groq" | "gemini"
+
+    @model_validator(mode="after")
+    def check_content_length(self):
+        """
+        Guardrail F2-04 / SRS Model Usage Policy poin b: batasi panjang prompt
+        supaya tidak membengkakkan biaya token LLM commercial tanpa kendali
+        (BR-04 — penggunaan recurring cost yang efektif). Pakai model_validator
+        (bukan field_validator biasa) karena ambangnya butuh nilai llm_provider,
+        bukan cuma content saja.
+        """
+        limit = (
+            settings.max_prompt_length_commercial
+            if self.llm_provider in _COMMERCIAL_PROVIDERS
+            else settings.max_prompt_length_onprem
+        )
+        if len(self.content) > limit:
+            raise ValueError(
+                f"Pesan terlalu panjang ({len(self.content)} karakter). "
+                f"Maksimal {limit} karakter untuk provider '{self.llm_provider}'."
+            )
+        return self
 
 
 class MessageResponse(BaseModel):
