@@ -124,13 +124,16 @@ async def send_message(
 
     query_lower = search_query.lower()
     if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
-        from app.rag.vectorstore import get_all_session_chunks
+        from app.rag.vectorstore import get_all_session_chunks, has_session_document
         context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
+        session_has_document = has_session_document(chat_id=chat.id)
     else:
+        from app.rag.vectorstore import has_session_document
         context_chunks = retrieve_context(search_query, chat_id=chat.id, collection_name="kb_general", top_k=10)
+        session_has_document = has_session_document(chat_id=chat.id)
 
     try:
-        result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider)
+        result = await route_and_generate(payload.content, context_chunks, chat_history, payload.llm_provider, session_has_document=session_has_document)
     except CommercialLLMError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
