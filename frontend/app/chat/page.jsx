@@ -14,6 +14,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
   const [llmProvider, setLlmProvider] = useState("on-prem");
@@ -153,6 +154,26 @@ export default function ChatPage() {
     }
   }
 
+  async function handleExportPdf() {
+    if (!chatId) return;
+    setExportingPdf(true);
+    try {
+      const blob = await api.exportPdf(chatId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `chat_${chatId}_export.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      alert("Gagal mengekspor PDF: " + err.message);
+    } finally {
+      setExportingPdf(false);
+    }
+  }
+
   if (checkingSession) {
     return (
       <div style={{ maxWidth: 700, margin: "80px auto", textAlign: "center" }}>
@@ -244,7 +265,25 @@ export default function ChatPage() {
 
       {/* MAIN CHAT AREA */}
       <div style={{ flex: 1, padding: "20px 40px", display: "flex", flexDirection: "column", maxWidth: "900px", margin: "0 auto" }}>
-        <h1>Generic ChatBot AI</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+          <h1 style={{ margin: 0 }}>Generic ChatBot AI</h1>
+          {chatId && messages.length > 0 && (
+            <button
+              onClick={handleExportPdf}
+              disabled={exportingPdf}
+              style={{
+                padding: "8px 16px",
+                background: "#28a745",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                cursor: exportingPdf ? "wait" : "pointer"
+              }}
+            >
+              {exportingPdf ? "Mengekspor..." : "⬇ Export PDF"}
+            </button>
+          )}
+        </div>
 
         <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, flex: 1, overflowY: "auto", marginBottom: "20px", background: "white" }}>
           {messages.map((m, i) => (

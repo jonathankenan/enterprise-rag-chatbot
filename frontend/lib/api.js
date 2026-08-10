@@ -126,4 +126,20 @@ export const api = {
       return res.json();
     });
   },
-};
+
+  exportPdf: (chatId) => {
+    const token = getToken();
+    return fetch(`${API_URL}/api/chat/${chatId}/export-pdf`, {
+      method: "GET",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Export PDF gagal (${res.status})`);
+      }
+      return res.blob();
+    });
+  },
+};
