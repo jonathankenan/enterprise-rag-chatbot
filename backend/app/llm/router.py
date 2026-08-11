@@ -52,7 +52,7 @@ def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
     return has_keyword or has_pii
 
 
-def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None) -> str:
+def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None, session_has_document: bool = False) -> str:
     history_text = ""
     if chat_history:
         history_text = "CONVERSATION HISTORY:\n"
@@ -62,18 +62,21 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
         history_text += "\n"
 
     if not context_chunks:
-        # General Conversation Prompt (No Documents)
-        return (
-            "You are a helpful and conversational AI assistant.\n"
-            "You will be provided with a CONVERSATION HISTORY.\n\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. Answer the user's questions clearly and concisely using your general knowledge.\n"
-            "2. You MUST respond in the exact same language that the user used in their latest message.\n"
-            "3. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n\n"
-            f"{history_text}"
-            f"USER LATEST MESSAGE: {user_message}\n\n"
-            "YOUR RESPONSE:"
-        )
+        if session_has_document:
+            context_chunks = ["[NO RELEVANT CONTEXT FOUND]"]
+        else:
+            # General Conversation Prompt (No Documents)
+            return (
+                "You are a helpful and conversational AI assistant.\n"
+                "You will be provided with a CONVERSATION HISTORY.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Answer the user's questions clearly and concisely using your general knowledge.\n"
+                "2. You MUST respond in the exact same language that the user used in their latest message.\n"
+                "3. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n\n"
+                f"{history_text}"
+                f"USER LATEST MESSAGE: {user_message}\n\n"
+                "YOUR RESPONSE:"
+            )
 
     # RAG Prompt (Documents Present)
     raw_context = "\n\n".join(f"- {c}" for c in context_chunks)
@@ -81,12 +84,16 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
         raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
     context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
 
+    instruction_2 = "2. If the context is irrelevant or missing, you MUST still answer the user's question using your own internal knowledge as a general AI.\n"
+    if session_has_document:
+        instruction_2 = "2. If the PROVIDED CONTEXT says '[NO RELEVANT CONTEXT FOUND]' or does not contain the answer, politely state that the document does not contain the information. You MUST state this refusal in the exact same language the user is speaking.\n"
+
     return (
         "You are a helpful and conversational AI assistant.\n"
         "You will be provided with a CONVERSATION HISTORY and some PROVIDED CONTEXT.\n\n"
         "CRITICAL INSTRUCTIONS:\n"
         "1. If the context information provided below contains the answer, use it to answer the question.\n"
-        "2. If the context is irrelevant or missing, you MUST still answer the user's question using your own internal knowledge as a general AI.\n"
+        f"{instruction_2}"
         "3. NEVER mention the words 'context', 'provided context', 'document', or explain how you got the answer. Just give the answer naturally.\n"
         "4. You MUST respond in the exact same language that the user used in their latest message.\n"
         "5. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n"
@@ -129,12 +136,16 @@ async def get_standalone_query(user_message: str, chat_history: list, preferred_
 
     prompt = f"""
 Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone search query.
-Strip conversational filler like 'here it is', 'thanks', or 'can you tell me now'.
-Respond ONLY with the standalone query, nothing else.
+RULES:
+1. Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
+2. Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
+3. IMPORTANT: You must translate the final standalone query into ENGLISH, regardless of the language the user is speaking. 
+4. If the user asks about multiple distinct entities or specific IDs (e.g., 'FR-04 and FR-05'), keep them together in a clean format like 'Requirement FR-04 and Requirement FR-05 specifics', keeping the IDs exactly as written.
+5. Respond ONLY with the standalone query, nothing else. No quotes, no explanations.
 Chat History:
 {history_text}
 Follow-up Input: {user_message}
-Standalone Query:"""
+Standalone English Query:"""
 
     if preferred_provider in COMMERCIAL_PROVIDERS:
         try:
@@ -158,6 +169,7 @@ async def route_and_generate(
     chat_history: list = None,
     preferred_provider: str = "on-prem",
     pii_entities: list[dict] | None = None,
+    session_has_document: bool = False,
 ) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
@@ -177,7 +189,7 @@ async def route_and_generate(
 
     # ---------- BEFORE LLM: mask PII sebelum masuk ke prompt (pakai entities yang sudah ada) ----------
     masked_message, pii_mapping = mask_pii(user_message, entities=pii_entities) if pii_detected else (user_message, {})
-    final_prompt = build_prompt(masked_message, context_chunks, chat_history)
+    final_prompt = build_prompt(masked_message, context_chunks, chat_history, session_has_document=session_has_document)
 
     # ---------- Pilih & panggil LLM ----------
     if is_sensitive:

@@ -19,6 +19,7 @@ out/
 .DS_Store
 .vscode/
 .idea/
+pyrefly.toml
 
 # Logs
 *.log
