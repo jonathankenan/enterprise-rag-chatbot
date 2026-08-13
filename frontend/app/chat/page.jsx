@@ -1,7 +1,7 @@
 "use client";
 // [PENANGGUNG JAWAB: Anggota A & B]
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
@@ -18,6 +18,18 @@ export default function ChatPage() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
   const [llmProvider, setLlmProvider] = useState("on-prem");
+  const [loginInfo, setLoginInfo] = useState(null); // SRS ISR-001.g
+
+  // Guard supaya loadChatHistory() (yang bisa memicu pembuatan chat baru
+  // otomatis kalau history kosong) tidak terpanggil dua kali. React 18
+  // Strict Mode (aktif default di Next.js dev mode) SENGAJA menjalankan
+  // useEffect dua kali berturut-turut untuk membongkar efek samping yang
+  // tidak idempotent — persis seperti loadChatHistory() di bawah. useRef
+  // (bukan useState) dipakai karena nilainya harus terbaca-tulis SEKARANG
+  // JUGA secara sinkron sebelum effect kedua sempat jalan; kalau pakai
+  // state, update-nya baru "kelihatan" di render berikutnya — terlambat
+  // untuk mencegah pemanggilan kedua yang juga terjadi secara sinkron.
+  const didInitChatHistory = useRef(false);
 
   useEffect(() => {
     if (!api.isLoggedIn()) {
@@ -35,7 +47,22 @@ export default function ChatPage() {
         router.push("/login");
       });
 
+    if (didInitChatHistory.current) return;
+    didInitChatHistory.current = true;
     loadChatHistory();
+
+    // SRS ISR-001.g: tampilkan SEKALI info login sebelumnya + jumlah
+    // percobaan gagal, lalu langsung hapus dari sessionStorage supaya tidak
+    // muncul lagi kalau halaman ini di-refresh berkali-kali.
+    const raw = sessionStorage.getItem("login_info");
+    if (raw) {
+      sessionStorage.removeItem("login_info");
+      try {
+        setLoginInfo(JSON.parse(raw));
+      } catch {
+        // abaikan kalau datanya rusak
+      }
+    }
   }, []);
 
   function handleLogout() {
@@ -121,6 +148,7 @@ export default function ChatPage() {
           llm_used: result.llm_used,
           confidence_score: result.confidence_score,
           pii_detected: result.pii_detected,
+          escalated: result.escalated,
         },
       ]);
     } catch (err) {
@@ -253,6 +281,25 @@ export default function ChatPage() {
               {currentUser.full_name || currentUser.email}
               <br />
               <Link href="/change-password">Ganti Password</Link>
+              {/* Cuma tampil untuk role IT Admin/Compliance/Auditor — samakan
+                  dengan Role.AUDIT_VIEWERS di backend/app/models.py. Ini
+                  sekadar sembunyikan menu, BUKAN penegakan akses (itu tugas
+                  backend); user role lain yang paksa buka /audit lewat URL
+                  tetap akan ditolak halaman itu sendiri. */}
+              {["it_admin", "compliance", "auditor"].includes(currentUser.role) && (
+                <>
+                  {" · "}
+                  <Link href="/audit">Audit Log</Link>
+                </>
+              )}
+              {currentUser.role === "it_admin" && (
+                <>
+                  {" · "}
+                  <Link href="/helpdesk">Tiket Helpdesk</Link>
+                  {" · "}
+                  <Link href="/admin">Kelola User</Link>
+                </>
+              )}
             </p>
           )}
           <button
@@ -286,6 +333,29 @@ export default function ChatPage() {
           )}
         </div>
 
+        {/* SRS ISR-001.g: waktu login sebelumnya + jumlah percobaan gagal
+            sejak saat itu. Cuma tampil sekali (data dihapus dari
+            sessionStorage begitu dibaca), warna kuning kalau ada percobaan
+            gagal (kemungkinan indikasi akun disasar orang lain). */}
+        {loginInfo && (
+          <div style={{
+            padding: "8px 12px", marginBottom: 12, borderRadius: 4, fontSize: 13,
+            background: loginInfo.failed_attempts_since_last_login > 0 ? "#fff3cd" : "#e7f3ff",
+            border: `1px solid ${loginInfo.failed_attempts_since_last_login > 0 ? "#ffe69c" : "#b6d4fe"}`,
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <span>
+              {loginInfo.previous_login_at
+                ? `Login sebelumnya: ${new Date(loginInfo.previous_login_at.endsWith("Z") ? loginInfo.previous_login_at : loginInfo.previous_login_at + "Z").toLocaleString()}`
+                : "Ini adalah login pertama Anda."}
+              {loginInfo.failed_attempts_since_last_login > 0 && (
+                <> — <b>{loginInfo.failed_attempts_since_last_login} percobaan login gagal</b> tercatat sejak saat itu.</>
+              )}
+            </span>
+            <button onClick={() => setLoginInfo(null)} style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 14 }}>✕</button>
+          </div>
+        )}
+
         <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, flex: 1, overflowY: "auto", marginBottom: "20px", background: "white" }}>
           {messages.map((m, i) => (
             <div key={i} style={{ marginBottom: 12, textAlign: m.sender === "user" ? "right" : "left" }}>
@@ -314,6 +384,11 @@ export default function ChatPage() {
               {m.pii_detected && (
                 <div style={{ fontSize: 11, color: "#b45309", marginTop: 2, fontWeight: 500 }}>
                   ⚠ Data pribadi terdeteksi pada pesan ini — disamarkan otomatis sebelum diproses AI.
+                </div>
+              )}
+              {m.escalated && (
+                <div style={{ fontSize: 11, color: "#0070f3", marginTop: 2, fontWeight: 500 }}>
+                  🎫 Jawaban ini kurang meyakinkan — pertanyaan Anda otomatis dieskalasi ke tim helpdesk.
                 </div>
               )}
             </div>

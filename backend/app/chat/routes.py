@@ -9,8 +9,9 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User
+from app.models import Chat, Message, SenderType, User, HelpdeskTicket
 from app.schemas import ChatCreate, ChatResponse, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
@@ -71,6 +72,7 @@ def create_chat(payload: ChatCreate, db: Session = Depends(get_db), user: User =
     db.add(chat)
     db.commit()
     db.refresh(chat)
+    log_guardrail_event(db, user.id, EventType.CHAT_CREATED, detail=f"chat_id={chat.id}, title={payload.title}")
     return chat
 
 
@@ -106,6 +108,17 @@ def delete_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depend
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+
+    # Log SEBELUM benar-benar dihapus — setelah ini, chat & pesannya lenyap
+    # permanen, jadi ini satu-satunya kesempatan mencatat chat.title dan
+    # jumlah pesannya sebelum hilang (aksi destruktif, sebelumnya TIDAK ADA
+    # jejak sama sekali kalau ada chat yang terhapus).
+    message_count = db.query(Message).filter(Message.chat_id == chat.id).count()
+    log_guardrail_event(
+        db, user.id, EventType.CHAT_DELETED,
+        detail=f"chat_id={chat.id}, title={chat.title}",
+        metadata={"message_count": message_count},
+    )
 
     db.query(Message).filter(Message.chat_id == chat.id).delete()
     db.delete(chat)
@@ -267,6 +280,25 @@ async def send_message(
     db.add(ai_msg)
     db.commit()
 
+    # ---------- FCR-003 poin 7: Eskalasi otomatis ke human helpdesk ----------
+    # Confidence None (percakapan umum tanpa RAG) sengaja TIDAK memicu ini —
+    # itu bukan "jawaban tidak meyakinkan", memang tidak relevan diberi skor
+    # (lihat router.py: confidence dipaksa None kalau context_chunks kosong).
+    escalated = False
+    if result.confidence_score is not None and result.confidence_score < settings.escalation_confidence_threshold:
+        ticket = HelpdeskTicket(
+            chat_id=chat.id, user_id=user.id, message_id=ai_msg.id,
+            confidence_score=result.confidence_score,
+        )
+        db.add(ticket)
+        db.commit()
+        escalated = True
+        log_guardrail_event(
+            db, user.id, EventType.HELPDESK_ESCALATED,
+            detail=f"chat_id={chat.id}, ticket_id={ticket.id}",
+            metadata={"confidence_score": result.confidence_score},
+        )
+
     new_title = None
     if chat.title == "Percakapan Baru":
         try:
@@ -285,6 +317,7 @@ async def send_message(
         pii_detected=result.pii_detected,
         sources=context_chunks,
         new_title=new_title,
+        escalated=escalated,
     )
 
 @router.get("/{chat_id}/export-pdf")
@@ -309,6 +342,10 @@ def export_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends
         pdf_bytes = generate_pdf(session_title=chat.title, messages=messages, model_used=model_used)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal generate PDF: {str(e)}")
+
+    # Data keluar sistem sebagai file — jalur potensial kebocoran data,
+    # dicatat siapa yang export chat mana dan kapan.
+    log_guardrail_event(db, user.id, EventType.CHAT_EXPORTED, detail=f"chat_id={chat.id}, title={chat.title}")
 
     return Response(
         content=pdf_bytes,

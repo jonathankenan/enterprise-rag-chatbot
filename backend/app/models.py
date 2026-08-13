@@ -44,6 +44,50 @@ class EncryptedText(TypeDecorator):
         return decrypt_text(value)
 
 
+class Role:
+    """
+    8 role PERSIS sesuai SRS FCR-003 hal. 15, poin 2.d (daftar role minimal
+    yang wajib dibedakan sistem): IT Admin, Designer, MLOps, Consumer
+    internal BEI, Consumer internet-eipo, Business user designer, Compliance
+    users, Auditor view.
+
+    CATATAN JUJUR (supaya tidak terkesan menyembunyikan keterbatasan):
+    PoC ini baru punya SATU fitur yang benar-benar dibedakan per role (baca
+    audit log — lihat AUDIT_VIEWERS). Role lainnya SAH ada dan bisa dipakai,
+    tapi sementara ini perilakunya sama saja untuk fitur chat/upload/export
+    — bukan karena rolenya keliru, tapi karena fitur yang seharusnya
+    membedakan mereka memang belum/tidak ada di repo ini:
+    - DESIGNER: mendesain prompt/flow AI — tidak ada fitur desain prompt di PoC ini
+    - MLOPS: deploy/monitor model — tidak ada fitur MLOps di PoC ini
+    - CONSUMER_EIPO: akses chatbot publik di aplikasi E-IPO — itu FCR-004,
+      fitur terpisah yang tidak ada di repo ini
+    - BUSINESS_USER_DESIGNER: user bisnis yang mendesain use case — tidak
+      ada fitur yang membedakannya dari consumer biasa di PoC ini
+
+    Taksonominya tetap dibuat 8 penuh (bukan disederhanakan) supaya nama &
+    struktur sudah benar sejak awal — kalau nanti fitur di atas dibangun,
+    tinggal tambah pengecekan `require_role(...)` baru, tanpa migrasi ulang
+    skema role.
+    """
+    IT_ADMIN = "it_admin"
+    DESIGNER = "designer"
+    MLOPS = "mlops"
+    CONSUMER_INTERNAL = "consumer_internal"            # "Consumer internal BEI"
+    CONSUMER_EIPO = "consumer_eipo"                    # "Consumer internet – eipo"
+    BUSINESS_USER_DESIGNER = "business_user_designer"
+    COMPLIANCE = "compliance"                          # "Compliance users"
+    AUDITOR = "auditor"                                # "Auditor view"
+
+    ALL = (
+        IT_ADMIN, DESIGNER, MLOPS, CONSUMER_INTERNAL, CONSUMER_EIPO,
+        BUSINESS_USER_DESIGNER, COMPLIANCE, AUDITOR,
+    )
+
+    # Role yang boleh membaca audit log guardrail — IT_ADMIN ikut (wajar,
+    # dia superset semua akses), plus 2 role yang memang tujuan utamanya ini.
+    AUDIT_VIEWERS = (IT_ADMIN, COMPLIANCE, AUDITOR)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -51,8 +95,11 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
-    role = Column(String, default="user")  # contoh: "user", "admin"
+    role = Column(String, default=Role.CONSUMER_INTERNAL)  # salah satu dari Role.ALL — default: pengguna internal biasa
     created_at = Column(DateTime, default=datetime.utcnow)
+    # SRS ISR-002.c: umur password maksimal 90 hari. Di-set ulang tiap kali
+    # password diganti (register = set awal, change-password = reset ulang).
+    password_changed_at = Column(DateTime, default=datetime.utcnow)
 
     chats = relationship("Chat", back_populates="owner")
 
@@ -117,5 +164,39 @@ class AuditLog(Base):
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     event_type = Column(String, nullable=False)
     severity = Column(String, nullable=False, default="low")
-    detail = Column(Text, nullable=True)
+    # EncryptedText (bukan Text polos) — SRS ISR-006.b minta SEMUA data yang
+    # diproses dienkripsi, bukan sebagian. detail berisi cuplikan mentah
+    # pesan user (sampai 500 karakter) TERMASUK untuk pesan yang diblokir
+    # sebelum sempat dimasking oleh alur chat biasa — kalau kolom ini tidak
+    # dienkripsi, ada PII/konten sensitif yang bocor plaintext lewat jalur
+    # audit log meski Message.content sudah aman.
+    detail = Column(EncryptedText, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TicketStatus:
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class HelpdeskTicket(Base):
+    """
+    Tiket eskalasi ke human helpdesk — SRS FCR-003 poin 7 "Eskalasi otomatis":
+    kalau confidence AI rendah, sistem otomatis buat tiket. Riwayat percakapan
+    SENGAJA TIDAK disalin ke sini (tidak ada kolom "chat_history_snapshot")
+    — cukup simpan chat_id, lalu endpoint detail tiket ambil pesan langsung
+    dari tabel Message yang sudah ada. Alasannya: kalau disalin, salinannya
+    bisa basi (chat aslinya masih bisa nambah pesan baru setelah tiket
+    dibuat) dan duplikasi data yang sudah dienkripsi+masked di tempat lain.
+    """
+    __tablename__ = "helpdesk_tickets"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    chat_id = Column(UUID(as_uuid=False), ForeignKey("chats.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    message_id = Column(UUID(as_uuid=False), ForeignKey("messages.id"), nullable=True)  # jawaban AI yang memicu eskalasi
+    confidence_score = Column(Integer, nullable=True)
+    status = Column(String, default=TicketStatus.OPEN)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")  # one-directional, tidak perlu back_populates di User

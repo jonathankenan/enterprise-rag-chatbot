@@ -142,4 +142,48 @@ export const api = {
       return res.blob();
     });
   },
+
+  // ---- Audit log (dibatasi Role.AUDIT_VIEWERS di backend — lihat guardrail/routes.py) ----
+  getAuditSummary: (sinceHours = 24) => request(`/api/audit/summary?since_hours=${sinceHours}`),
+
+  searchAudit: (params = {}) => {
+    const query = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v !== null && v !== undefined))
+    ).toString();
+    return request(`/api/audit/search${query ? `?${query}` : ""}`);
+  },
+
+  exportAuditCsv: (params = {}) => {
+    const token = getToken();
+    const query = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v !== null && v !== undefined))
+    ).toString();
+    return fetch(`${API_URL}/api/audit/export${query ? `?${query}` : ""}`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Export gagal (${res.status})`);
+      }
+      return res.blob();
+    });
+  },
+
+  // ---- Helpdesk tickets (dibatasi Role.IT_ADMIN — lihat helpdesk/routes.py) ----
+  listTickets: (statusFilter) =>
+    request(`/api/helpdesk/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
+
+  getTicket: (ticketId) => request(`/api/helpdesk/tickets/${ticketId}`),
+
+  closeTicket: (ticketId) =>
+    request(`/api/helpdesk/tickets/${ticketId}/close`, { method: "POST" }),
+
+  // ---- Manajemen user (dibatasi Role.IT_ADMIN — lihat admin/routes.py) ----
+  listUsers: () => request("/api/admin/users"),
+
+  updateUserRole: (userId, role) =>
+    request(`/api/admin/users/${userId}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
 };

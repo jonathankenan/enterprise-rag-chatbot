@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # (dev-friendly) tapi pakai key SEMENTARA yang hilang tiap restart.
     message_encryption_key: str = ""
 
+    # Eskalasi otomatis ke human helpdesk (SRS FCR-003 poin 7). Jawaban AI
+    # dengan confidence_score DI BAWAH ambang ini otomatis bikin tiket.
+    # Confidence None (percakapan umum tanpa RAG) TIDAK pernah memicu ini —
+    # itu bukan "jawaban tidak meyakinkan", cuma tidak relevan diberi skor.
+    escalation_confidence_threshold: int = 30
+
     @property
     def sensitive_keyword_list(self) -> list[str]:
         return [k.strip().lower() for k in self.sensitive_keywords.split(",") if k.strip()]
