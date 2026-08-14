@@ -230,9 +230,14 @@ async def send_message(
         from app.rag.vectorstore import get_all_session_chunks, has_session_document
         context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
         session_has_document = has_session_document(chat_id=chat.id)
+        # Permintaan "ringkas semua" ambil SELURUH chunk apa adanya, bukan
+        # hasil pencarian semantik top-k — konsep "seberapa relevan hasil
+        # pencarian" tidak berlaku di sini, jadi tidak ada confidence yang
+        # bisa dihitung secara jujur untuk kasus ini.
+        retrieval_confidence = None
     else:
         from app.rag.vectorstore import has_session_document
-        context_chunks = retrieve_context(search_query, chat_id=chat.id, collection_name="kb_general", top_k=10)
+        context_chunks, retrieval_confidence = retrieve_context(search_query, chat_id=chat.id, collection_name="kb_general", top_k=10)
         session_has_document = has_session_document(chat_id=chat.id)
 
     try:
@@ -240,6 +245,7 @@ async def send_message(
             payload.content, context_chunks, chat_history, payload.llm_provider,
             pii_entities=user_pii_entities,
             session_has_document=session_has_document,
+            retrieval_confidence=retrieval_confidence,
         )
     except CommercialLLMError as e:
         raise HTTPException(status_code=502, detail=str(e))
