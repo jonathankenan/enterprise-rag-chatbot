@@ -7,7 +7,7 @@ Ini menyimpan data TERSTRUKTUR: user, chat, pesan, metadata dokumen.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Integer
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, Integer, Boolean
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -100,6 +100,13 @@ class User(Base):
     # SRS ISR-002.c: umur password maksimal 90 hari. Di-set ulang tiap kali
     # password diganti (register = set awal, change-password = reset ulang).
     password_changed_at = Column(DateTime, default=datetime.utcnow)
+
+    # SRS ISR-001.d (keterangan): "IT Admin dan user Admin menggunakan
+    # Database dengan tambahan Multi Factor Authentication". totp_secret
+    # WAJIB EncryptedText — kalau bocor plaintext, siapa pun bisa generate
+    # kode OTP yang valid (sama fatalnya dengan kebocoran password).
+    totp_secret = Column(EncryptedText, nullable=True)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)
 
     chats = relationship("Chat", back_populates="owner")
 
@@ -200,3 +207,25 @@ class HelpdeskTicket(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User")  # one-directional, tidak perlu back_populates di User
+
+
+class SystemSettings(Base):
+    """
+    Konfigurasi sistem yang bisa diubah RUNTIME oleh IT Admin (beda dari
+    app/config.py yang cuma bisa diubah lewat .env + restart server).
+    Tabel SINGLETON — cuma boleh ada 1 baris, id selalu sama
+    ("global"), supaya gampang di-query tanpa perlu tahu ID-nya.
+
+    commercial_llm_force_stopped: SRS FCR-003 hal. 10, Rules poin 2 —
+    "Terdapat button 'force stop' dan disable seluruh penggunaan LLM
+    Commercial untuk kebutuhan menghentikan operasional ke LLM Commercial
+    saat dibutuhkan". Kalau True, SEMUA chat dipaksa ke on-prem, apa pun
+    provider yang dipilih user — dicek di chat/routes.py sebelum
+    route_and_generate() dipanggil.
+    """
+    __tablename__ = "system_settings"
+
+    id = Column(String, primary_key=True, default="global")
+    commercial_llm_force_stopped = Column(Boolean, nullable=False, default=False)
+    updated_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

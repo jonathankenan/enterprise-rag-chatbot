@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User, HelpdeskTicket
+from app.models import Chat, Message, SenderType, User, HelpdeskTicket, SystemSettings
 from app.schemas import ChatCreate, ChatResponse, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
@@ -149,6 +149,16 @@ async def send_message(
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
 
+    # ---------- SRS FCR-003 Rules poin 2: force-stop LLM Commercial ----------
+    # Dicek SEKALI di awal, dipakai untuk paksa SEMUA pemanggilan LLM di
+    # endpoint ini (rephrase query, jawaban utama, auto-generate judul chat)
+    # ke on-prem — bukan cuma jawaban utamanya saja. "Disable SELURUH
+    # penggunaan LLM Commercial" di teks SRS ditafsirkan literal: termasuk
+    # pemanggilan internal (auto-title) yang user bahkan tidak sadar terjadi.
+    system_settings = db.query(SystemSettings).filter(SystemSettings.id == "global").first()
+    commercial_llm_disabled = bool(system_settings and system_settings.commercial_llm_force_stopped)
+    effective_provider = "on-prem" if commercial_llm_disabled else payload.llm_provider
+
     # ---------- Guardrail F1-04 & F2-04 (before LLM) ----------
     is_blocked = is_prompt_blocked(payload.content)
     is_injection = is_prompt_injection(payload.content)
@@ -223,7 +233,7 @@ async def send_message(
     db.commit()
 
     from app.llm.router import get_standalone_query
-    search_query = await get_standalone_query(payload.content, chat_history, payload.llm_provider)
+    search_query = await get_standalone_query(payload.content, chat_history, effective_provider)
 
     query_lower = search_query.lower()
     if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
@@ -242,7 +252,7 @@ async def send_message(
 
     try:
         result = await route_and_generate(
-            payload.content, context_chunks, chat_history, payload.llm_provider,
+            payload.content, context_chunks, chat_history, effective_provider,
             pii_entities=user_pii_entities,
             session_has_document=session_has_document,
             retrieval_confidence=retrieval_confidence,
@@ -306,7 +316,11 @@ async def send_message(
         )
 
     new_title = None
-    if chat.title == "Percakapan Baru":
+    # commercial_llm_disabled dicek di sini juga — auto-generate judul chat
+    # SELALU pakai call_commercial_llm() langsung (tidak lewat route_and_generate,
+    # jadi tidak otomatis ke-cover oleh effective_provider di atas), jadi
+    # perlu di-skip manual kalau force-stop aktif.
+    if chat.title == "Percakapan Baru" and not commercial_llm_disabled:
         try:
             prompt = f"Buatlah judul singkat (maksimal 3-5 kata) yang merangkum pesan berikut. Hanya kembalikan teks judulnya saja, tanpa tanda kutip atau penjelasan apapun.\n\nPesan: {payload.content}"
             new_title = await call_commercial_llm(prompt)

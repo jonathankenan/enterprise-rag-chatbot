@@ -65,7 +65,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
+    access_token: str | None = None
     token_type: str = "bearer"
     # SRS ISR-001.g: info login sebelumnya + percobaan gagal sejak saat itu
     previous_login_at: datetime | None = None
@@ -73,6 +73,32 @@ class TokenResponse(BaseModel):
     # SRS ISR-002.c: true kalau password sudah lewat 90 hari, frontend WAJIB
     # arahkan user ke halaman ganti password (bukan langsung ke /chat)
     password_expired: bool = False
+    # SRS ISR-001.d: password sudah benar, tapi login BELUM SELESAI — kalau
+    # salah satu true, `access_token` di atas sengaja None (belum boleh
+    # dianggap login), frontend harus arahkan ke alur MFA memakai `mfa_token`.
+    mfa_required: bool = False           # akun sudah punya MFA aktif, minta kode TOTP
+    mfa_setup_required: bool = False     # akun WAJIB MFA tapi belum pernah setup
+    mfa_token: str | None = None         # token sementara (5 menit), khusus buat 2 endpoint MFA di bawah
+
+
+class MfaSetupRequest(BaseModel):
+    mfa_token: str
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str            # buat entry manual di aplikasi authenticator
+    qr_code_base64: str    # data URI PNG, tinggal taruh di <img src="...">
+
+
+class MfaSetupConfirmRequest(BaseModel):
+    mfa_token: str
+    secret: str
+    code: str
+
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
 
 
 class UserResponse(BaseModel):
@@ -100,6 +126,16 @@ class UserRoleUpdateRequest(BaseModel):
         if v not in Role.ALL:
             raise ValueError(f"Role tidak valid. Pilihan: {', '.join(Role.ALL)}")
         return v
+
+
+# ---- System settings (dibatasi Role.IT_ADMIN — SRS FCR-003 Rules poin 2: force-stop LLM Commercial) ----
+class SystemSettingsResponse(BaseModel):
+    commercial_llm_force_stopped: bool
+    updated_by: str | None
+    updated_at: datetime | None
+
+    class Config:
+        from_attributes = True
 
 
 # ---- Chat ----
