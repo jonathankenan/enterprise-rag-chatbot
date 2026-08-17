@@ -6,7 +6,10 @@
  */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register"];
+// startsWith, jadi "/api/auth/mfa" otomatis cakup /mfa/setup, /mfa/setup/confirm, /mfa/verify —
+// endpoint-endpoint ini sengaja dikecualikan dari auto-redirect 401 (lihat request()
+// di bawah), karena 401 di sini artinya "kode MFA salah", BUKAN "sesi berakhir".
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register", "/api/auth/mfa"];
 
 function getToken() {
   if (typeof window === "undefined") return null;
@@ -69,6 +72,25 @@ export const api = {
     request("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+
+  // ---- MFA (SRS ISR-001.d — wajib untuk role IT Admin) ----
+  mfaSetup: (mfaToken) =>
+    request("/api/auth/mfa/setup", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken }),
+    }),
+
+  mfaSetupConfirm: (mfaToken, secret, code) =>
+    request("/api/auth/mfa/setup/confirm", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken, secret, code }),
+    }),
+
+  mfaVerify: (mfaToken, code) =>
+    request("/api/auth/mfa/verify", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken, code }),
     }),
 
   logout: () => {
@@ -186,4 +208,9 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ role }),
     }),
+
+  getSystemSettings: () => request("/api/admin/system-settings"),
+
+  toggleCommercialLlm: () =>
+    request("/api/admin/system-settings/toggle-commercial-llm", { method: "POST" }),
 };

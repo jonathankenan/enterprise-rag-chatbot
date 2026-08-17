@@ -25,6 +25,22 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const data = await api.login(email, password);
+
+      // SRS ISR-001.d: password benar, tapi ini akun IT Admin yang WAJIB
+      // MFA — belum ada access_token sama sekali di titik ini, jangan
+      // simpan apa-apa ke localStorage dulu. mfa_token (bukan access_token)
+      // disimpan sebentar di sessionStorage buat dipakai halaman MFA.
+      if (data.mfa_setup_required) {
+        sessionStorage.setItem("mfa_token", data.mfa_token);
+        router.push("/mfa-setup");
+        return;
+      }
+      if (data.mfa_required) {
+        sessionStorage.setItem("mfa_token", data.mfa_token);
+        router.push("/mfa-verify");
+        return;
+      }
+
       localStorage.setItem("access_token", data.access_token);
 
       // SRS ISR-002.c: password lewat 90 hari -> paksa ganti dulu, tidak

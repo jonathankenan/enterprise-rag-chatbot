@@ -21,6 +21,8 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState([]);
   const [error, setError] = useState("");
   const [savingId, setSavingId] = useState(null);
+  const [systemSettings, setSystemSettings] = useState(null);
+  const [togglingLlm, setTogglingLlm] = useState(false);
 
   useEffect(() => {
     if (!api.isLoggedIn()) {
@@ -49,9 +51,21 @@ export default function AdminUsersPage() {
     }
   }, []);
 
+  const loadSystemSettings = useCallback(async () => {
+    try {
+      const result = await api.getSystemSettings();
+      setSystemSettings(result);
+    } catch (err) {
+      setError(err.message || "Gagal memuat pengaturan sistem");
+    }
+  }, []);
+
   useEffect(() => {
-    if (hasAccess) loadUsers();
-  }, [hasAccess, loadUsers]);
+    if (hasAccess) {
+      loadUsers();
+      loadSystemSettings();
+    }
+  }, [hasAccess, loadUsers, loadSystemSettings]);
 
   async function handleRoleChange(userId, newRole) {
     setSavingId(userId);
@@ -63,6 +77,19 @@ export default function AdminUsersPage() {
       setError(err.message || "Gagal mengubah role");
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function handleToggleCommercialLlm() {
+    setTogglingLlm(true);
+    setError("");
+    try {
+      const result = await api.toggleCommercialLlm();
+      setSystemSettings(result);
+    } catch (err) {
+      setError(err.message || "Gagal mengubah pengaturan");
+    } finally {
+      setTogglingLlm(false);
     }
   }
 
@@ -86,6 +113,36 @@ export default function AdminUsersPage() {
       </div>
 
       {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
+
+      {/* SRS FCR-003 Rules poin 2: button force-stop LLM Commercial */}
+      {systemSettings && (
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: 16, marginBottom: 20, borderRadius: 8,
+          background: systemSettings.commercial_llm_force_stopped ? "#f8d7da" : "#f9f9f9",
+          border: `1px solid ${systemSettings.commercial_llm_force_stopped ? "#f5c2c7" : "#ddd"}`,
+        }}>
+          <div>
+            <b>Force-Stop LLM Commercial</b>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: "#666" }}>
+              {systemSettings.commercial_llm_force_stopped
+                ? "🔴 AKTIF — semua chat dipaksa ke on-prem, apa pun provider yang dipilih user (Groq/Gemini/Mistral/Cloudflare dimatikan sementara)."
+                : "🟢 Tidak aktif — user bebas pilih provider commercial seperti biasa."}
+            </p>
+          </div>
+          <button
+            onClick={handleToggleCommercialLlm}
+            disabled={togglingLlm}
+            style={{
+              padding: "10px 20px", border: "none", borderRadius: 4, cursor: togglingLlm ? "wait" : "pointer",
+              background: systemSettings.commercial_llm_force_stopped ? "#28a745" : "#d32f2f",
+              color: "white", fontWeight: "bold",
+            }}
+          >
+            {togglingLlm ? "Memproses..." : systemSettings.commercial_llm_force_stopped ? "Nyalakan Kembali" : "⛔ Force Stop"}
+          </button>
+        </div>
+      )}
 
       <div style={{ border: "1px solid #ddd", borderRadius: 8, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
