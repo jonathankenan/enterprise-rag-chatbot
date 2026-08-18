@@ -9,6 +9,9 @@ from app.database import Base, engine
 from app.auth.routes import router as auth_router
 from app.chat.routes import router as chat_router
 from app.rag.routes import router as documents_router
+from app.guardrail.routes import router as audit_router
+from app.helpdesk.routes import router as helpdesk_router
+from app.admin.routes import router as admin_router
 
 # Buat semua tabel di PostgreSQL kalau belum ada (cukup untuk skala internship;
 # untuk produksi biasanya pakai Alembic migration)
@@ -27,6 +30,9 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(documents_router)
+app.include_router(audit_router)
+app.include_router(helpdesk_router)
+app.include_router(admin_router)
 
 
 @app.get("/")

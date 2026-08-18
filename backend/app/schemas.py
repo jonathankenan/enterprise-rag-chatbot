@@ -14,17 +14,26 @@ from app.config import settings
 _COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
 
+_SPECIAL_CHARS = set("!@#$%^&*()_+-=[]{}|;:'\",.<>/?`~\\")
+
+
 def validate_password_strength(password: str) -> str:
     """
-    Aturan password — sama persis dengan validasi di frontend (register/page.jsx),
+    Aturan password sesuai SRS ISR-002.a/b: kompleks (huruf besar, huruf
+    kecil, angka, karakter khusus) dan minimal 12 karakter. Sama persis
+    dengan validasi di frontend (register/page.jsx & change-password/page.jsx),
     supaya tidak bisa "dilewati" dengan memanggil API langsung tanpa lewat UI.
     """
-    if len(password) < 8:
-        raise ValueError("Password minimal 8 karakter")
-    if not any(c.isalpha() for c in password):
-        raise ValueError("Password harus mengandung huruf")
+    if len(password) < 12:
+        raise ValueError("Password minimal 12 karakter")
+    if not any(c.isupper() for c in password):
+        raise ValueError("Password harus mengandung huruf besar")
+    if not any(c.islower() for c in password):
+        raise ValueError("Password harus mengandung huruf kecil")
     if not any(c.isdigit() for c in password):
         raise ValueError("Password harus mengandung angka")
+    if not any(c in _SPECIAL_CHARS for c in password):
+        raise ValueError("Password harus mengandung karakter khusus (mis. ! @ # $ %)")
     return password
 
 
@@ -56,8 +65,40 @@ class ChangePasswordRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
+    access_token: str | None = None
     token_type: str = "bearer"
+    # SRS ISR-001.g: info login sebelumnya + percobaan gagal sejak saat itu
+    previous_login_at: datetime | None = None
+    failed_attempts_since_last_login: int = 0
+    # SRS ISR-002.c: true kalau password sudah lewat 90 hari, frontend WAJIB
+    # arahkan user ke halaman ganti password (bukan langsung ke /chat)
+    password_expired: bool = False
+    # SRS ISR-001.d: password sudah benar, tapi login BELUM SELESAI — kalau
+    # salah satu true, `access_token` di atas sengaja None (belum boleh
+    # dianggap login), frontend harus arahkan ke alur MFA memakai `mfa_token`.
+    mfa_required: bool = False           # akun sudah punya MFA aktif, minta kode TOTP
+    mfa_setup_required: bool = False     # akun WAJIB MFA tapi belum pernah setup
+    mfa_token: str | None = None         # token sementara (5 menit), khusus buat 2 endpoint MFA di bawah
+
+
+class MfaSetupRequest(BaseModel):
+    mfa_token: str
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str            # buat entry manual di aplikasi authenticator
+    qr_code_base64: str    # data URI PNG, tinggal taruh di <img src="...">
+
+
+class MfaSetupConfirmRequest(BaseModel):
+    mfa_token: str
+    secret: str
+    code: str
+
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
 
 
 class UserResponse(BaseModel):
@@ -65,6 +106,33 @@ class UserResponse(BaseModel):
     email: str
     full_name: str | None
     role: str
+
+    class Config:
+        from_attributes = True
+
+
+# ---- Manajemen user (dibatasi Role.IT_ADMIN, lihat admin/routes.py) ----
+class AdminUserResponse(UserResponse):
+    created_at: datetime
+
+
+class UserRoleUpdateRequest(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def check_valid_role(cls, v: str) -> str:
+        from app.models import Role  # import lokal — hindari import melingkar di level modul
+        if v not in Role.ALL:
+            raise ValueError(f"Role tidak valid. Pilihan: {', '.join(Role.ALL)}")
+        return v
+
+
+# ---- System settings (dibatasi Role.IT_ADMIN — SRS FCR-003 Rules poin 2: force-stop LLM Commercial) ----
+class SystemSettingsResponse(BaseModel):
+    commercial_llm_force_stopped: bool
+    updated_by: str | None
+    updated_at: datetime | None
 
     class Config:
         from_attributes = True
@@ -132,3 +200,38 @@ class ChatReplyResponse(BaseModel):
     pii_detected: bool = False
     sources: list[str] = []
     new_title: str | None = None
+    escalated: bool = False  # FCR-003 poin 7: true kalau tiket helpdesk otomatis dibuat
+
+
+# ---- Helpdesk (FCR-003 poin 7 — eskalasi otomatis) ----
+class TicketResponse(BaseModel):
+    id: str
+    chat_id: str
+    user_id: str
+    user_email: str
+    confidence_score: int | None
+    status: str
+    created_at: datetime
+
+
+class TicketDetailResponse(TicketResponse):
+    chat_title: str
+    messages: list[MessageResponse]
+
+
+# ---- Audit log (dibatasi Role.ADMIN / Role.COMPLIANCE, lihat guardrail/routes.py) ----
+class AuditLogResponse(BaseModel):
+    id: str
+    user_id: str | None
+    event_type: str
+    severity: str
+    detail: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AuditSummaryResponse(BaseModel):
+    since_hours: int
+    counts_by_type: dict[str, int]

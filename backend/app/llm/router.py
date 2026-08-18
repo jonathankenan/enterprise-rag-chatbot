@@ -13,7 +13,6 @@ Alur guardrail lengkap:
    a. Cek kategori terlarang (saran hukum/medis/dst) -> ganti pesan penolakan
    b. DEMASK jawaban -> kembalikan placeholder PII ke data asli untuk user
 """
-import re
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -97,27 +96,12 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
         "3. NEVER mention the words 'context', 'provided context', 'document', or explain how you got the answer. Just give the answer naturally.\n"
         "4. You MUST respond in the exact same language that the user used in their latest message.\n"
         "5. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n"
-        "6. IMPORTANT: You must self-evaluate your confidence in the answer. Your confidence score MUST reflect ONLY how helpful the provided context was. If you had to use your internal knowledge because the context was useless, your confidence score MUST be very low (e.g., 0-10). Append your confidence score at the very end of your response EXACTLY in this format: [CONFIDENCE: 85]. Do not add any extra text inside or around the brackets.\n"
-        "7. The user's message may contain placeholders like [ID_NIK_1], [EMAIL_ADDRESS_1], or [PERSON_1]. These represent real personal data that has been hidden for privacy reasons. Treat each placeholder as if it were the actual data it represents, and respond naturally and specifically about it (e.g. confirm you've noted it, or answer questions about it). If you need to refer to that data in your response, use the EXACT placeholder tag (e.g. [ID_NIK_1]) verbatim — do not invent a fake value, do not describe it generically, and do not ignore it.\n\n"
+        "6. The user's message may contain placeholders like [ID_NIK_1], [EMAIL_ADDRESS_1], or [PERSON_1]. These represent real personal data that has been hidden for privacy reasons. Treat each placeholder as if it were the actual data it represents, and respond naturally and specifically about it (e.g. confirm you've noted it, or answer questions about it). If you need to refer to that data in your response, use the EXACT placeholder tag (e.g. [ID_NIK_1]) verbatim — do not invent a fake value, do not describe it generically, and do not ignore it.\n\n"
         f"{history_text}"
         f"{context_text}"
         f"USER LATEST MESSAGE: {user_message}\n\n"
         "YOUR RESPONSE:"
     )
-
-
-def _extract_confidence(reply: str) -> tuple[str, int | None]:
-    """
-    Cari tag [CONFIDENCE: X] di akhir teks, ambil angkanya,
-    lalu hapus tag itu dari teks yang ditampilkan ke user.
-    Kalau model tidak mengikuti instruksi (tidak ada tag), confidence_score jadi None.
-    """
-    confidence_score = None
-    match = re.search(r"\[CONFIDENCE:\s*(\d+)\]", reply, re.IGNORECASE)
-    if match:
-        confidence_score = int(match.group(1))
-        reply = re.sub(r"\[CONFIDENCE:\s*\d+\]", "", reply, flags=re.IGNORECASE).strip()
-    return reply, confidence_score
 
 
 async def get_standalone_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> str:
@@ -170,6 +154,7 @@ async def route_and_generate(
     preferred_provider: str = "on-prem",
     pii_entities: list[dict] | None = None,
     session_has_document: bool = False,
+    retrieval_confidence: int | None = None,
 ) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
@@ -179,6 +164,14 @@ async def route_and_generate(
       sebelum simpan ke histori — lihat SRS 3.j), berikan hasilnya di sini
       supaya Presidio TIDAK dijalankan ulang untuk teks yang sama. Kalau None,
       dihitung sendiri seperti sebelumnya (backward compatible).
+    retrieval_confidence: skor 0-100 dari compute_retrieval_confidence()
+      (vectorstore.py), dihitung caller SEBELUM route_and_generate dipanggil
+      (butuh search_query & chat_id yang tidak tersedia di sini). Dulu
+      confidence_score ini diminta dari LLM sendiri lewat instruksi prompt
+      "[CONFIDENCE: X]" — diganti karena angka self-report LLM tidak
+      grounded/tidak konsisten antar-provider (lihat diskusi saat fitur ini
+      diubah). Sekarang murni pass-through: fungsi ini TIDAK menghitung
+      confidence apa pun sendiri, cuma meneruskan apa yang caller berikan.
     """
     # ---------- Deteksi PII SEKALI SAJA — hasilnya dipakai berulang di bawah ----------
     if pii_entities is None:
@@ -211,14 +204,13 @@ async def route_and_generate(
         reply = get_refusal_message(blocked_category)
         confidence_score = None
     else:
-        reply, confidence_score = _extract_confidence(reply)
-
-        # [DARI TEMAN ANDA] Kalau tidak ada context sama sekali (mis. belum ada
-        # dokumen di-upload / retrieval kosong), confidence score tidak relevan
-        # untuk ditampilkan -> paksa None supaya badge "Yakin: X%" tidak muncul
-        # secara membingungkan pada percakapan santai/umum.
-        if not context_chunks:
-            confidence_score = None
+        # Confidence sekarang murni dari retrieval_confidence (parameter),
+        # bukan diekstrak dari teks jawaban LLM lagi. Kalau tidak ada context
+        # sama sekali (percakapan umum tanpa RAG), retrieval_confidence sudah
+        # otomatis None dari compute_retrieval_confidence() (koleksi kosong)
+        # — baris `if not context_chunks` yang dulu ada di sini jadi redundan
+        # dan dihapus, bukan dihilangkan diam-diam.
+        confidence_score = retrieval_confidence
 
         # ---------- AFTER LLM: demask PII kembali ke data asli ----------
         if pii_mapping:

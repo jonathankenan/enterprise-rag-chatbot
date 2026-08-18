@@ -2,20 +2,15 @@
 // [PENANGGUNG JAWAB: Anggota B]
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
-
-function getPasswordError(password) {
-  if (password.length < 8) return "Password minimal 8 karakter";
-  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-    return "Password harus mengandung huruf dan angka";
-  }
-  return null;
-}
+import { getPasswordError } from "../../lib/validation";
 
 export default function ChangePasswordPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const forcedByExpiry = searchParams.get("expired") === "true"; // SRS ISR-002.c
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -61,6 +56,11 @@ export default function ChangePasswordPage() {
   return (
     <div style={{ maxWidth: 360, margin: "80px auto", padding: 24 }}>
       <h1>Ganti Password</h1>
+      {forcedByExpiry && (
+        <p style={{ background: "#fff3cd", border: "1px solid #ffe69c", padding: 10, borderRadius: 4, fontSize: 13, color: "#664d03" }}>
+          Password Anda sudah berumur lebih dari 90 hari dan wajib diganti sebelum melanjutkan (SRS ISR-002.c).
+        </p>
+      )}
       <form onSubmit={handleSubmit}>
         <input
           type="password"
@@ -79,7 +79,7 @@ export default function ChangePasswordPage() {
           style={{ width: "100%", padding: 8, marginBottom: 4 }}
         />
         <p style={{ fontSize: 12, color: "#888", marginTop: 0, marginBottom: 12 }}>
-          Minimal 8 karakter, kombinasi huruf dan angka
+          Minimal 12 karakter, kombinasi huruf besar, huruf kecil, angka, dan karakter khusus
         </p>
         <input
           type="password"

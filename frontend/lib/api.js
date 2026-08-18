@@ -6,7 +6,10 @@
  */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register"];
+// startsWith, jadi "/api/auth/mfa" otomatis cakup /mfa/setup, /mfa/setup/confirm, /mfa/verify —
+// endpoint-endpoint ini sengaja dikecualikan dari auto-redirect 401 (lihat request()
+// di bawah), karena 401 di sini artinya "kode MFA salah", BUKAN "sesi berakhir".
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register", "/api/auth/mfa"];
 
 function getToken() {
   if (typeof window === "undefined") return null;
@@ -69,6 +72,25 @@ export const api = {
     request("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+
+  // ---- MFA (SRS ISR-001.d — wajib untuk role IT Admin) ----
+  mfaSetup: (mfaToken) =>
+    request("/api/auth/mfa/setup", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken }),
+    }),
+
+  mfaSetupConfirm: (mfaToken, secret, code) =>
+    request("/api/auth/mfa/setup/confirm", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken, secret, code }),
+    }),
+
+  mfaVerify: (mfaToken, code) =>
+    request("/api/auth/mfa/verify", {
+      method: "POST",
+      body: JSON.stringify({ mfa_token: mfaToken, code }),
     }),
 
   logout: () => {
@@ -142,4 +164,53 @@ export const api = {
       return res.blob();
     });
   },
+
+  // ---- Audit log (dibatasi Role.AUDIT_VIEWERS di backend — lihat guardrail/routes.py) ----
+  getAuditSummary: (sinceHours = 24) => request(`/api/audit/summary?since_hours=${sinceHours}`),
+
+  searchAudit: (params = {}) => {
+    const query = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v !== null && v !== undefined))
+    ).toString();
+    return request(`/api/audit/search${query ? `?${query}` : ""}`);
+  },
+
+  exportAuditCsv: (params = {}) => {
+    const token = getToken();
+    const query = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v !== null && v !== undefined))
+    ).toString();
+    return fetch(`${API_URL}/api/audit/export${query ? `?${query}` : ""}`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Export gagal (${res.status})`);
+      }
+      return res.blob();
+    });
+  },
+
+  // ---- Helpdesk tickets (dibatasi Role.IT_ADMIN — lihat helpdesk/routes.py) ----
+  listTickets: (statusFilter) =>
+    request(`/api/helpdesk/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
+
+  getTicket: (ticketId) => request(`/api/helpdesk/tickets/${ticketId}`),
+
+  closeTicket: (ticketId) =>
+    request(`/api/helpdesk/tickets/${ticketId}/close`, { method: "POST" }),
+
+  // ---- Manajemen user (dibatasi Role.IT_ADMIN — lihat admin/routes.py) ----
+  listUsers: () => request("/api/admin/users"),
+
+  updateUserRole: (userId, role) =>
+    request(`/api/admin/users/${userId}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+
+  getSystemSettings: () => request("/api/admin/system-settings"),
+
+  toggleCommercialLlm: () =>
+    request("/api/admin/system-settings/toggle-commercial-llm", { method: "POST" }),
 };

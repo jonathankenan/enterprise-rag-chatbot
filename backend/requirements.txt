@@ -22,3 +22,5 @@ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1
 rank_bm25==0.2.2
 langchain==0.3.0
 langchain-community==0.3.0
+pyotp==2.10.0
+qrcode==8.2

@@ -54,22 +54,35 @@ class NativeChromaRetriever(BaseRetriever):
     chat_id: str
     collection_name: str = "kb_general"
     top_k: int = 10
-    
+
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[LCDocument]:
         collection = get_collection(self.collection_name)
         if collection.count() == 0:
             return []
         results = collection.query(
-            query_texts=[query], 
+            query_texts=[query],
             n_results=min(self.top_k, collection.count()),
             where={"chat_id": self.chat_id},
-            include=["documents", "metadatas"]
+            include=["documents", "metadatas", "distances"],
         )
         docs = results.get("documents")
         metas = results.get("metadatas")
+        distances = results.get("distances")
         docs_list = docs[0] if docs else []
         metas_list = metas[0] if metas else []
-        return [LCDocument(page_content=d, metadata=m or {}) for d, m in zip(docs_list, metas_list)]
+        distances_list = distances[0] if distances else []
+
+        out = []
+        for d, m, dist in zip(docs_list, metas_list, distances_list):
+            # "_distance" DISELIPKAN ke metadata, dipakai belakangan oleh
+            # retrieve_context() untuk menghitung confidence — supaya tidak
+            # perlu query Chroma kedua kali cuma buat ambil angka jarak yang
+            # sebenarnya sudah didapat di query yang sama ini. Prefix "_"
+            # penanda ini bukan metadata bisnis (bukan filename/doc_id/dst).
+            meta = dict(m or {})
+            meta["_distance"] = dist
+            out.append(LCDocument(page_content=d, metadata=meta))
+        return out
 
 
 def custom_bm25_tokenizer(text: str) -> list[str]:
@@ -98,10 +111,36 @@ def get_bm25_retriever(chat_id: str, collection_name: str = "kb_general", top_k:
     )
     return retriever
 
-def retrieve_context(search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10) -> list[str]:
+def _distance_to_similarity_percent(distance: float) -> float:
+    """
+    Konversi distance Chroma -> cosine similarity (0.0-1.0). Dasar konversi
+    (dikonfirmasi EMPIRIS, bukan asumsi): koleksi ini pakai metrik default
+    Chroma, L2 SQUARED distance (bukan cosine distance), tapi embedding
+    model (all-MiniLM-L6-v2) menghasilkan vektor TERNORMALISASI (norm=1).
+    Untuk vektor satuan berlaku identitas matematis:
+        L2_squared = 2 - 2*cosine_similarity
+        => cosine_similarity = 1 - (L2_squared / 2)
+    """
+    return max(0.0, min(1.0, 1 - (distance / 2)))
+
+
+def retrieve_context(search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10) -> tuple[list[str], int | None]:
+    """
+    Kembalikan (potongan_teks, retrieval_confidence). Confidence 0-100
+    dihitung dari distance yang didapat SEKALI di dalam NativeChromaRetriever
+    di atas (via metadata["_distance"]) — TIDAK ada query Chroma kedua
+    terpisah lagi cuma untuk menghitung skor (dulu ada fungsi
+    compute_retrieval_confidence() sendiri yang query ulang; sekarang
+    dihapus, digabung ke sini).
+
+    Confidence cuma dihitung dari dokumen hasil LEG VECTOR (yang punya
+    "_distance" di metadata) — dokumen dari leg BM25 (keyword match, dipakai
+    kalau ensemble retrieval aktif) diabaikan untuk keperluan skor, karena
+    BM25 tidak punya angka yang sebanding dengan cosine similarity.
+    """
     chroma_retriever = NativeChromaRetriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
     bm25_retriever = get_bm25_retriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
-    
+
     if not bm25_retriever:
         docs = chroma_retriever.invoke(search_query)
     else:
@@ -110,8 +149,20 @@ def retrieve_context(search_query: str, chat_id: str, collection_name: str = "kb
             weights=[0.5, 0.5]
         )
         docs = ensemble.invoke(search_query)
-        
-    return [d.page_content for d in docs[:top_k]]
+
+    docs = docs[:top_k]
+
+    distances = [d.metadata["_distance"] for d in docs if "_distance" in d.metadata]
+    if distances:
+        similarities = [_distance_to_similarity_percent(dist) for dist in distances]
+        confidence = round((sum(similarities) / len(similarities)) * 100)
+    else:
+        # Tidak ada satupun dokumen dari leg vector (koleksi kosong, atau
+        # hasil ensemble kebetulan semua dari BM25) -> tidak relevan ditampilkan skor.
+        confidence = None
+
+    chunks = [d.page_content for d in docs]
+    return chunks, confidence
 
 def has_session_document(chat_id: str, collection_name: str = "kb_general") -> bool:
     collection = get_collection(collection_name)

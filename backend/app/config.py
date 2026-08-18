@@ -51,6 +51,22 @@ class Settings(BaseSettings):
     # (dev-friendly) tapi pakai key SEMENTARA yang hilang tiap restart.
     message_encryption_key: str = ""
 
+    # Eskalasi otomatis ke human helpdesk (SRS FCR-003 poin 7). Jawaban AI
+    # dengan confidence_score DI BAWAH ambang ini otomatis bikin tiket.
+    # Confidence None (percakapan umum tanpa RAG) TIDAK pernah memicu ini —
+    # itu bukan "jawaban tidak meyakinkan", cuma tidak relevan diberi skor.
+    #
+    # Nilai 20 (turun dari 30 semula) — dikalibrasi ulang setelah confidence
+    # diganti dari self-report LLM ke retrieval similarity (cosine). Skala
+    # keduanya BEDA: cosine similarity untuk konten yang genuinely relevan
+    # tapi beda kata-kata wajar cuma 30-60% (LLM self-report dulu cenderung
+    # jauh lebih "murah hati"). Ambang 30 di skala baru berisiko meng-eskalasi
+    # jawaban yang sebenarnya cukup baik. Ini kalibrasi awal dari sampel kecil
+    # — sebaiknya ditinjau ulang setelah ada data pemakaian nyata dari halaman
+    # /helpdesk (kalau tiket yang masuk mayoritas ternyata jawabannya sudah
+    # bagus, naikkan; kalau tiket yang seharusnya masuk malah lolos, turunkan).
+    escalation_confidence_threshold: int = 20
+
     @property
     def sensitive_keyword_list(self) -> list[str]:
         return [k.strip().lower() for k in self.sensitive_keywords.split(",") if k.strip()]

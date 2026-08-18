@@ -73,4 +73,13 @@ async def upload_document(
     db.add(doc_record)
     db.commit()
 
+    # Upload yang BERHASIL (beda dari DOCUMENT_BLOCKED di atas) — dokumen ini
+    # ikut memengaruhi jawaban AI untuk sesi chat terkait, layak dicatat siapa
+    # yang menambahkannya.
+    log_guardrail_event(
+        db, user.id, EventType.DOCUMENT_UPLOADED,
+        detail=f"document_upload:{file.filename}",
+        metadata={"chat_id": chat_id, "doc_id": doc_id, "chunk_count": chunk_count},
+    )
+
     return {"filename": file.filename, "chunks_indexed": chunk_count}

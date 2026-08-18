@@ -5,16 +5,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
-
-function getPasswordError(password) {
-  if (password.length < 8) {
-    return "Password minimal 8 karakter";
-  }
-  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-    return "Password harus mengandung huruf dan angka";
-  }
-  return null;
-}
+import { getPasswordError } from "../../lib/validation";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -81,7 +72,7 @@ export default function RegisterPage() {
           style={{ width: "100%", padding: 8, marginBottom: 4 }}
         />
         <p style={{ fontSize: 12, color: "#888", marginTop: 0, marginBottom: 12 }}>
-          Minimal 8 karakter, kombinasi huruf dan angka
+          Minimal 12 karakter, kombinasi huruf besar, huruf kecil, angka, dan karakter khusus
         </p>
         <input
           type="password"
