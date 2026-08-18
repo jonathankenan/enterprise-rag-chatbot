@@ -209,6 +209,34 @@ class HelpdeskTicket(Base):
     owner = relationship("User")  # one-directional, tidak perlu back_populates di User
 
 
+class HelpdeskSender:
+    USER = "user"
+    ADMIN = "admin"
+
+
+class HelpdeskMessage(Base):
+    """
+    Percakapan dua-arah user<->admin DI DALAM satu tiket — beda dari
+    Message (chat AI) yang sudah ada. Ditambahkan supaya "human helpdesk"
+    di SRS FCR-003 poin 7 benar-benar berupa chat dengan staf (real-time,
+    lewat WebSocket di helpdesk/ws.py), bukan cuma tiket satu-arah yang
+    dibaca sepihak oleh admin.
+
+    sender_id sengaja nullable — kalau nanti ada pesan sistem (mis. "tiket
+    ditutup oleh admin"), tidak perlu dikaitkan ke user manapun.
+    """
+    __tablename__ = "helpdesk_messages"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    ticket_id = Column(UUID(as_uuid=False), ForeignKey("helpdesk_tickets.id"), nullable=False)
+    sender_role = Column(String, nullable=False)  # HelpdeskSender.USER | ADMIN
+    sender_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    content = Column(EncryptedText, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    sender = relationship("User")
+
+
 class SystemSettings(Base):
     """
     Konfigurasi sistem yang bisa diubah RUNTIME oleh IT Admin (beda dari

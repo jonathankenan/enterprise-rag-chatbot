@@ -11,6 +11,7 @@ from app.chat.routes import router as chat_router
 from app.rag.routes import router as documents_router
 from app.guardrail.routes import router as audit_router
 from app.helpdesk.routes import router as helpdesk_router
+from app.helpdesk.ws import router as helpdesk_ws_router
 from app.admin.routes import router as admin_router
 
 # Buat semua tabel di PostgreSQL kalau belum ada (cukup untuk skala internship;
@@ -32,6 +33,7 @@ app.include_router(chat_router)
 app.include_router(documents_router)
 app.include_router(audit_router)
 app.include_router(helpdesk_router)
+app.include_router(helpdesk_ws_router)
 app.include_router(admin_router)
 
 

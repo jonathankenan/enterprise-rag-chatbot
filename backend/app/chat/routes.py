@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User, HelpdeskTicket, SystemSettings
+from app.models import Chat, Message, SenderType, User, SystemSettings
 from app.schemas import ChatCreate, ChatResponse, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
@@ -296,24 +296,17 @@ async def send_message(
     db.add(ai_msg)
     db.commit()
 
-    # ---------- FCR-003 poin 7: Eskalasi otomatis ke human helpdesk ----------
-    # Confidence None (percakapan umum tanpa RAG) sengaja TIDAK memicu ini —
-    # itu bukan "jawaban tidak meyakinkan", memang tidak relevan diberi skor
-    # (lihat router.py: confidence dipaksa None kalau context_chunks kosong).
-    escalated = False
-    if result.confidence_score is not None and result.confidence_score < settings.escalation_confidence_threshold:
-        ticket = HelpdeskTicket(
-            chat_id=chat.id, user_id=user.id, message_id=ai_msg.id,
-            confidence_score=result.confidence_score,
-        )
-        db.add(ticket)
-        db.commit()
-        escalated = True
-        log_guardrail_event(
-            db, user.id, EventType.HELPDESK_ESCALATED,
-            detail=f"chat_id={chat.id}, ticket_id={ticket.id}",
-            metadata={"confidence_score": result.confidence_score},
-        )
+    # ---------- FCR-003 poin 7: sistem MENAWARKAN eskalasi ke human helpdesk ----------
+    # SRS literal: "sistem menawarkan eskalasi" (bukan langsung membuat tiket
+    # tanpa izin). Confidence None (percakapan umum tanpa RAG) sengaja TIDAK
+    # memicu ini — itu bukan "jawaban tidak meyakinkan", memang tidak relevan
+    # diberi skor (lihat router.py: confidence dipaksa None kalau
+    # context_chunks kosong). Tiket BARU dibuat kalau user klik konfirmasi
+    # di frontend -> POST /api/helpdesk/tickets (lihat helpdesk/routes.py).
+    escalation_offered = (
+        result.confidence_score is not None
+        and result.confidence_score < settings.escalation_confidence_threshold
+    )
 
     new_title = None
     # commercial_llm_disabled dicek di sini juga — auto-generate judul chat
@@ -337,7 +330,8 @@ async def send_message(
         pii_detected=result.pii_detected,
         sources=context_chunks,
         new_title=new_title,
-        escalated=escalated,
+        message_id=ai_msg.id,
+        escalation_offered=escalation_offered,
     )
 
 @router.get("/{chat_id}/export-pdf")

@@ -44,7 +44,8 @@ class EventType:
     USER_REGISTERED = "user_registered"
     PASSWORD_CHANGED = "password_changed"
 
-    HELPDESK_ESCALATED = "helpdesk_escalated"    # FCR-003 poin 7: confidence rendah, tiket otomatis dibuat
+    HELPDESK_ESCALATED = "helpdesk_escalated"    # FCR-003 poin 7: user setuju tawaran eskalasi, tiket dibuat
+    HELPDESK_TICKET_CLOSED = "helpdesk_ticket_closed"  # admin menutup tiket
     USER_ROLE_CHANGED = "user_role_changed"      # admin ubah role user lain
     COMMERCIAL_LLM_TOGGLED = "commercial_llm_toggled"  # IT Admin nyala/matikan force-stop LLM commercial
 
@@ -78,6 +79,7 @@ _SEVERITY_MAP = {
     EventType.USER_REGISTERED: Severity.LOW,
     EventType.PASSWORD_CHANGED: Severity.LOW,
     EventType.HELPDESK_ESCALATED: Severity.MEDIUM,  # bukan pelanggaran keamanan, tapi sinyal kualitas layanan yang layak ditinjau
+    EventType.HELPDESK_TICKET_CLOSED: Severity.LOW,
     EventType.USER_ROLE_CHANGED: Severity.HIGH,     # perubahan hak akses — selalu layak ditinjau
     EventType.COMMERCIAL_LLM_TOGGLED: Severity.CRITICAL,  # mempengaruhi SEMUA user sistem sekaligus
 }

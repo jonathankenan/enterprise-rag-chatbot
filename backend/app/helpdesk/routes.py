@@ -1,35 +1,85 @@
 """
 [PENANGGUNG JAWAB: Anggota B]
-Endpoint tiket helpdesk — SRS FCR-003 poin 7 "Eskalasi otomatis". Tiket
-dibuat otomatis di chat/routes.py saat confidence_score AI di bawah ambang
-(settings.escalation_confidence_threshold). Router ini cuma untuk MELIHAT
-tiket yang sudah dibuat — tidak ada endpoint untuk membuat tiket manual
-(sesuai SRS: "sistem membuat tiket otomatis", bukan user yang membuatnya).
+Endpoint tiket helpdesk — SRS FCR-003 poin 7 "Eskalasi otomatis". Sesuai
+teks SRS literal ("sistem MENAWARKAN eskalasi ke human helpdesk"), tiket
+TIDAK dibuat otomatis oleh sistem lagi — chat/routes.py cuma menandai
+jawaban sebagai escalation_offered=True, lalu USER sendiri yang konfirmasi
+lewat POST /tickets di bawah kalau mau lanjut. "Human helpdesk" di sini
+diimplementasikan sebagai chat real-time (lihat helpdesk/ws.py untuk
+WebSocket-nya), bukan cuma tiket satu-arah yang dibaca sepihak oleh admin.
 
-Dibatasi Role.IT_ADMIN — belum ada satu pun dari 8 role SRS yang benar-benar
-representasi "staf human helpdesk" secara eksplisit, jadi IT Admin dipakai
-sebagai analog terdekat untuk sekarang (keputusan pragmatis, bukan pemetaan
-SRS yang literal).
+list_tickets/close_ticket tetap dibatasi Role.IT_ADMIN (belum ada role SRS
+yang eksplisit representasi staf helpdesk, jadi IT Admin dipakai sebagai
+analog terdekat). get_ticket & POST /tickets bisa diakses PEMILIK tiket
+ATAU IT_ADMIN — pemilik perlu baca/kirim pesan di tiketnya sendiri.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, HelpdeskTicket, Chat
-from app.schemas import TicketResponse, TicketDetailResponse, MessageResponse
-from app.auth.utils import require_role
+from app.models import Role, User, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, Chat, Message, SenderType
+from app.schemas import (
+    TicketResponse, TicketDetailResponse, MessageResponse,
+    CreateTicketRequest, HelpdeskMessageResponse,
+)
+from app.auth.utils import require_role, get_current_user
 from app.chat.routes import _display_content
+from app.guardrail.audit_log import log_guardrail_event, EventType
 
 router = APIRouter(prefix="/api/helpdesk", tags=["helpdesk"])
+
+
+def _get_ticket_or_403(ticket_id: str, db: Session, user: User) -> HelpdeskTicket:
+    """Dipakai bersama oleh get_ticket() dan handshake WebSocket (helpdesk/ws.py)."""
+    ticket = db.query(HelpdeskTicket).filter(HelpdeskTicket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tiket tidak ditemukan")
+    if ticket.user_id != user.id and user.role != Role.IT_ADMIN:
+        raise HTTPException(status_code=403, detail="Anda tidak berhak mengakses tiket ini")
+    return ticket
+
+
+def _ticket_detail(ticket: HelpdeskTicket, db: Session) -> TicketDetailResponse:
+    chat = db.query(Chat).filter(Chat.id == ticket.chat_id).first()
+    # "Riwayat percakapan terlampir dalam tiket" (SRS) — demasked untuk pihak
+    # yang berwenang (pemilik chat aslinya, atau staf helpdesk yang menangani).
+    messages = [
+        MessageResponse(
+            id=m.id, sender=m.sender, content=_display_content(m),
+            llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
+        )
+        for m in chat.messages
+    ]
+    ticket_messages = (
+        db.query(HelpdeskMessage)
+        .filter(HelpdeskMessage.ticket_id == ticket.id)
+        .order_by(HelpdeskMessage.created_at)
+        .all()
+    )
+    return TicketDetailResponse(
+        id=ticket.id, chat_id=ticket.chat_id, user_id=ticket.user_id, user_email=ticket.owner.email,
+        confidence_score=ticket.confidence_score, status=ticket.status, created_at=ticket.created_at,
+        chat_title=chat.title,
+        messages=messages,
+        ticket_messages=[HelpdeskMessageResponse.model_validate(m) for m in ticket_messages],
+    )
 
 
 @router.get("/tickets", response_model=list[TicketResponse])
 def list_tickets(
     status: str | None = None,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role(Role.IT_ADMIN)),
+    user: User = Depends(get_current_user),
 ):
+    """
+    IT Admin melihat SEMUA tiket (antrian helpdesk). User biasa cuma boleh
+    lihat tiketnya SENDIRI — dipaksa lewat filter user_id, bukan lewat
+    require_role, supaya user bisa navigasi balik ke tiket aktifnya sendiri
+    (lihat chat/page.jsx sidebar) tanpa endpoint terpisah.
+    """
     query = db.query(HelpdeskTicket).join(User, HelpdeskTicket.user_id == User.id)
+    if user.role != Role.IT_ADMIN:
+        query = query.filter(HelpdeskTicket.user_id == user.id)
     if status:
         query = query.filter(HelpdeskTicket.status == status)
     tickets = query.order_by(HelpdeskTicket.created_at.desc()).all()
@@ -42,28 +92,54 @@ def list_tickets(
     ]
 
 
-@router.get("/tickets/{ticket_id}", response_model=TicketDetailResponse)
-def get_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_role(Role.IT_ADMIN))):
-    ticket = db.query(HelpdeskTicket).filter(HelpdeskTicket.id == ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Tiket tidak ditemukan")
+@router.post("/tickets", response_model=TicketDetailResponse)
+def create_ticket(
+    payload: CreateTicketRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    User SENDIRI yang konfirmasi tawaran eskalasi (SRS: "sistem menawarkan
+    eskalasi" — bukan langsung membuat tiket tanpa izin). message_id harus
+    jawaban AI di CHAT MILIK user ini, dan confidence-nya memang di bawah
+    ambang — dua validasi ini mencegah user membuat tiket dari pesan
+    sembarangan (mis. jawaban high-confidence, atau chat milik orang lain).
+    """
+    message = db.query(Message).filter(Message.id == payload.message_id).first()
+    if not message or message.sender != SenderType.assistant:
+        raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
 
-    chat = db.query(Chat).filter(Chat.id == ticket.chat_id).first()
-    # "Riwayat percakapan terlampir dalam tiket" (SRS) — demasked untuk staf
-    # helpdesk yang berwenang menangani, sama seperti pemilik chat aslinya.
-    messages = [
-        MessageResponse(
-            id=m.id, sender=m.sender, content=_display_content(m),
-            llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
-        )
-        for m in chat.messages
-    ]
+    chat = db.query(Chat).filter(Chat.id == message.chat_id).first()
+    if not chat or chat.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Pesan ini bukan milik Anda")
 
-    return TicketDetailResponse(
-        id=ticket.id, chat_id=ticket.chat_id, user_id=ticket.user_id, user_email=ticket.owner.email,
-        confidence_score=ticket.confidence_score, status=ticket.status, created_at=ticket.created_at,
-        chat_title=chat.title, messages=messages,
+    if message.confidence_score is None:
+        raise HTTPException(status_code=400, detail="Pesan ini tidak memenuhi syarat eskalasi")
+
+    existing = db.query(HelpdeskTicket).filter(HelpdeskTicket.message_id == message.id).first()
+    if existing:
+        return _ticket_detail(existing, db)
+
+    ticket = HelpdeskTicket(
+        chat_id=chat.id, user_id=user.id, message_id=message.id,
+        confidence_score=message.confidence_score,
     )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    log_guardrail_event(
+        db, user.id, EventType.HELPDESK_ESCALATED,
+        detail=f"chat_id={chat.id}, ticket_id={ticket.id}",
+        metadata={"confidence_score": message.confidence_score},
+    )
+    return _ticket_detail(ticket, db)
+
+
+@router.get("/tickets/{ticket_id}", response_model=TicketDetailResponse)
+def get_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    ticket = _get_ticket_or_403(ticket_id, db, user)
+    return _ticket_detail(ticket, db)
 
 
 @router.post("/tickets/{ticket_id}/close", response_model=TicketResponse)
@@ -73,6 +149,10 @@ def close_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Dep
         raise HTTPException(status_code=404, detail="Tiket tidak ditemukan")
     ticket.status = "closed"
     db.commit()
+    log_guardrail_event(
+        db, user.id, EventType.HELPDESK_TICKET_CLOSED,
+        detail=f"ticket_id={ticket.id}",
+    )
     return TicketResponse(
         id=ticket.id, chat_id=ticket.chat_id, user_id=ticket.user_id, user_email=ticket.owner.email,
         confidence_score=ticket.confidence_score, status=ticket.status, created_at=ticket.created_at,

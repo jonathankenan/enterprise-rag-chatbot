@@ -19,6 +19,7 @@ export default function ChatPage() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [llmProvider, setLlmProvider] = useState("on-prem");
   const [loginInfo, setLoginInfo] = useState(null); // SRS ISR-001.g
+  const [activeTickets, setActiveTickets] = useState([]); // tiket helpdesk milik user yang masih "open" — navigasi balik
 
   // Guard supaya loadChatHistory() (yang bisa memicu pembuatan chat baru
   // otomatis kalau history kosong) tidak terpanggil dua kali. React 18
@@ -41,6 +42,13 @@ export default function ChatPage() {
       .then((user) => {
         setCurrentUser(user);
         setCheckingSession(false);
+        // IT Admin punya halaman /helpdesk sendiri buat lihat SEMUA tiket
+        // (antrian) — daftar di sidebar ini khusus "tiket SAYA" buat user
+        // biasa navigasi balik, jadi sengaja tidak dipanggil untuk admin
+        // supaya tidak tumpang tindih/membingungkan dengan halaman itu.
+        if (user.role !== "it_admin") {
+          api.listTickets("open").then(setActiveTickets).catch(() => {});
+        }
       })
       .catch(() => {
         api.logout();
@@ -148,7 +156,9 @@ export default function ChatPage() {
           llm_used: result.llm_used,
           confidence_score: result.confidence_score,
           pii_detected: result.pii_detected,
-          escalated: result.escalated,
+          message_id: result.message_id,
+          escalation_offered: result.escalation_offered,
+          escalation_status: result.escalation_offered ? "offered" : null,
         },
       ]);
     } catch (err) {
@@ -156,6 +166,34 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // SRS FCR-003 poin 7: "sistem MENAWARKAN eskalasi" — tiket baru dibuat
+  // kalau user klik tombol ini, bukan otomatis. message_id dikirim ke
+  // backend supaya tiket terikat ke jawaban low-confidence yang tepat.
+  async function handleEscalate(messageId) {
+    setMessages((prev) =>
+      prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "creating" } : m))
+    );
+    try {
+      const ticket = await api.createTicket(messageId);
+      setMessages((prev) =>
+        prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "created", ticket_id: ticket.id } : m))
+      );
+      setActiveTickets((prev) => [ticket, ...prev]);
+      router.push(`/helpdesk/tickets/${ticket.id}`);
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "offered" } : m))
+      );
+      alert(err.message || "Gagal membuat tiket eskalasi");
+    }
+  }
+
+  function handleDismissEscalation(messageId) {
+    setMessages((prev) =>
+      prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "dismissed" } : m))
+    );
   }
 
   async function handleFileUpload(e) {
@@ -274,6 +312,26 @@ export default function ChatPage() {
           ))}
         </div>
 
+        {/* Navigasi balik ke tiket helpdesk yang masih aktif (status "open")
+            — dibutuhkan karena redirect ke halaman tiket cuma terjadi SEKALI
+            waktu klik "Ya, eskalasi"; kalau user pindah ke chat lain lalu
+            mau balik, tidak ada jalan lain tanpa ini. Cuma untuk user biasa
+            (lihat useEffect di atas — tidak di-fetch untuk IT Admin). */}
+        {activeTickets.length > 0 && (
+          <div style={{ borderTop: "1px solid #ddd", paddingTop: 12, marginTop: 12 }}>
+            <h3 style={{ margin: "0 0 8px", fontSize: 13, color: "#666" }}>🎫 Tiket Helpdesk Aktif</h3>
+            {activeTickets.map((t) => (
+              <Link
+                key={t.id}
+                href={`/helpdesk/tickets/${t.id}`}
+                style={{ display: "block", padding: "8px 10px", marginBottom: 6, background: "#e0f2fe", border: "1px solid #7dd3fc", borderRadius: 4, fontSize: 12, color: "#0c4a6e" }}
+              >
+                Confidence {t.confidence_score}% — buka chat →
+              </Link>
+            ))}
+          </div>
+        )}
+
         {/* Info user + logout, diletakkan di bawah sidebar */}
         <div style={{ borderTop: "1px solid #ddd", paddingTop: 12, marginTop: 12 }}>
           {currentUser && (
@@ -386,9 +444,35 @@ export default function ChatPage() {
                   ⚠ Data pribadi terdeteksi pada pesan ini — disamarkan otomatis sebelum diproses AI.
                 </div>
               )}
-              {m.escalated && (
-                <div style={{ fontSize: 11, color: "#0070f3", marginTop: 2, fontWeight: 500 }}>
-                  🎫 Jawaban ini kurang meyakinkan — pertanyaan Anda otomatis dieskalasi ke tim helpdesk.
+              {m.escalation_status && m.escalation_status !== "dismissed" && (
+                <div style={{ fontSize: 12, color: "#0c4a6e", marginTop: 6, padding: 8, background: "#e0f2fe", border: "1px solid #7dd3fc", borderRadius: 6, maxWidth: "80%" }}>
+                  {(m.escalation_status === "offered" || m.escalation_status === "creating") && (
+                    <>
+                      <div style={{ marginBottom: 6 }}>🎫 Jawaban ini kurang meyakinkan. Ingin eskalasi ke tim helpdesk (chat langsung dengan admin)?</div>
+                      <button
+                        disabled={m.escalation_status === "creating"}
+                        onClick={() => handleEscalate(m.message_id)}
+                        style={{ marginRight: 8, padding: "4px 10px", fontSize: 12, background: "#0070f3", color: "#fff", border: "none", borderRadius: 4 }}
+                      >
+                        {m.escalation_status === "creating" ? "Membuat tiket..." : "Ya, eskalasi"}
+                      </button>
+                      <button
+                        disabled={m.escalation_status === "creating"}
+                        onClick={() => handleDismissEscalation(m.message_id)}
+                        style={{ padding: "4px 10px", fontSize: 12, background: "transparent", border: "1px solid #94a3b8", borderRadius: 4 }}
+                      >
+                        Tidak, terima kasih
+                      </button>
+                    </>
+                  )}
+                  {m.escalation_status === "created" && (
+                    <>
+                      ✅ Tiket dibuat.{" "}
+                      <Link href={`/helpdesk/tickets/${m.ticket_id}`} style={{ color: "#0070f3", fontWeight: 600 }}>
+                        Buka chat dengan admin →
+                      </Link>
+                    </>
+                  )}
                 </div>
               )}
             </div>

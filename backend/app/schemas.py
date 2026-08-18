@@ -200,10 +200,19 @@ class ChatReplyResponse(BaseModel):
     pii_detected: bool = False
     sources: list[str] = []
     new_title: str | None = None
-    escalated: bool = False  # FCR-003 poin 7: true kalau tiket helpdesk otomatis dibuat
+    message_id: str | None = None
+    # FCR-003 poin 7: "sistem MENAWARKAN eskalasi" — bukan langsung bikin
+    # tiket. True kalau confidence di bawah ambang, dipakai frontend untuk
+    # tampilkan banner tanya user, BUKAN auto-create tiket (lihat
+    # helpdesk/routes.py: POST /tickets, dipanggil user kalau setuju).
+    escalation_offered: bool = False
 
 
-# ---- Helpdesk (FCR-003 poin 7 — eskalasi otomatis) ----
+# ---- Helpdesk (FCR-003 poin 7 — eskalasi ke human helpdesk) ----
+class CreateTicketRequest(BaseModel):
+    message_id: str  # jawaban AI low-confidence yang user setuju dieskalasi
+
+
 class TicketResponse(BaseModel):
     id: str
     chat_id: str
@@ -214,9 +223,26 @@ class TicketResponse(BaseModel):
     created_at: datetime
 
 
+class HelpdeskMessageResponse(BaseModel):
+    id: str
+    ticket_id: str
+    sender_role: str
+    sender_id: str | None
+    content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SendTicketMessageRequest(BaseModel):
+    content: str
+
+
 class TicketDetailResponse(TicketResponse):
     chat_title: str
-    messages: list[MessageResponse]
+    messages: list[MessageResponse]  # riwayat chat AI (konteks awal, read-only)
+    ticket_messages: list[HelpdeskMessageResponse]  # percakapan user<->admin
 
 
 # ---- Audit log (dibatasi Role.ADMIN / Role.COMPLIANCE, lihat guardrail/routes.py) ----

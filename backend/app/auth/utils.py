@@ -96,8 +96,15 @@ def decode_pending_mfa_token(token: str) -> str:
     return payload["sub"]
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    """Dependency FastAPI — dipakai di endpoint yang butuh login."""
+def resolve_user_from_token(token: str, db: Session) -> User:
+    """
+    Logika inti verifikasi token (JWT valid, sesi masih aktif ISR-001.f,
+    idle-timeout ISR-005), dipisah dari get_current_user() supaya bisa dipakai
+    di jalur non-HTTP-header juga — WebSocket browser TIDAK BISA kirim header
+    Authorization custom saat handshake, jadi token dikirim lewat query
+    param (?token=...) dan divalidasi lewat fungsi yang sama ini, bukan
+    duplikasi logika.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Sesi tidak valid, silakan login kembali",
@@ -138,6 +145,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     _last_activity[user.id] = now
 
     return user
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    """Dependency FastAPI — dipakai di endpoint HTTP biasa yang butuh login."""
+    return resolve_user_from_token(token, db)
 
 
 def require_role(*allowed_roles: str):

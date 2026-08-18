@@ -191,14 +191,33 @@ export const api = {
     });
   },
 
-  // ---- Helpdesk tickets (dibatasi Role.IT_ADMIN — lihat helpdesk/routes.py) ----
+  // ---- Helpdesk tickets ----
+  // listTickets & closeTicket dibatasi Role.IT_ADMIN di backend.
+  // createTicket & getTicket bisa dipanggil pemilik tiket ATAU IT_ADMIN
+  // (lihat helpdesk/routes.py: _get_ticket_or_403).
   listTickets: (statusFilter) =>
     request(`/api/helpdesk/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
+
+  createTicket: (messageId) =>
+    request("/api/helpdesk/tickets", {
+      method: "POST",
+      body: JSON.stringify({ message_id: messageId }),
+    }),
 
   getTicket: (ticketId) => request(`/api/helpdesk/tickets/${ticketId}`),
 
   closeTicket: (ticketId) =>
     request(`/api/helpdesk/tickets/${ticketId}/close`, { method: "POST" }),
+
+  // WebSocket tidak lewat request() (bukan HTTP fetch biasa) — helper ini
+  // cuma menyusun URL-nya (ws:// bukan http://) + token lewat query param,
+  // karena browser tidak bisa kirim header Authorization custom saat
+  // WebSocket handshake.
+  ticketSocketUrl: (ticketId) => {
+    const token = getToken();
+    const wsBase = API_URL.replace(/^http/, "ws");
+    return `${wsBase}/ws/helpdesk/tickets/${ticketId}?token=${encodeURIComponent(token || "")}`;
+  },
 
   // ---- Manajemen user (dibatasi Role.IT_ADMIN — lihat admin/routes.py) ----
   listUsers: () => request("/api/admin/users"),
