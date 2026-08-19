@@ -24,8 +24,96 @@ def get_collection(name: str = "kb_general"):
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """
+    Extract PDF to text for RAG indexing using a hybrid strategy.
+
+    Primary pass: pymupdf4llm.to_markdown() provides clean markdown
+    formatting (especially for tables), which the MarkdownTextSplitter
+    downstream handles well.
+
+    Known issue (confirmed via diagnostic against Project NEXUS BRD, page 6):
+    when a table is immediately followed by non-tabular text (bulleted lists,
+    plain paragraphs) on the same PDF page, pymupdf4llm silently drops the
+    post-table content. Root cause: the table bounding-box detection
+    (table_strategy='lines_strict') swallows/overlaps the adjacent text
+    region, so it never gets rendered into the markdown output. This affects
+    any PDF with this common layout pattern, not just the test document.
+
+    Safety-net pass: pymupdf4llm inserts '-----' page-break separators
+    between pages in the markdown output. We split on those to get per-page
+    markdown segments, then compare each segment's significant-word set
+    against the corresponding page's raw plain text from fitz. If a page's
+    markdown segment is missing more than 20% of the words in its plain text,
+    we append the raw plain text as a fallback so the content reaches the
+    chunker/indexer regardless of what the markdown pass dropped.
+
+    The 20% threshold is intentionally tight: table-only pages typically have
+    near-100% coverage because the table cell text renders identically in both
+    plain text and markdown. Pages that genuinely dropped post-table prose
+    show 30-50% coverage gaps — well above the noise floor.
+    """
     doc = fitz.Document(stream=file_bytes, filetype="pdf")
-    return pymupdf4llm.to_markdown(doc=doc)
+
+    # ── Primary pass: pymupdf4llm markdown ──────────────────────────────────
+    md_output = pymupdf4llm.to_markdown(doc=doc)
+
+    # ── Split markdown into per-page segments ────────────────────────────────
+    # pymupdf4llm inserts '\n\n-----\n\n' between pages. Split on that to
+    # align markdown segments with their source pages. The resulting list
+    # should have the same length as doc.page_count; if the split count
+    # doesn't match (e.g. content contains '-----' for other reasons), we
+    # fall back gracefully to the full-doc word-set instead.
+    PAGE_BREAK = "\n\n-----\n\n"
+    md_segments = md_output.split(PAGE_BREAK)
+
+    def _significant_words(text: str) -> set[str]:
+        """Lowercase alphabetic words longer than 3 chars (ignores numbers and
+        short stop-words that create noise between plain-text and markdown)."""
+        return {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text)}
+
+    # Full-doc fallback word-set — used when page-count doesn't align
+    md_words_global = _significant_words(md_output)
+    segments_match = len(md_segments) == len(doc)
+
+    COVERAGE_THRESHOLD = 0.80  # flag if page markdown covers < 80% of plain-text words
+
+    fallback_sections: list[str] = []
+
+    for page_num, page in enumerate(doc):
+        plain_text = page.get_text()
+        if not plain_text.strip():
+            continue  # blank/image-only page
+
+        page_words = _significant_words(plain_text)
+        if not page_words:
+            continue
+
+        # Use the page-local markdown segment when available — this gives a
+        # much more accurate signal than the full-doc word-set, because words
+        # from the dropped sections (e.g. 4.2 bullet list) often appear
+        # elsewhere in the document, artificially inflating the coverage score.
+        if segments_match:
+            md_page_words = _significant_words(md_segments[page_num])
+        else:
+            md_page_words = md_words_global
+
+        covered = page_words & md_page_words
+        coverage = len(covered) / len(page_words)
+
+        if coverage < COVERAGE_THRESHOLD:
+            clean = plain_text.strip()
+            fallback_sections.append(
+                f"\n\n<!-- plain-text fallback page {page_num + 1}"
+                f" (pymupdf4llm coverage {coverage:.0%}) -->\n{clean}"
+            )
+
+    doc.close()
+
+    if fallback_sections:
+        return md_output + "\n" + "\n".join(fallback_sections)
+    return md_output
+
+
 
 
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
