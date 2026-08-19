@@ -20,6 +20,8 @@ export default function ChatPage() {
   const [llmProvider, setLlmProvider] = useState("on-prem");
   const [loginInfo, setLoginInfo] = useState(null); // SRS ISR-001.g
   const [activeTickets, setActiveTickets] = useState([]); // tiket helpdesk milik user yang masih "open" — navigasi balik
+  const [editingChatId, setEditingChatId] = useState(null); // id chat yang sedang di-rename inline
+  const [editTitle, setEditTitle] = useState("");           // nilai input sementara saat rename
 
   // Guard supaya loadChatHistory() (yang bisa memicu pembuatan chat baru
   // otomatis kalau history kosong) tidak terpanggil dua kali. React 18
@@ -129,6 +131,31 @@ export default function ChatPage() {
       loadChatHistory();
     } catch (err) {
       console.error("Gagal menghapus percakapan:", err);
+    }
+  }
+
+  function startEditing(e, chat) {
+    e.stopPropagation();
+    setEditingChatId(chat.id);
+    setEditTitle(chat.title);
+  }
+
+  async function saveTitle(e, chatId) {
+    e.stopPropagation();
+    const trimmed = editTitle.trim();
+    if (!trimmed) {
+      setEditingChatId(null);
+      return;
+    }
+    try {
+      const updated = await api.renameChat(chatId, trimmed);
+      setChatHistory((prev) =>
+        prev.map((c) => (c.id === chatId ? { ...c, title: updated.title } : c))
+      );
+    } catch (err) {
+      alert("Gagal mengubah judul: " + err.message);
+    } finally {
+      setEditingChatId(null);
     }
   }
 
@@ -288,22 +315,58 @@ export default function ChatPage() {
                 border: "1px solid #ddd"
               }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div style={{ fontWeight: "bold", fontSize: "14px", flex: 1, paddingRight: "8px" }}>{chat.title}</div>
-                <button
-                  onClick={(e) => handleDeleteChat(e, chat.id)}
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    cursor: "pointer",
-                    color: "#d32f2f",
-                    padding: "0 4px",
-                    fontSize: "14px",
-                    lineHeight: "1"
-                  }}
-                  title="Hapus percakapan"
-                >
-                  ✕
-                </button>
+                {editingChatId === chat.id ? (
+                  // ── Inline edit mode ──
+                  <>
+                    <input
+                      autoFocus
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveTitle(e, chat.id);
+                        if (e.key === "Escape") { e.stopPropagation(); setEditingChatId(null); }
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      maxLength={100}
+                      style={{
+                        flex: 1,
+                        fontSize: "13px",
+                        padding: "2px 6px",
+                        borderRadius: "3px",
+                        border: "1px solid #0070f3",
+                        marginRight: "4px",
+                        outline: "none",
+                      }}
+                    />
+                    <button
+                      onClick={(e) => saveTitle(e, chat.id)}
+                      title="Simpan"
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#2e7d32", padding: "0 3px", fontSize: "14px" }}
+                    >✓</button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setEditingChatId(null); }}
+                      title="Batal"
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#888", padding: "0 3px", fontSize: "14px" }}
+                    >✕</button>
+                  </>
+                ) : (
+                  // ── Normal display mode ──
+                  <>
+                    <div style={{ fontWeight: "bold", fontSize: "14px", flex: 1, paddingRight: "8px" }}>{chat.title}</div>
+                    <div style={{ display: "flex", gap: "2px", flexShrink: 0 }}>
+                      <button
+                        onClick={(e) => startEditing(e, chat)}
+                        title="Ubah nama"
+                        style={{ background: "transparent", border: "none", cursor: "pointer", color: "#555", padding: "0 3px", fontSize: "13px", lineHeight: "1" }}
+                      >✏️</button>
+                      <button
+                        onClick={(e) => handleDeleteChat(e, chat.id)}
+                        title="Hapus percakapan"
+                        style={{ background: "transparent", border: "none", cursor: "pointer", color: "#d32f2f", padding: "0 4px", fontSize: "14px", lineHeight: "1" }}
+                      >✕</button>
+                    </div>
+                  </>
+                )}
               </div>
               <div style={{ fontSize: "11px", color: "#888", marginTop: "4px" }}>
                 {new Date(chat.created_at.endsWith("Z") ? chat.created_at : chat.created_at + "Z").toLocaleString()}

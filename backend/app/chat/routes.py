@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import Chat, Message, SenderType, User, SystemSettings
-from app.schemas import ChatCreate, ChatResponse, MessageCreate, MessageResponse, ChatReplyResponse
+from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import (
@@ -124,6 +124,30 @@ def delete_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depend
     db.delete(chat)
     db.commit()
     return {"detail": "Percakapan berhasil dihapus"}
+
+
+@router.patch("/{chat_id}/rename", response_model=ChatResponse)
+def rename_chat(
+    chat_id: str,
+    payload: ChatRenameRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """[B] Ganti judul percakapan secara manual."""
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+    if chat.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Anda tidak memiliki akses ke chat ini.")
+    old_title = chat.title
+    chat.title = payload.title
+    db.commit()
+    db.refresh(chat)
+    log_guardrail_event(
+        db, user.id, EventType.CHAT_RENAMED,
+        detail=f"chat_id={chat.id}, renamed from='{old_title}' to='{chat.title}'",
+    )
+    return chat
 
 
 @router.post("/message", response_model=ChatReplyResponse)
