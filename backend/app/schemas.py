@@ -152,6 +152,20 @@ class ChatResponse(BaseModel):
         from_attributes = True
 
 
+class ChatRenameRequest(BaseModel):
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Judul chat tidak boleh kosong.")
+        if len(v) > 100:
+            raise ValueError("Judul chat maksimal 100 karakter.")
+        return v
+
+
 class MessageCreate(BaseModel):
     chat_id: str
     content: str

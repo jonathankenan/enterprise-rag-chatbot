@@ -51,6 +51,7 @@ async def upload_document(
     doc_blocked = is_prompt_blocked(text)
     doc_injection = is_prompt_injection(text)
 
+
     if doc_blocked or doc_injection:
         metadata = {"filename": file.filename, "chat_id": chat_id}
         if doc_blocked:

@@ -119,6 +119,12 @@ export const api = {
 
   deleteChat: (chatId) => request(`/api/chat/${chatId}`, { method: "DELETE" }),
 
+  renameChat: (chatId, title) =>
+    request(`/api/chat/${chatId}/rename`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+
   getMessages: (chatId) => request(`/api/chat/${chatId}/messages`),
 
   sendMessage: (chatId, content, llmProvider = "on-prem") =>

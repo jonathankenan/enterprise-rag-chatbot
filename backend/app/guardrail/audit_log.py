@@ -39,6 +39,7 @@ class EventType:
     # kejadian signifikan, bukan noise rutin.
     CHAT_CREATED = "chat_created"
     CHAT_DELETED = "chat_deleted"                # aksi destruktif — sebelumnya TIDAK ADA jejak sama sekali
+    CHAT_RENAMED = "chat_renamed"                # user ganti judul chat secara manual
     DOCUMENT_UPLOADED = "document_uploaded"      # upload yang BERHASIL (beda dari DOCUMENT_BLOCKED)
     CHAT_EXPORTED = "chat_exported"              # data keluar sistem sebagai file
     USER_REGISTERED = "user_registered"
