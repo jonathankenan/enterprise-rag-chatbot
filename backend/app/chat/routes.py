@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User, SystemSettings
+from app.models import Chat, Message, SenderType, User, SystemSettings, Role
 from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
@@ -360,7 +360,20 @@ async def send_message(
 
 @router.get("/{chat_id}/export-pdf")
 def export_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """[B] Ekspor riwayat percakapan menjadi PDF."""
+    """
+    [B] Ekspor riwayat percakapan menjadi PDF.
+
+    Spesifikasi Tingkat 2 (F2-08): "Ekspor percakapan ke PDF, dibatasi hanya
+    untuk role tertentu (mis. admin, compliance)." Daftar role yang
+    diizinkan dikonfigurasi RUNTIME oleh IT Admin (SystemSettings.
+    export_allowed_roles, lihat admin/routes.py) — bukan daftar tetap di
+    kode, supaya bisa disesuaikan tanpa deploy ulang.
+    """
+    system_settings = db.query(SystemSettings).filter(SystemSettings.id == "global").first()
+    allowed_roles = system_settings.get_export_allowed_roles() if system_settings else [Role.IT_ADMIN, Role.COMPLIANCE]
+    if user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Role Anda tidak diizinkan mengekspor percakapan ke PDF")
+
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")

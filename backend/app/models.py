@@ -255,5 +255,17 @@ class SystemSettings(Base):
 
     id = Column(String, primary_key=True, default="global")
     commercial_llm_force_stopped = Column(Boolean, nullable=False, default=False)
+    # F2-08 (spesifikasi Tingkat 2): "Ekspor percakapan ke PDF, dibatasi hanya
+    # untuk role tertentu (mis. admin, compliance)." Disimpan sebagai string
+    # koma-pisah (bukan tabel relasi terpisah) — konsisten dengan pola kolom
+    # runtime-configurable lain di tabel singleton ini, dan daftarnya pendek
+    # (maksimal 8 role) jadi tidak butuh normalisasi berlebihan. IT_ADMIN
+    # dipaksa selalu ikut di _get_or_create_settings()/toggle, supaya admin
+    # tidak bisa tidak sengaja mengunci dirinya sendiri dari fitur export.
+    export_allowed_roles = Column(Text, nullable=False, default="it_admin,compliance")
     updated_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def get_export_allowed_roles(self) -> list[str]:
+        raw = self.export_allowed_roles or ""
+        return [r.strip() for r in raw.split(",") if r.strip()]

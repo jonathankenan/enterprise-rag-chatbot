@@ -23,6 +23,8 @@ export default function AdminUsersPage() {
   const [savingId, setSavingId] = useState(null);
   const [systemSettings, setSystemSettings] = useState(null);
   const [togglingLlm, setTogglingLlm] = useState(false);
+  const [exportRolesDraft, setExportRolesDraft] = useState([]);
+  const [savingExportRoles, setSavingExportRoles] = useState(false);
 
   useEffect(() => {
     if (!api.isLoggedIn()) {
@@ -55,6 +57,7 @@ export default function AdminUsersPage() {
     try {
       const result = await api.getSystemSettings();
       setSystemSettings(result);
+      setExportRolesDraft(result.export_allowed_roles);
     } catch (err) {
       setError(err.message || "Gagal memuat pengaturan sistem");
     }
@@ -90,6 +93,26 @@ export default function AdminUsersPage() {
       setError(err.message || "Gagal mengubah pengaturan");
     } finally {
       setTogglingLlm(false);
+    }
+  }
+
+  function toggleExportRoleDraft(role) {
+    setExportRolesDraft((prev) =>
+      prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]
+    );
+  }
+
+  async function handleSaveExportRoles() {
+    setSavingExportRoles(true);
+    setError("");
+    try {
+      const result = await api.updateExportRoles(exportRolesDraft);
+      setSystemSettings(result);
+      setExportRolesDraft(result.export_allowed_roles); // it_admin bisa ke-tambah otomatis di backend
+    } catch (err) {
+      setError(err.message || "Gagal menyimpan pengaturan export");
+    } finally {
+      setSavingExportRoles(false);
     }
   }
 
@@ -140,6 +163,37 @@ export default function AdminUsersPage() {
             }}
           >
             {togglingLlm ? "Memproses..." : systemSettings.commercial_llm_force_stopped ? "Nyalakan Kembali" : "⛔ Force Stop"}
+          </button>
+        </div>
+      )}
+
+      {/* F2-08 (spesifikasi Tingkat 2): role mana boleh export chat ke PDF */}
+      {systemSettings && (
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+          <b>Role yang Boleh Export PDF</b>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+            User dengan role di luar daftar ini akan ditolak (403) saat mencoba export percakapan ke PDF.
+            IT Admin selalu ikut otomatis supaya tidak terkunci dari fitur ini.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12 }}>
+            {ALL_ROLES.map((role) => (
+              <label key={role} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={exportRolesDraft.includes(role)}
+                  disabled={role === "it_admin"}
+                  onChange={() => toggleExportRoleDraft(role)}
+                />
+                {role}
+              </label>
+            ))}
+          </div>
+          <button
+            onClick={handleSaveExportRoles}
+            disabled={savingExportRoles}
+            style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingExportRoles ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+          >
+            {savingExportRoles ? "Menyimpan..." : "Simpan"}
           </button>
         </div>
       )}

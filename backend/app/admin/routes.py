@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Role, User, SystemSettings
-from app.schemas import AdminUserResponse, UserRoleUpdateRequest, SystemSettingsResponse
+from app.schemas import AdminUserResponse, UserRoleUpdateRequest, SystemSettingsResponse, UpdateExportRolesRequest
 from app.auth.utils import require_role
 from app.guardrail.audit_log import log_guardrail_event, EventType
 
@@ -24,6 +24,18 @@ def _get_or_create_settings(db: Session) -> SystemSettings:
         db.commit()
         db.refresh(settings_row)
     return settings_row
+
+
+def _settings_response(settings_row: SystemSettings) -> SystemSettingsResponse:
+    # Dibangun manual (bukan from_attributes langsung) karena
+    # export_allowed_roles di DB disimpan string koma-pisah, sedangkan API
+    # keluar sebagai list[str] — perlu lewat get_export_allowed_roles() dulu.
+    return SystemSettingsResponse(
+        commercial_llm_force_stopped=settings_row.commercial_llm_force_stopped,
+        export_allowed_roles=settings_row.get_export_allowed_roles(),
+        updated_by=settings_row.updated_by,
+        updated_at=settings_row.updated_at,
+    )
 
 
 @router.get("/users", response_model=list[AdminUserResponse])
@@ -65,7 +77,7 @@ def update_user_role(
 
 @router.get("/system-settings", response_model=SystemSettingsResponse)
 def get_system_settings(db: Session = Depends(get_db), user: User = Depends(require_role(Role.IT_ADMIN))):
-    return _get_or_create_settings(db)
+    return _settings_response(_get_or_create_settings(db))
 
 
 @router.post("/system-settings/toggle-commercial-llm", response_model=SystemSettingsResponse)
@@ -90,4 +102,36 @@ def toggle_commercial_llm(db: Session = Depends(get_db), admin: User = Depends(r
         detail=f"Force-stop LLM Commercial diubah oleh {admin.email}",
         metadata={"commercial_llm_force_stopped": settings_row.commercial_llm_force_stopped},
     )
-    return settings_row
+    return _settings_response(settings_row)
+
+
+# ---------- F2-08 (spesifikasi Tingkat 2): role mana boleh export PDF ----------
+
+@router.post("/system-settings/export-roles", response_model=SystemSettingsResponse)
+def update_export_roles(
+    payload: UpdateExportRolesRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    invalid = [r for r in payload.roles if r not in Role.ALL]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Role tidak dikenal: {', '.join(invalid)}")
+
+    # IT_ADMIN dipaksa selalu ikut — kalau tidak, admin bisa tidak sengaja
+    # mengunci SEMUA orang (termasuk dirinya sendiri) dari fitur export,
+    # tanpa jalan balik lewat UI (cuma bisa lewat SQL manual).
+    roles = sorted(set(payload.roles) | {Role.IT_ADMIN})
+
+    settings_row = _get_or_create_settings(db)
+    old_roles = settings_row.export_allowed_roles
+    settings_row.export_allowed_roles = ",".join(roles)
+    settings_row.updated_by = admin.id
+    db.commit()
+    db.refresh(settings_row)
+
+    log_guardrail_event(
+        db, admin.id, EventType.EXPORT_ROLES_CHANGED,
+        detail=f"Role yang boleh export PDF diubah oleh {admin.email}",
+        metadata={"old_roles": old_roles, "new_roles": settings_row.export_allowed_roles},
+    )
+    return _settings_response(settings_row)

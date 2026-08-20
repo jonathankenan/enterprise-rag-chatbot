@@ -131,11 +131,16 @@ class UserRoleUpdateRequest(BaseModel):
 # ---- System settings (dibatasi Role.IT_ADMIN — SRS FCR-003 Rules poin 2: force-stop LLM Commercial) ----
 class SystemSettingsResponse(BaseModel):
     commercial_llm_force_stopped: bool
+    export_allowed_roles: list[str]
     updated_by: str | None
     updated_at: datetime | None
 
     class Config:
         from_attributes = True
+
+
+class UpdateExportRolesRequest(BaseModel):
+    roles: list[str]
 
 
 # ---- Chat ----

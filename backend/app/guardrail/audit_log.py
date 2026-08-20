@@ -49,6 +49,7 @@ class EventType:
     HELPDESK_TICKET_CLOSED = "helpdesk_ticket_closed"  # admin menutup tiket
     USER_ROLE_CHANGED = "user_role_changed"      # admin ubah role user lain
     COMMERCIAL_LLM_TOGGLED = "commercial_llm_toggled"  # IT Admin nyala/matikan force-stop LLM commercial
+    EXPORT_ROLES_CHANGED = "export_roles_changed"  # F2-08: admin ubah daftar role yang boleh export PDF
 
 
 # ---------- Tingkat keparahan, untuk prioritas review ----------
@@ -83,6 +84,7 @@ _SEVERITY_MAP = {
     EventType.HELPDESK_TICKET_CLOSED: Severity.LOW,
     EventType.USER_ROLE_CHANGED: Severity.HIGH,     # perubahan hak akses — selalu layak ditinjau
     EventType.COMMERCIAL_LLM_TOGGLED: Severity.CRITICAL,  # mempengaruhi SEMUA user sistem sekaligus
+    EventType.EXPORT_ROLES_CHANGED: Severity.MEDIUM,  # perubahan hak akses ke data percakapan
 }
 
 

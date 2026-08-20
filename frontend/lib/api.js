@@ -238,4 +238,11 @@ export const api = {
 
   toggleCommercialLlm: () =>
     request("/api/admin/system-settings/toggle-commercial-llm", { method: "POST" }),
+
+  // F2-08: role mana boleh export chat ke PDF
+  updateExportRoles: (roles) =>
+    request("/api/admin/system-settings/export-roles", {
+      method: "POST",
+      body: JSON.stringify({ roles }),
+    }),
 };
