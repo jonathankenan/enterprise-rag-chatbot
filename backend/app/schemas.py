@@ -247,6 +247,11 @@ class ChatReplyResponse(BaseModel):
     # tampilkan banner tanya user, BUKAN auto-create tiket (lihat
     # helpdesk/routes.py: POST /tickets, dipanggil user kalau setuju).
     escalation_offered: bool = False
+    # SRS hal. 17, poin 9.a: Intent classification — "greeting"/"chitchat"/
+    # "question". Diekspos ke response biar bisa diverifikasi lewat testing
+    # (sama alasannya dengan confidence_score/pii_detected), bukan cuma
+    # sinyal internal yang tidak terlihat.
+    intent: str = "question"
 
 
 # ---- Helpdesk (FCR-003 poin 7 — eskalasi ke human helpdesk) ----

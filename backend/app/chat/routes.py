@@ -23,6 +23,7 @@ from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
 from app.rag.vectorstore import retrieve_context
+from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS
 from app.llm.router import route_and_generate
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 from app.chat.pdf_export import generate_pdf
@@ -256,25 +257,37 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    from app.llm.router import get_standalone_query
-    search_query = await get_standalone_query(payload.content, chat_history, effective_provider)
-
-    query_lower = search_query.lower()
-    if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
-        from app.rag.vectorstore import get_all_session_chunks, has_session_document
-        context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
-        session_has_document = has_session_document(chat_id=chat.id)
-        # Permintaan "ringkas semua" ambil SELURUH chunk apa adanya, bukan
-        # hasil pencarian semantik top-k — konsep "seberapa relevan hasil
-        # pencarian" tidak berlaku di sini, jadi tidak ada confidence yang
-        # bisa dihitung secara jujur untuk kasus ini.
-        retrieval_confidence = None
+    # ---------- SRS hal. 17, poin 9.a: Intent classification ----------
+    # Dicek PALING AWAL, sebelum get_standalone_query() (yang butuh 1
+    # pemanggilan LLM) maupun retrieve_context() (ensemble 4-leg: dokumen
+    # chat + FAQ + KB divisi + BM25) — buat sapaan/basa-basi murni ("halo",
+    # "makasih"), KEDUANYA di-skip total. Bukan cuma penghematan kosmetik:
+    # pesan sependek "oke" tidak pernah butuh RAG sama sekali.
+    intent = classify_intent(payload.content)
+    if intent in SKIP_RETRIEVAL_INTENTS:
+        search_query = payload.content
+        context_chunks, retrieval_confidence = [], None
+        session_has_document = False
     else:
-        from app.rag.vectorstore import has_session_document
-        context_chunks, retrieval_confidence = retrieve_context(
-            search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
-        )
-        session_has_document = has_session_document(chat_id=chat.id)
+        from app.llm.router import get_standalone_query
+        search_query = await get_standalone_query(payload.content, chat_history, effective_provider)
+
+        query_lower = search_query.lower()
+        if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
+            from app.rag.vectorstore import get_all_session_chunks, has_session_document
+            context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
+            session_has_document = has_session_document(chat_id=chat.id)
+            # Permintaan "ringkas semua" ambil SELURUH chunk apa adanya, bukan
+            # hasil pencarian semantik top-k — konsep "seberapa relevan hasil
+            # pencarian" tidak berlaku di sini, jadi tidak ada confidence yang
+            # bisa dihitung secara jujur untuk kasus ini.
+            retrieval_confidence = None
+        else:
+            from app.rag.vectorstore import has_session_document
+            context_chunks, retrieval_confidence = retrieve_context(
+                search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
+            )
+            session_has_document = has_session_document(chat_id=chat.id)
 
     try:
         result = await route_and_generate(
@@ -358,6 +371,7 @@ async def send_message(
         new_title=new_title,
         message_id=ai_msg.id,
         escalation_offered=escalation_offered,
+        intent=intent,
     )
 
 @router.get("/{chat_id}/export-pdf")
