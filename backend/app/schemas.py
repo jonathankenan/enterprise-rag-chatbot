@@ -106,6 +106,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str | None
     role: str
+    divisi: str | None = None  # None = tidak terikat 1 divisi (atau, khusus IT_ADMIN, artinya admin GLOBAL)
 
     class Config:
         from_attributes = True
@@ -125,6 +126,18 @@ class UserRoleUpdateRequest(BaseModel):
         from app.models import Role  # import lokal — hindari import melingkar di level modul
         if v not in Role.ALL:
             raise ValueError(f"Role tidak valid. Pilihan: {', '.join(Role.ALL)}")
+        return v
+
+
+class UserDivisiUpdateRequest(BaseModel):
+    divisi: str | None  # None = lepas dari divisi manapun (utk IT_ADMIN berarti jadi admin GLOBAL)
+
+    @field_validator("divisi")
+    @classmethod
+    def check_valid_divisi(cls, v: str | None) -> str | None:
+        from app.models import Divisi
+        if v is not None and v not in Divisi.ALL:
+            raise ValueError(f"Divisi tidak valid. Pilihan: {', '.join(Divisi.ALL)}")
         return v
 
 
@@ -280,3 +293,45 @@ class AuditLogResponse(BaseModel):
 class AuditSummaryResponse(BaseModel):
     since_hours: int
     counts_by_type: dict[str, int]
+
+# ---- FAQ Helpdesk (dibatasi Role.IT_ADMIN — SRS poin 10.b: sumber RAG) ----
+class CreateFaqRequest(BaseModel):
+    question: str
+    answer: str
+
+    @field_validator("question", "answer")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Tidak boleh kosong")
+        return v.strip()
+
+
+class FaqEntryResponse(BaseModel):
+    id: str
+    question: str
+    answer: str
+    created_by: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class FaqBulkImportResponse(BaseModel):
+    filename: str
+    created: list[FaqEntryResponse]
+    count: int
+
+
+# ---- Multi-Tenant Knowledge Base (SRS poin 11 & hal. 68) ----
+class KbDocumentResponse(BaseModel):
+    id: str
+    divisi: str | None  # None = Company Wide
+    filename: str
+    chunk_count: int
+    uploaded_by: str | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

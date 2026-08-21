@@ -88,6 +88,29 @@ class Role:
     AUDIT_VIEWERS = (IT_ADMIN, COMPLIANCE, AUDITOR)
 
 
+class Divisi:
+    """
+    9 divisi PERSIS sesuai SRS FCR-003 (banyak disebut di hal. 8-9, 64-70):
+    WAS, PLP, PPT, PP1, PP2, PP3, PTI, SDI, OTP. Terpisah dari Role — role
+    itu fungsi jabatan (IT Admin, Designer, dst, berlaku lintas divisi),
+    divisi itu unit organisasi tempat user bekerja. SRS hal. 14, Rules poin
+    1: "Data yang di-upload oleh masing-masing divisi hanya dapat diakses
+    oleh divisi tersebut" — dasar Multi-Tenant Knowledge Base (SRS poin 11
+    & hal. 68).
+    """
+    WAS = "WAS"
+    PLP = "PLP"
+    PPT = "PPT"
+    PP1 = "PP1"
+    PP2 = "PP2"
+    PP3 = "PP3"
+    PTI = "PTI"
+    SDI = "SDI"
+    OTP = "OTP"
+
+    ALL = (WAS, PLP, PPT, PP1, PP2, PP3, PTI, SDI, OTP)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -96,6 +119,12 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
     role = Column(String, default=Role.CONSUMER_INTERNAL)  # salah satu dari Role.ALL — default: pengguna internal biasa
+    # NULL = tidak terikat 1 divisi tertentu (berlaku untuk kebanyakan role,
+    # dan untuk IT_ADMIN artinya admin GLOBAL — lihat auth/utils.py
+    # get_divisi_scope()). Terisi salah satu Divisi.ALL = user itu anggota
+    # divisi tsb; kalau role-nya IT_ADMIN, artinya admin TERBATAS ke divisi
+    # itu saja (SRS hal. 68/70: "Admin User dari setiap divisi").
+    divisi = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # SRS ISR-002.c: umur password maksimal 90 hari. Di-set ulang tiap kali
     # password diganti (register = set awal, change-password = reset ulang).
@@ -269,3 +298,57 @@ class SystemSettings(Base):
     def get_export_allowed_roles(self) -> list[str]:
         raw = self.export_allowed_roles or ""
         return [r.strip() for r in raw.split(",") if r.strip()]
+
+
+class FaqEntry(Base):
+    """
+    FAQ Helpdesk — SRS FCR-003 poin 10.b: "Sistem memproses menggunakan RAG:
+    ... b) FAQ helpdesk". Beda dari HelpdeskTicket (itu tiket ESKALASI KELUAR
+    ke manusia), tabel ini isinya SUMBER pengetahuan yang ditarik MASUK ke
+    RAG — jadi tiap chat bisa terjawab dari FAQ ini walau user tidak
+    upload dokumen apa pun (beda dari kb_general yang di-scope per chat_id).
+
+    Postgres di sini jadi SOURCE OF TRUTH yang gampang di-list/edit/hapus
+    lewat UI admin; isinya (question+answer digabung jadi satu teks)
+    diindeks ULANG ke koleksi ChromaDB terpisah "kb_faq_helpdesk" (lihat
+    rag/vectorstore.py: index_faq_entry()) supaya bisa di-retrieve semantik,
+    sama seperti dokumen upload biasa.
+    """
+    __tablename__ = "faq_entries"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    created_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    author = relationship("User")
+
+class KbDocument(Base):
+    """
+    Multi-Tenant Knowledge Base — SRS poin 11 & hal. 68: "Knowledge Base
+    dapat dibuatkan terpisah untuk setiap divisi... Terdapat Knowledge Base
+    Company Wide... Metadata dokumen dapat disimpan pada relation database
+    minimum terdapat informasi nama dokumen, versi, update time."
+
+    divisi NULL = dokumen Company Wide (SRS: "klasifikasi informasi umum
+    internal seperti POJK, Peraturan BEI, SK", bisa diakses SEMUA divisi).
+    divisi terisi = cuma bisa diakses user divisi itu (SRS hal. 14: "Data
+    yang di-upload oleh masing-masing divisi hanya dapat diakses oleh
+    divisi tersebut").
+
+    Isi teksnya sendiri diindeks ke ChromaDB (koleksi "kb_divisi", metadata
+    {"divisi": ...}) — pola yang sama dengan FaqEntry/kb_faq_helpdesk; baris
+    di sini cuma metadata (nama file, siapa upload, kapan), bukan isi
+    dokumen mentah.
+    """
+    __tablename__ = "kb_documents"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    divisi = Column(String, nullable=True)  # None = Company Wide
+    filename = Column(String, nullable=False)
+    chunk_count = Column(Integer, nullable=False, default=0)
+    uploaded_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    uploader = relationship("User")

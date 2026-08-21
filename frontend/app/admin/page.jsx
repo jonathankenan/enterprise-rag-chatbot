@@ -14,6 +14,9 @@ const ALL_ROLES = [
   "consumer_eipo", "business_user_designer", "compliance", "auditor",
 ];
 
+// Samakan dengan Divisi.ALL di backend/app/models.py
+const ALL_DIVISI = ["WAS", "PLP", "PPT", "PP1", "PP2", "PP3", "PTI", "SDI", "OTP"];
+
 export default function AdminUsersPage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState(null);
@@ -43,6 +46,10 @@ export default function AdminUsersPage() {
   }, []);
 
   const hasAccess = currentUser && currentUser.role === "it_admin";
+  // SRS hal. 64/68/70: divisi KOSONG di akun IT_ADMIN = admin GLOBAL,
+  // divisi TERISI = admin TERBATAS ke divisi itu saja. Bukan flag terpisah,
+  // cuma baca field divisi milik akun sendiri.
+  const isGlobalAdmin = currentUser && !currentUser.divisi;
 
   const loadUsers = useCallback(async () => {
     try {
@@ -78,6 +85,19 @@ export default function AdminUsersPage() {
       await loadUsers();
     } catch (err) {
       setError(err.message || "Gagal mengubah role");
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function handleDivisiChange(userId, newDivisi) {
+    setSavingId(userId);
+    setError("");
+    try {
+      await api.updateUserDivisi(userId, newDivisi || null);
+      await loadUsers();
+    } catch (err) {
+      setError(err.message || "Gagal mengubah divisi");
     } finally {
       setSavingId(null);
     }
@@ -132,8 +152,18 @@ export default function AdminUsersPage() {
     <div style={{ padding: "20px 40px", maxWidth: 1000, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <h1 style={{ margin: 0 }}>Manajemen User</h1>
-        <Link href="/chat">← Kembali ke Chat</Link>
+        <div>
+          <Link href="/admin/kb">Knowledge Base Divisi</Link>
+          {" · "}
+          <Link href="/helpdesk">Helpdesk</Link>
+          {" · "}
+          <Link href="/chat">← Kembali ke Chat</Link>
+        </div>
       </div>
+
+      <p style={{ margin: "-12px 0 16px", fontSize: 13, color: "#666" }}>
+        Anda: {isGlobalAdmin ? <b>IT Admin Global</b> : <>IT Admin Divisi <b>{currentUser.divisi}</b> (cuma kelola user &amp; KB divisi ini)</>}
+      </p>
 
       {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
 
@@ -206,6 +236,7 @@ export default function AdminUsersPage() {
               <th style={{ padding: 10 }}>Nama</th>
               <th style={{ padding: 10 }}>Terdaftar</th>
               <th style={{ padding: 10 }}>Role</th>
+              <th style={{ padding: 10 }}>Divisi</th>
             </tr>
           </thead>
           <tbody>
@@ -226,6 +257,26 @@ export default function AdminUsersPage() {
                     >
                       {ALL_ROLES.map((r) => (
                         <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  )}
+                </td>
+                <td style={{ padding: 10 }}>
+                  {/* Endpoint /divisi cuma diizinkan backend untuk admin
+                      GLOBAL (lihat admin/routes.py update_user_divisi) —
+                      admin divisi lihat kolom ini read-only saja. */}
+                  {u.id === currentUser.id || !isGlobalAdmin ? (
+                    <span>{u.divisi || "—"}</span>
+                  ) : (
+                    <select
+                      value={u.divisi || ""}
+                      disabled={savingId === u.id}
+                      onChange={(e) => handleDivisiChange(u.id, e.target.value)}
+                      style={{ padding: 4 }}
+                    >
+                      <option value="">— (global/tanpa divisi)</option>
+                      {ALL_DIVISI.map((d) => (
+                        <option key={d} value={d}>{d}</option>
                       ))}
                     </select>
                   )}

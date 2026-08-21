@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Role, User, SystemSettings
-from app.schemas import AdminUserResponse, UserRoleUpdateRequest, SystemSettingsResponse, UpdateExportRolesRequest
-from app.auth.utils import require_role
+from app.schemas import AdminUserResponse, UserRoleUpdateRequest, UserDivisiUpdateRequest, SystemSettingsResponse, UpdateExportRolesRequest
+from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -39,8 +39,16 @@ def _settings_response(settings_row: SystemSettings) -> SystemSettingsResponse:
 
 
 @router.get("/users", response_model=list[AdminUserResponse])
-def list_users(db: Session = Depends(get_db), user: User = Depends(require_role(Role.IT_ADMIN))):
-    return db.query(User).order_by(User.created_at.desc()).all()
+def list_users(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
+    # SRS hal. 68/70: "Admin User dari setiap divisi" — admin dengan divisi
+    # TERISI cuma boleh lihat/kelola user DI DIVISINYA SENDIRI, bukan
+    # seluruh perusahaan. Admin global (divisi=None) tetap lihat semua,
+    # seperti sebelumnya.
+    scope = get_divisi_scope(admin)
+    query = db.query(User)
+    if scope is not None:
+        query = query.filter(User.divisi == scope)
+    return query.order_by(User.created_at.desc()).all()
 
 
 @router.patch("/users/{user_id}/role", response_model=AdminUserResponse)
@@ -60,6 +68,13 @@ def update_user_role(
     if not target:
         raise HTTPException(status_code=404, detail="User tidak ditemukan")
 
+    scope = get_divisi_scope(admin)
+    if scope is not None and target.divisi != scope:
+        # Admin divisi PTI tidak boleh ubah role user divisi lain — bahkan
+        # sekadar TAHU dia ada pun tidak seharusnya (404, bukan 403, supaya
+        # tidak bocorkan "user ini ada tapi bukan hak Anda").
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+
     old_role = target.role
     target.role = payload.role
     db.commit()
@@ -69,6 +84,41 @@ def update_user_role(
         db, admin.id, EventType.USER_ROLE_CHANGED,
         detail=f"Role user {target.email} diubah oleh {admin.email}",
         metadata={"target_user_id": target.id, "old_role": old_role, "new_role": payload.role},
+    )
+    return target
+
+
+@router.patch("/users/{user_id}/divisi", response_model=AdminUserResponse)
+def update_user_divisi(
+    user_id: str,
+    payload: UserDivisiUpdateRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    """
+    SENGAJA cuma admin GLOBAL (divisi=None) yang boleh memindah-mindah
+    keanggotaan divisi siapa pun — admin divisi (scope terisi) tidak
+    diberi endpoint ini sama sekali, supaya dia tidak bisa "keluar" dari
+    scope-nya sendiri atau menyerobot user divisi lain masuk ke divisinya.
+    """
+    if get_divisi_scope(admin) is not None:
+        raise HTTPException(status_code=403, detail="Cuma admin global yang bisa mengubah keanggotaan divisi")
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="Tidak bisa mengubah divisi akun sendiri")
+
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+
+    old_divisi = target.divisi
+    target.divisi = payload.divisi
+    db.commit()
+    db.refresh(target)
+
+    log_guardrail_event(
+        db, admin.id, EventType.USER_DIVISI_CHANGED,
+        detail=f"Divisi user {target.email} diubah oleh {admin.email}",
+        metadata={"target_user_id": target.id, "old_divisi": old_divisi, "new_divisi": payload.divisi},
     )
     return target
 

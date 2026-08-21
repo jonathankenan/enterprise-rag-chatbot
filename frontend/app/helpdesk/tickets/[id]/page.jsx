@@ -109,7 +109,7 @@ export default function TicketChatPage({ params }) {
 
   const isAdmin = currentUser.role === "it_admin";
   const isClosed = ticket.status === "closed";
-  const backHref = isAdmin ? "/helpdesk" : "/chat";
+  const backHref = isAdmin ? "/helpdesk/tickets" : "/chat";
 
   return (
     <div style={{ padding: "20px 40px", maxWidth: 800, margin: "0 auto" }}>

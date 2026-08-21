@@ -50,6 +50,11 @@ class EventType:
     USER_ROLE_CHANGED = "user_role_changed"      # admin ubah role user lain
     COMMERCIAL_LLM_TOGGLED = "commercial_llm_toggled"  # IT Admin nyala/matikan force-stop LLM commercial
     EXPORT_ROLES_CHANGED = "export_roles_changed"  # F2-08: admin ubah daftar role yang boleh export PDF
+    FAQ_CREATED = "faq_created"                  # SRS poin 10.b: FAQ helpdesk baru ditambahkan ke sumber RAG
+    FAQ_DELETED = "faq_deleted"
+    KB_DOCUMENT_UPLOADED = "kb_document_uploaded"  # SRS poin 11: Multi-Tenant KB per divisi/Company Wide
+    KB_DOCUMENT_DELETED = "kb_document_deleted"
+    USER_DIVISI_CHANGED = "user_divisi_changed"    # admin ubah divisi user lain
 
 
 # ---------- Tingkat keparahan, untuk prioritas review ----------
@@ -85,6 +90,11 @@ _SEVERITY_MAP = {
     EventType.USER_ROLE_CHANGED: Severity.HIGH,     # perubahan hak akses — selalu layak ditinjau
     EventType.COMMERCIAL_LLM_TOGGLED: Severity.CRITICAL,  # mempengaruhi SEMUA user sistem sekaligus
     EventType.EXPORT_ROLES_CHANGED: Severity.MEDIUM,  # perubahan hak akses ke data percakapan
+    EventType.FAQ_CREATED: Severity.LOW,
+    EventType.FAQ_DELETED: Severity.LOW,
+    EventType.KB_DOCUMENT_UPLOADED: Severity.LOW,
+    EventType.KB_DOCUMENT_DELETED: Severity.LOW,
+    EventType.USER_DIVISI_CHANGED: Severity.HIGH,  # perubahan hak akses — sama kelasnya dengan USER_ROLE_CHANGED
 }
 
 

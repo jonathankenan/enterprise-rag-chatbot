@@ -138,6 +138,125 @@ def index_document(text: str, doc_id: str, filename: str, chat_id: str, collecti
     return len(chunks)
 
 
+FAQ_COLLECTION_NAME = "kb_faq_helpdesk"
+
+
+def index_faq_entry(faq_id: str, question: str, answer: str):
+    """
+    SRS poin 10.b: FAQ helpdesk sebagai sumber RAG. Beda dari
+    index_document() — SATU FAQ = SATU chunk (tidak dipecah chunk_text()),
+    karena FAQ sudah pendek & atomik secara alami, dan digabung
+    "Q: ...\\nA: ..." supaya embedding-nya menangkap makna pertanyaan DAN
+    jawabannya sekaligus (bukan cuma jawaban tanpa konteks tanya apa).
+    Tidak ada metadata "chat_id" — koleksi ini company-wide, ditarik ke
+    SEMUA chat, bukan di-scope ke satu percakapan seperti kb_general.
+    """
+    collection = get_collection(FAQ_COLLECTION_NAME)
+    collection.add(
+        documents=[f"Q: {question}\nA: {answer}"],
+        ids=[faq_id],
+        metadatas=[{"faq_id": faq_id}],
+    )
+
+
+def delete_faq_entry_from_index(faq_id: str):
+    collection = get_collection(FAQ_COLLECTION_NAME)
+    collection.delete(ids=[faq_id])
+
+
+KB_DIVISI_COLLECTION_NAME = "kb_divisi"
+KB_COMPANY_WIDE_SENTINEL = "company_wide"  # ChromaDB metadata tidak bisa nyimpen None, jadi dipakai literal string ini
+
+
+def index_kb_document(text: str, doc_id: str, filename: str, divisi: str | None) -> int:
+    """
+    Multi-Tenant Knowledge Base — SRS poin 11 & hal. 68. divisi=None berarti
+    dokumen Company Wide (POJK/Peraturan BEI/SK, bisa ditarik SEMUA divisi).
+    Beda dari index_faq_entry() (1 FAQ = 1 chunk pendek), dokumen KB divisi
+    dipecah chunk_text() sama seperti index_document() biasa karena isinya
+    dokumen kebijakan panjang, bukan tanya-jawab atomik.
+    """
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    chunks = chunk_text(text)
+    divisi_tag = divisi or KB_COMPANY_WIDE_SENTINEL
+
+    ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
+    metadatas = [{"doc_id": doc_id, "filename": filename, "chunk_index": i, "divisi": divisi_tag} for i in range(len(chunks))]
+
+    collection.add(documents=chunks, ids=ids, metadatas=metadatas)  # type: ignore
+    return len(chunks)
+
+
+def delete_kb_document_from_index(doc_id: str):
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    collection.delete(where={"doc_id": doc_id})
+
+
+class KbDivisiRetriever(BaseRetriever):
+    """
+    SRS hal. 14, Rules poin 1: "Data yang di-upload oleh masing-masing
+    divisi hanya dapat diakses oleh divisi tersebut" — retriever ini
+    TIDAK PERNAH mengembalikan dokumen di luar allowed_divisi (divisi user
+    sendiri + Company Wide), bukan cuma "diprioritaskan", betul-betul
+    di-filter di level query ChromaDB (where clause), jadi dokumen divisi
+    lain tidak pernah sekalipun sampai ke LLM sebagai context.
+    """
+    allowed_divisi: list[str]
+    top_k: int = 5
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[LCDocument]:
+        collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+        if collection.count() == 0:
+            return []
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(self.top_k, collection.count()),
+            where={"divisi": {"$in": self.allowed_divisi}},
+            include=["documents", "metadatas", "distances"],
+        )
+        docs = results.get("documents")
+        metas = results.get("metadatas")
+        distances = results.get("distances")
+        docs_list = docs[0] if docs else []
+        metas_list = metas[0] if metas else []
+        distances_list = distances[0] if distances else []
+
+        out = []
+        for d, m, dist in zip(docs_list, metas_list, distances_list):
+            meta = dict(m or {})
+            meta["_distance"] = dist
+            out.append(LCDocument(page_content=d, metadata=meta))
+        return out
+
+
+class FaqChromaRetriever(BaseRetriever):
+    """Sama seperti NativeChromaRetriever, tapi TANPA filter chat_id — semua chat berhak menariknya."""
+    top_k: int = 5
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[LCDocument]:
+        collection = get_collection(FAQ_COLLECTION_NAME)
+        if collection.count() == 0:
+            return []
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(self.top_k, collection.count()),
+            include=["documents", "metadatas", "distances"],
+        )
+        docs = results.get("documents")
+        metas = results.get("metadatas")
+        distances = results.get("distances")
+        docs_list = docs[0] if docs else []
+        metas_list = metas[0] if metas else []
+        distances_list = distances[0] if distances else []
+
+        out = []
+        for d, m, dist in zip(docs_list, metas_list, distances_list):
+            meta = dict(m or {})
+            meta["_distance"] = dist
+            out.append(LCDocument(page_content=d, metadata=meta))
+        return out
+
+
 class NativeChromaRetriever(BaseRetriever):
     chat_id: str
     collection_name: str = "kb_general"
@@ -212,7 +331,10 @@ def _distance_to_similarity_percent(distance: float) -> float:
     return max(0.0, min(1.0, 1 - (distance / 2)))
 
 
-def retrieve_context(search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10) -> tuple[list[str], int | None]:
+def retrieve_context(
+    search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
+    user_divisi: str | None = None,
+) -> tuple[list[str], int | None]:
     """
     Kembalikan (potongan_teks, retrieval_confidence). Confidence 0-100
     dihitung dari distance yang didapat SEKALI di dalam NativeChromaRetriever
@@ -222,21 +344,33 @@ def retrieve_context(search_query: str, chat_id: str, collection_name: str = "kb
     dihapus, digabung ke sini).
 
     Confidence cuma dihitung dari dokumen hasil LEG VECTOR (yang punya
-    "_distance" di metadata) — dokumen dari leg BM25 (keyword match, dipakai
-    kalau ensemble retrieval aktif) diabaikan untuk keperluan skor, karena
-    BM25 tidak punya angka yang sebanding dengan cosine similarity.
+    "_distance" di metadata — chat_id-scoped, FAQ, MAUPUN KB divisi, semua
+    vector search) — dokumen dari leg BM25 (keyword match, dipakai kalau
+    ensemble retrieval aktif) diabaikan untuk keperluan skor, karena BM25
+    tidak punya angka yang sebanding dengan cosine similarity.
+
+    SRS poin 10.b/11: FAQ helpdesk (company-wide) dan KB Multi-Tenant
+    (Company Wide + divisi user_divisi SAJA — lihat KbDivisiRetriever)
+    SELALU diikutsertakan sebagai leg RETRIEVAL tambahan, bukan cuma kalau
+    chat itu sendiri tidak punya dokumen.
     """
     chroma_retriever = NativeChromaRetriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
+    faq_retriever = FaqChromaRetriever(top_k=top_k)
+    allowed_divisi = [KB_COMPANY_WIDE_SENTINEL] + ([user_divisi] if user_divisi else [])
+    kb_retriever = KbDivisiRetriever(allowed_divisi=allowed_divisi, top_k=top_k)
     bm25_retriever = get_bm25_retriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
 
-    if not bm25_retriever:
-        docs = chroma_retriever.invoke(search_query)
-    else:
-        ensemble = EnsembleRetriever(
-            retrievers=[chroma_retriever, bm25_retriever],
-            weights=[0.5, 0.5]
-        )
-        docs = ensemble.invoke(search_query)
+    retrievers = [chroma_retriever, faq_retriever, kb_retriever]
+    # Dokumen chat sendiri diberi bobot sedikit lebih tinggi — asumsinya
+    # dokumen yang SENGAJA di-upload user ke chat ini lebih spesifik ke
+    # kebutuhannya saat itu, dibanding FAQ/KB divisi yang lebih umum.
+    weights = [0.35, 0.2, 0.25]
+    if bm25_retriever:
+        retrievers.append(bm25_retriever)
+        weights = [0.3, 0.15, 0.25, 0.3]
+
+    ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
+    docs = ensemble.invoke(search_query)
 
     docs = docs[:top_k]
 

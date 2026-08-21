@@ -271,7 +271,9 @@ async def send_message(
         retrieval_confidence = None
     else:
         from app.rag.vectorstore import has_session_document
-        context_chunks, retrieval_confidence = retrieve_context(search_query, chat_id=chat.id, collection_name="kb_general", top_k=10)
+        context_chunks, retrieval_confidence = retrieve_context(
+            search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
+        )
         session_has_document = has_session_document(chat_id=chat.id)
 
     try:

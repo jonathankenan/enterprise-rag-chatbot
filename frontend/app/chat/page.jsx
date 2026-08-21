@@ -416,7 +416,7 @@ export default function ChatPage() {
               {currentUser.role === "it_admin" && (
                 <>
                   {" · "}
-                  <Link href="/helpdesk">Tiket Helpdesk</Link>
+                  <Link href="/helpdesk">Helpdesk</Link>
                   {" · "}
                   <Link href="/admin">Kelola User</Link>
                 </>

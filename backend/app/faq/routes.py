@@ -1,0 +1,138 @@
+"""
+[PENANGGUNG JAWAB: Anggota B]
+CRUD FAQ Helpdesk — SRS FCR-003 poin 10.b: "Sistem memproses menggunakan
+RAG: ... b) FAQ helpdesk". Postgres (tabel FaqEntry) jadi source-of-truth
+yang gampang di-list/edit/hapus lewat UI; tiap create/delete di sini juga
+mengubah index ChromaDB (kb_faq_helpdesk, lihat rag/vectorstore.py) supaya
+2 sisi selalu sinkron — tidak ada FAQ "yatim" yang ada di Postgres tapi
+tidak ke-index, atau sebaliknya.
+
+Dibatasi Role.IT_ADMIN sepenuhnya (create/list/delete) — ini konten yang
+dibaca SEMUA chat lewat RAG, jadi harus dikurasi terpusat, bukan user biasa
+yang menambahkan sendiri (beda dari upload dokumen yang per-chat/personal).
+"""
+import io
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import Role, User, FaqEntry
+from app.schemas import CreateFaqRequest, FaqEntryResponse, FaqBulkImportResponse
+from app.auth.utils import require_role
+from app.guardrail.audit_log import log_guardrail_event, EventType
+from app.guardrail.filters import is_prompt_blocked, get_blocked_category
+from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
+from app.rag.vectorstore import index_faq_entry, delete_faq_entry_from_index, extract_text_from_pdf
+from app.faq.parser import parse_faq_pairs
+
+router = APIRouter(prefix="/api/faq", tags=["faq"])
+
+FAQ_PDF_REJECTED_MESSAGE = (
+    "PDF ditolak karena teks di dalamnya terindikasi melanggar kebijakan "
+    "penggunaan atau mengandung upaya prompt injection."
+)
+
+
+@router.get("", response_model=list[FaqEntryResponse])
+def list_faqs(db: Session = Depends(get_db), user: User = Depends(require_role(Role.IT_ADMIN))):
+    return db.query(FaqEntry).order_by(FaqEntry.created_at.desc()).all()
+
+
+@router.post("", response_model=FaqEntryResponse)
+def create_faq(
+    payload: CreateFaqRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    entry = FaqEntry(question=payload.question, answer=payload.answer, created_by=admin.id)
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+
+    # Diindeks SETELAH commit — kalau index_faq_entry() gagal (mis. ChromaDB
+    # down), setidaknya baris Postgres-nya sudah tersimpan (bukan hilang
+    # total), dan admin bisa lihat entrinya ada tapi belum ke-index kalau
+    # perlu troubleshoot, daripada gagal total tanpa jejak.
+    index_faq_entry(entry.id, entry.question, entry.answer)
+
+    log_guardrail_event(
+        db, admin.id, EventType.FAQ_CREATED,
+        detail=f"FAQ dibuat: {entry.question[:100]}",
+        metadata={"faq_id": entry.id},
+    )
+    return entry
+
+
+@router.post("/upload-pdf", response_model=FaqBulkImportResponse)
+async def upload_faq_pdf(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    """
+    Bulk-import FAQ dari 1 file PDF — supaya IT Admin tidak perlu ketik
+    manual satu-satu lewat form kalau sudah punya dokumen FAQ existing.
+    PDF diharapkan berisi daftar tanya-jawab (format "Q:/A:",
+    "Pertanyaan:/Jawaban:", atau baris berakhiran "?" diikuti jawabannya —
+    lihat faq/parser.py). Tiap pasangan yang berhasil di-parse jadi 1 baris
+    FaqEntry terpisah (bukan 1 dokumen besar), supaya tetap sejalan dengan
+    desain index_faq_entry() — 1 entri = 1 embedding "Q: ...\\nA: ...".
+    """
+    file_bytes = await file.read()
+    text = extract_text_from_pdf(io.BytesIO(file_bytes))
+
+    # Sama seperti upload dokumen chat (rag/routes.py) — konten yang masuk
+    # ke RAG (apalagi FAQ ini company-wide, ditarik ke SEMUA chat) tetap
+    # wajib lolos guardrail F2-04 sebelum diindeks.
+    if is_prompt_blocked(text) or is_prompt_injection(text):
+        log_guardrail_event(
+            db, admin.id, EventType.DOCUMENT_BLOCKED,
+            detail=f"faq_pdf_upload:{file.filename}",
+            metadata={"category": get_blocked_category(text), "matched_patterns": get_matched_signals(text)},
+        )
+        raise HTTPException(status_code=400, detail=FAQ_PDF_REJECTED_MESSAGE)
+
+    pairs = parse_faq_pairs(text)
+    if not pairs:
+        raise HTTPException(
+            status_code=400,
+            detail="Tidak ditemukan pola tanya-jawab di PDF ini. Format yang didukung: 'Q: .../A: ...', "
+                   "'Pertanyaan: .../Jawaban: ...', atau baris pertanyaan (diakhiri '?') diikuti jawabannya.",
+        )
+
+    # Sama seperti create_faq(): commit ke Postgres DULU baru index ke
+    # Chroma satu-satu — kalau indexing salah satu entri gagal di tengah
+    # jalan, entri lain tetap tersimpan sah di Postgres (bisa dicek/di-index
+    # ulang manual nanti), bukan hilang total gara-gara 1 gagal.
+    created = [FaqEntry(question=q, answer=a, created_by=admin.id) for q, a in pairs]
+    db.add_all(created)
+    db.commit()
+    for entry in created:
+        db.refresh(entry)
+        index_faq_entry(entry.id, entry.question, entry.answer)
+
+    log_guardrail_event(
+        db, admin.id, EventType.FAQ_CREATED,
+        detail=f"Bulk import {len(created)} FAQ dari {file.filename}",
+        metadata={"filename": file.filename, "count": len(created)},
+    )
+    return FaqBulkImportResponse(filename=file.filename, created=created, count=len(created))
+
+
+@router.delete("/{faq_id}")
+def delete_faq(faq_id: str, db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
+    entry = db.query(FaqEntry).filter(FaqEntry.id == faq_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="FAQ tidak ditemukan")
+
+    delete_faq_entry_from_index(faq_id)
+    db.delete(entry)
+    db.commit()
+
+    log_guardrail_event(
+        db, admin.id, EventType.FAQ_DELETED,
+        detail=f"FAQ dihapus: {entry.question[:100]}",
+        metadata={"faq_id": faq_id},
+    )
+    return {"message": "FAQ dihapus"}

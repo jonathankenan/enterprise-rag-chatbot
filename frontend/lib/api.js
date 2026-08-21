@@ -245,4 +245,61 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ roles }),
     }),
+
+  // ---- FAQ Helpdesk (dibatasi Role.IT_ADMIN — sumber RAG SRS poin 10.b) ----
+  listFaqs: () => request("/api/faq"),
+
+  createFaq: (question, answer) =>
+    request("/api/faq", {
+      method: "POST",
+      body: JSON.stringify({ question, answer }),
+    }),
+
+  deleteFaq: (faqId) => request(`/api/faq/${faqId}`, { method: "DELETE" }),
+
+  uploadFaqPdf: (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const token = getToken();
+    return fetch(`${API_URL}/api/faq/upload-pdf`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Upload gagal (${res.status})`);
+      }
+      return res.json();
+    });
+  },
+
+  updateUserDivisi: (userId, divisi) =>
+    request(`/api/admin/users/${userId}/divisi`, {
+      method: "PATCH",
+      body: JSON.stringify({ divisi }),
+    }),
+
+  // ---- Multi-Tenant Knowledge Base (dibatasi Role.IT_ADMIN, scope divisi otomatis di backend) ----
+  listKbDocuments: () => request("/api/kb/documents"),
+
+  uploadKbDocument: (file, divisi) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (divisi) formData.append("divisi", divisi);
+    const token = getToken();
+    return fetch(`${API_URL}/api/kb/upload`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}));
+        throw new Error(errorBody.detail || `Upload gagal (${res.status})`);
+      }
+      return res.json();
+    });
+  },
+
+  deleteKbDocument: (docId) => request(`/api/kb/documents/${docId}`, { method: "DELETE" }),
 };

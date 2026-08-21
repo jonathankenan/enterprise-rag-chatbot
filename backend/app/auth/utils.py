@@ -173,3 +173,17 @@ def require_role(*allowed_roles: str):
             )
         return user
     return dependency
+
+
+def get_divisi_scope(user: User) -> str | None:
+    """
+    Cakupan divisi seorang IT_ADMIN — bukan boolean is_divisi_admin
+    terpisah, cuma baca User.divisi milik akun itu sendiri:
+      - None  -> admin GLOBAL, akses semua divisi + Company Wide
+      - "PTI" -> admin TERBATAS ke divisi PTI saja
+
+    Dipakai bersama di kb/routes.py (kelola dokumen KB) dan admin/routes.py
+    (kelola user) — SATU sumber kebenaran untuk "siapa boleh apa", supaya
+    kedua endpoint itu tidak bisa diam-diam beda logika.
+    """
+    return user.divisi

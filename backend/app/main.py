@@ -13,6 +13,8 @@ from app.guardrail.routes import router as audit_router
 from app.helpdesk.routes import router as helpdesk_router
 from app.helpdesk.ws import router as helpdesk_ws_router
 from app.admin.routes import router as admin_router
+from app.faq.routes import router as faq_router
+from app.kb.routes import router as kb_router
 
 # Buat semua tabel di PostgreSQL kalau belum ada (cukup untuk skala internship;
 # untuk produksi biasanya pakai Alembic migration)
@@ -35,6 +37,8 @@ app.include_router(audit_router)
 app.include_router(helpdesk_router)
 app.include_router(helpdesk_ws_router)
 app.include_router(admin_router)
+app.include_router(faq_router)
+app.include_router(kb_router)
 
 
 @app.get("/")
