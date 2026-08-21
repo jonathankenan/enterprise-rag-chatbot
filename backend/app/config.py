@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # bagus, naikkan; kalau tiket yang seharusnya masuk malah lolos, turunkan).
     escalation_confidence_threshold: int = 20
 
+    # SSO — simulasi LDAP M365 BEI (SRS hal. 64) pakai Azure AD (Microsoft
+    # Entra ID) beneran, tapi tenant developer/pribadi, bukan tenant BEI
+    # asli (yang tidak bisa diakses proyek magang ini). Default kosong
+    # supaya app tetap jalan sebelum di-setup (tombol "Login Microsoft"
+    # otomatis disembunyikan di frontend kalau kosong).
+    azure_client_id: str = ""
+    azure_tenant_id: str = ""
+    azure_client_secret: str = ""
+    # HARUS PERSIS SAMA dengan Redirect URI yang didaftarkan di Azure Portal
+    # (App Registration > Authentication) — kalau beda walau 1 karakter,
+    # Microsoft menolak tukar authorization code dengan token.
+    azure_redirect_uri: str = "http://localhost:3000/auth/azure/callback"
+
     @property
     def sensitive_keyword_list(self) -> list[str]:
         return [k.strip().lower() for k in self.sensitive_keywords.split(",") if k.strip()]

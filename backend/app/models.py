@@ -137,6 +137,14 @@ class User(Base):
     totp_secret = Column(EncryptedText, nullable=True)
     mfa_enabled = Column(Boolean, nullable=False, default=False)
 
+    # SRS hal. 64: "User dapat login menggunakan credential Azure AD
+    # (primary) atau user internal platform (alternative)". "local" = daftar
+    # email+password biasa (jalur yang sudah ada dari awal), "azure" = login
+    # via SSO Azure AD (lihat auth/routes.py azure_callback()). Dipakai buat
+    # skip pengecekan password_expired untuk akun Azure — mereka tidak
+    # punya siklus password lokal yang relevan buat sistem ini sama sekali.
+    auth_provider = Column(String, nullable=False, default="local")
+
     chats = relationship("Chat", back_populates="owner")
 
 

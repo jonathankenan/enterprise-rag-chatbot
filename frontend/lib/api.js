@@ -9,7 +9,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // startsWith, jadi "/api/auth/mfa" otomatis cakup /mfa/setup, /mfa/setup/confirm, /mfa/verify —
 // endpoint-endpoint ini sengaja dikecualikan dari auto-redirect 401 (lihat request()
 // di bawah), karena 401 di sini artinya "kode MFA salah", BUKAN "sesi berakhir".
-const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register", "/api/auth/mfa"];
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/register", "/api/auth/mfa", "/api/auth/azure"];
 
 function getToken() {
   if (typeof window === "undefined") return null;
@@ -72,6 +72,15 @@ export const api = {
     request("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    }),
+
+  // ---- SSO Azure AD (simulasi LDAP M365 BEI, SRS hal. 64) ----
+  getAzureLoginUrl: () => request("/api/auth/azure/login-url"),
+
+  azureCallback: (code) =>
+    request("/api/auth/azure/callback", {
+      method: "POST",
+      body: JSON.stringify({ code }),
     }),
 
   // ---- MFA (SRS ISR-001.d — wajib untuk role IT Admin) ----

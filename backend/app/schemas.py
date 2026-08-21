@@ -101,6 +101,15 @@ class MfaVerifyRequest(BaseModel):
     code: str
 
 
+# ---- SSO Azure AD (simulasi LDAP M365 BEI, SRS hal. 64) ----
+class AzureLoginUrlResponse(BaseModel):
+    auth_url: str
+
+
+class AzureCallbackRequest(BaseModel):
+    code: str
+
+
 class UserResponse(BaseModel):
     id: str
     email: str

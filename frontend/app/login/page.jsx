@@ -18,6 +18,23 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [azureLoading, setAzureLoading] = useState(false);
+
+  // SRS hal. 64: "User dapat login menggunakan credential Azure AD
+  // (primary) atau user internal platform (alternative)" — tombol ini
+  // redirect ke Microsoft, browser kembali lagi ke /auth/azure/callback
+  // setelah user login di sana (lihat app/auth/azure/callback/page.jsx).
+  async function handleAzureLogin() {
+    setError("");
+    setAzureLoading(true);
+    try {
+      const { auth_url } = await api.getAzureLoginUrl();
+      window.location.href = auth_url;
+    } catch (err) {
+      setError(err.message || "SSO Azure AD belum tersedia");
+      setAzureLoading(false);
+    }
+  }
 
   async function handleLogin(e) {
     e.preventDefault();
@@ -101,6 +118,27 @@ export default function LoginPage() {
           {loading ? "Memproses..." : "Masuk"}
         </button>
       </form>
+
+      <div style={{ display: "flex", alignItems: "center", margin: "16px 0", color: "#999", fontSize: 12 }}>
+        <div style={{ flex: 1, borderTop: "1px solid #ddd" }} />
+        <span style={{ padding: "0 8px" }}>atau</span>
+        <div style={{ flex: 1, borderTop: "1px solid #ddd" }} />
+      </div>
+
+      <button
+        type="button"
+        onClick={handleAzureLogin}
+        disabled={azureLoading}
+        style={{
+          width: "100%", padding: 10, background: "#2f2f2f", color: "white",
+          border: "none", borderRadius: 4, cursor: azureLoading ? "wait" : "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+        }}
+      >
+        <span style={{ fontWeight: "bold" }}>⊞</span>
+        {azureLoading ? "Mengalihkan ke Microsoft..." : "Login dengan Microsoft"}
+      </button>
+
       <p style={{ marginTop: 16, fontSize: 14 }}>
         Belum punya akun? <Link href="/register">Daftar di sini</Link>
       </p>

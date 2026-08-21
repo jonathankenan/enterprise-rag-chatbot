@@ -9,11 +9,13 @@ import base64
 import io
 from datetime import datetime, timedelta
 
+import msal
 import pyotp
 import qrcode
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import User, AuditLog, Role
 from app.schemas import (
@@ -26,6 +28,8 @@ from app.schemas import (
     MfaSetupResponse,
     MfaSetupConfirmRequest,
     MfaVerifyRequest,
+    AzureLoginUrlResponse,
+    AzureCallbackRequest,
 )
 from app.auth.utils import (
     hash_password, verify_password, create_access_token, get_current_user,
@@ -88,8 +92,13 @@ def _complete_login(db: Session, user: User) -> TokenResponse:
     log_guardrail_event(db, user.id, EventType.LOGIN_SUCCESS, detail="Login berhasil")
     token = create_access_token(user_id=user.id)
 
-    password_age = datetime.utcnow() - (user.password_changed_at or user.created_at)
-    password_expired = password_age > timedelta(days=PASSWORD_MAX_AGE_DAYS)
+    # Akun "azure" login lewat SSO Azure AD (identitas dibuktikan Microsoft),
+    # tidak punya siklus password lokal — password_expired (ISR-002.c) cuma
+    # relevan buat akun "local" yang benar-benar simpan password di sini.
+    password_expired = False
+    if user.auth_provider == "local":
+        password_age = datetime.utcnow() - (user.password_changed_at or user.created_at)
+        password_expired = password_age > timedelta(days=PASSWORD_MAX_AGE_DAYS)
 
     return TokenResponse(
         access_token=token,
@@ -217,3 +226,83 @@ def change_password(
     db.commit()
     log_guardrail_event(db, user.id, EventType.PASSWORD_CHANGED, detail="Password diubah oleh pemilik akun")
     return {"message": "Password berhasil diubah"}
+
+
+# ---------- SSO Azure AD — simulasi "Logon menggunakan LDAP M365 BEI" ----------
+# (SRS hal. 64). Tenant di sini TENANT DEVELOPER/PRIBADI, bukan tenant BEI
+# asli (yang tidak bisa diakses proyek magang ini) — simulasi ALUR OAuth-nya
+# beneran jalan (redirect ke Microsoft, tukar authorization code, verifikasi
+# identitas), cuma bukan terhubung ke direktori karyawan BEI sungguhan.
+
+def _get_msal_app() -> msal.ConfidentialClientApplication:
+    # Pengecekan "sudah dikonfigurasi atau belum" ditaruh DI SINI (satu-satunya
+    # tempat), bukan diulang di tiap endpoint pemanggilnya — sebelumnya
+    # azure_login_url() punya pengecekan ini tapi azure_callback() lupa,
+    # akibatnya azure_callback() lempar 500 mentah (ValueError dari MSAL,
+    # authority URL tidak lengkap) bukan 400 yang rapi kalau .env kosong.
+    if not (settings.azure_client_id and settings.azure_tenant_id and settings.azure_client_secret):
+        raise HTTPException(status_code=400, detail="SSO Azure AD belum dikonfigurasi di server (lihat backend/.env)")
+    return msal.ConfidentialClientApplication(
+        settings.azure_client_id,
+        authority=f"https://login.microsoftonline.com/{settings.azure_tenant_id}",
+        client_credential=settings.azure_client_secret,
+    )
+
+
+@router.get("/azure/login-url", response_model=AzureLoginUrlResponse)
+def azure_login_url():
+    auth_url = _get_msal_app().get_authorization_request_url(
+        scopes=["User.Read"],
+        redirect_uri=settings.azure_redirect_uri,
+    )
+    return AzureLoginUrlResponse(auth_url=auth_url)
+
+
+@router.post("/azure/callback", response_model=TokenResponse)
+def azure_callback(payload: AzureCallbackRequest, db: Session = Depends(get_db)):
+    """
+    Dipanggil frontend (halaman /auth/azure/callback) setelah Microsoft
+    redirect balik dengan `code`. Tukar code itu jadi token asli lewat MSAL
+    — kalau berhasil, `id_token_claims` berisi identitas yang SUDAH
+    diverifikasi Microsoft (kita tidak pernah lihat/pegang password akun
+    Microsoft-nya sama sekali, persis prinsip OAuth).
+    """
+    result = _get_msal_app().acquire_token_by_authorization_code(
+        payload.code, scopes=["User.Read"], redirect_uri=settings.azure_redirect_uri,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=401, detail=f"Login Azure AD gagal: {result.get('error_description', result['error'])}")
+
+    claims = result.get("id_token_claims", {})
+    email = claims.get("preferred_username") or claims.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Tidak bisa membaca email dari akun Azure AD")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        # SRS hal. 64: "Management penambahan user login Active Directory...
+        # dilakukan oleh user dengan role Admin IT dengan mendaftarkan
+        # credential yang SUDAH TERDAFTAR sebelumnya" — bukan auto-signup
+        # bebas siapa saja yang kebetulan berhasil login Microsoft.
+        log_guardrail_event(
+            db, None, EventType.LOGIN_FAILED,
+            detail=f"Login Azure AD ditolak, akun belum terdaftar: email={email}",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Akun ini belum terdaftar di sistem. Hubungi IT Admin untuk didaftarkan terlebih dahulu.",
+        )
+
+    if user.auth_provider != "azure":
+        user.auth_provider = "azure"
+        db.commit()
+
+    # Sama seperti login() biasa — IT Admin tetap wajib MFA (SRS ISR-001.d),
+    # SSO cuma menggantikan langkah "verifikasi password", bukan menggantikan MFA.
+    if user.role == Role.IT_ADMIN:
+        pending_token = create_pending_mfa_token(user.id)
+        if not user.mfa_enabled:
+            return TokenResponse(mfa_setup_required=True, mfa_token=pending_token)
+        return TokenResponse(mfa_required=True, mfa_token=pending_token)
+
+    return _complete_login(db, user)

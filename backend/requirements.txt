@@ -24,3 +24,9 @@ langchain==0.3.0
 langchain-community==0.3.0
 pyotp==2.10.0
 qrcode==8.2
+msal==1.31.0
+# Pin eksplisit — msal minta cryptography<46 (peringatan pip, bisa diabaikan,
+# fungsi HTTPS/OIDC-nya tetap normal), tapi pyhanko (dipakai xhtml2pdf untuk
+# export PDF chat) butuh >=48. 48.0.1 satu-satunya versi yang bikin KEDUANYA
+# tetap jalan — jangan biarkan pip resolver pilih sendiri versi lain.
+cryptography==48.0.1
