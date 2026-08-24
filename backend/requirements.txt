@@ -24,9 +24,15 @@ langchain==0.3.0
 langchain-community==0.3.0
 pyotp==2.10.0
 qrcode==8.2
-msal==1.31.0
-# Pin eksplisit — msal minta cryptography<46 (peringatan pip, bisa diabaikan,
-# fungsi HTTPS/OIDC-nya tetap normal), tapi pyhanko (dipakai xhtml2pdf untuk
-# export PDF chat) butuh >=48. 48.0.1 satu-satunya versi yang bikin KEDUANYA
-# tetap jalan — jangan biarkan pip resolver pilih sendiri versi lain.
+# msal DIPINDAH ke requirements-sso.txt — msal 1.31.0 mendeklarasikan
+# cryptography<46, tapi pyhanko (dipakai xhtml2pdf untuk export PDF chat)
+# butuh cryptography>=48. Tidak ada satu versi cryptography yang memuaskan
+# keduanya sekaligus kalau di-resolve dalam satu `pip install` yang sama —
+# pip (>=20.3, resolver baru) akan selalu gagal dengan ResolutionImpossible.
+# 48.0.1 adalah versi yang benar-benar dipakai (satu-satunya yang bikin
+# pyhanko jalan); msal tetap berfungsi normal dengan versi ini di runtime,
+# constraint <46 di metadata-nya hanya soal deklarasi, bukan kebutuhan nyata.
+# Install urutannya:
+#   pip install -r requirements.txt
+#   pip install -r requirements-sso.txt --no-deps
 cryptography==48.0.1

@@ -58,6 +58,8 @@ cd backend
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-sso.txt --no-deps
+pip install "PyJWT[crypto]<3,>=1.0.0"
 cp .env.example .env
 ```
 Edit `.env` — isi minimal:

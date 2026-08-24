@@ -25,7 +25,7 @@ from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
-from app.rag.vectorstore import extract_text_from_pdf, index_kb_document, delete_kb_document_from_index
+from app.rag.vectorstore import extract_pages_from_pdf, index_kb_document, delete_kb_document_from_index
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
 
@@ -77,7 +77,11 @@ async def upload_kb_document(
     _assert_can_manage(admin, divisi)
 
     file_bytes = await file.read()
-    text = extract_text_from_pdf(io.BytesIO(file_bytes))
+    pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
+    # Flat text still needed here for the guardrail scan below -- indexing
+    # itself uses `pages` so chunks can be tagged with page numbers (SRS
+    # FCR-003 poin 12.a).
+    text = "\n\n".join(p["text"] for p in pages)
 
     # Sama seperti upload dokumen chat & FAQ — konten yang masuk ke RAG
     # (apalagi ini bisa ditarik SELURUH divisi atau company-wide) wajib
@@ -91,7 +95,7 @@ async def upload_kb_document(
         raise HTTPException(status_code=400, detail=KB_PDF_REJECTED_MESSAGE)
 
     doc_id = str(uuid.uuid4())
-    chunk_count = index_kb_document(text=text, doc_id=doc_id, filename=file.filename, divisi=divisi)
+    chunk_count = index_kb_document(pages=pages, doc_id=doc_id, filename=file.filename, divisi=divisi)
 
     doc_record = KbDocument(id=doc_id, divisi=divisi, filename=file.filename, chunk_count=chunk_count, uploaded_by=admin.id)
     db.add(doc_record)

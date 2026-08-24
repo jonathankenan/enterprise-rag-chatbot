@@ -51,7 +51,7 @@ def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
     return has_keyword or has_pii
 
 
-def build_prompt(user_message: str, context_chunks: list[str], chat_history: list = None, session_has_document: bool = False) -> str:
+def build_prompt(user_message: str, context_chunks: list[dict], chat_history: list = None, session_has_document: bool = False) -> str:
     history_text = ""
     if chat_history:
         history_text = "CONVERSATION HISTORY:\n"
@@ -62,7 +62,7 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
 
     if not context_chunks:
         if session_has_document:
-            context_chunks = ["[NO RELEVANT CONTEXT FOUND]"]
+            raw_context = "[NO RELEVANT CONTEXT FOUND]"
         else:
             # General Conversation Prompt (No Documents)
             return (
@@ -78,7 +78,9 @@ def build_prompt(user_message: str, context_chunks: list[str], chat_history: lis
             )
 
     # RAG Prompt (Documents Present)
-    raw_context = "\n\n".join(f"- {c}" for c in context_chunks)
+    if context_chunks:
+        raw_context = "\n\n".join(f"- {c['text']}" for c in context_chunks)
+    # else: raw_context already set to "[NO RELEVANT CONTEXT FOUND]" above
     if len(raw_context) > 15000:
         raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
     context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
@@ -149,7 +151,7 @@ Standalone English Query:"""
 
 async def route_and_generate(
     user_message: str,
-    context_chunks: list[str],
+    context_chunks: list[dict],
     chat_history: list = None,
     preferred_provider: str = "on-prem",
     pii_entities: list[dict] | None = None,

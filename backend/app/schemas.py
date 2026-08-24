@@ -232,6 +232,25 @@ class MessageResponse(BaseModel):
         from_attributes = True
 
 
+class SourceCitation(BaseModel):
+    """
+    SRS FCR-003 poin 12.a: "Answers show source references". Satu entri per
+    dokumen/FAQ unik yang chunk-nya ikut dipakai di PROVIDED CONTEXT jawaban
+    ini (lihat _build_source_citations() di chat/routes.py) -- bukan satu
+    entri per chunk, supaya dokumen yang nyumbang 5 chunk tidak tampil 5x.
+    """
+    label: str  # nama yang ditampilkan ke user: "file.pdf (hal. 3, 7)", atau "FAQ Helpdesk"
+    filename: str | None = None
+    source_type: str  # "chat_document" | "kb_divisi" | "faq"
+    # Nomor halaman PDF (1-indexed) tempat chunk-chunk yang dipakai berasal,
+    # diurutkan & tanpa duplikat. Kosong untuk FAQ (tidak ada konsep halaman)
+    # atau kalau extract_pages_from_pdf() tidak bisa memetakan halaman dengan
+    # aman untuk dokumen ini (lihat _extract_pages_with_fallback() di
+    # rag/vectorstore.py) -- bukan berarti tidak ada halaman, cuma tidak bisa
+    # dipastikan, jadi sengaja dikosongkan daripada menebak.
+    pages: list[int] = []
+
+
 class ChatReplyResponse(BaseModel):
     """Dikembalikan setelah user kirim pesan — berisi jawaban AI + metadata."""
     reply: str
@@ -239,7 +258,7 @@ class ChatReplyResponse(BaseModel):
     is_sensitive: bool
     confidence_score: int | None = None
     pii_detected: bool = False
-    sources: list[str] = []
+    sources: list[SourceCitation] = []
     new_title: str | None = None
     message_id: str | None = None
     # FCR-003 poin 7: "sistem MENAWARKAN eskalasi" — bukan langsung bikin

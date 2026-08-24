@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Document, User
 from app.auth.utils import get_current_user
-from app.rag.vectorstore import extract_text_from_pdf, index_document
+from app.rag.vectorstore import extract_pages_from_pdf, index_document
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
 from app.guardrail.audit_log import log_guardrail_event, EventType
@@ -32,7 +32,11 @@ async def upload_document(
     user: User = Depends(get_current_user),
 ):
     file_bytes = await file.read()
-    text = extract_text_from_pdf(io.BytesIO(file_bytes))
+    pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
+    # Flat text kept around only for the (currently disabled, see block below)
+    # whole-document guardrail scan -- indexing itself uses `pages` so chunks
+    # can be tagged with page numbers (SRS FCR-003 poin 12.a).
+    text = "\n\n".join(p["text"] for p in pages)
 
     # ---------- Guardrail F2-04 pada KONTEN dokumen, bukan cuma prompt chat ----------
     # Sebelumnya teks PDF langsung di-index tanpa pemeriksaan apa pun, sehingga
@@ -68,7 +72,7 @@ async def upload_document(
         raise HTTPException(status_code=400, detail=DOCUMENT_REJECTED_MESSAGE)
 
     doc_id = str(uuid.uuid4())
-    chunk_count = index_document(text=text, doc_id=doc_id, filename=file.filename, chat_id=chat_id)
+    chunk_count = index_document(pages=pages, doc_id=doc_id, filename=file.filename, chat_id=chat_id)
 
     doc_record = Document(id=doc_id, uploaded_by=user.id, filename=file.filename)
     db.add(doc_record)
