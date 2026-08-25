@@ -26,8 +26,28 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
 
+    # Bahasa jawaban default (SRS: aplikasi berbahasa Indonesia).
+    #
+    # 2026-08-25: instruksi relatif ("jawab dalam bahasa yang sama dengan
+    # user") TIDAK cukup untuk model on-prem. Seluruh prompt sistem dan
+    # PROVIDED CONTEXT berbahasa Inggris, jadi model condong ke Inggris.
+    # Ketika instruksi diperkuat jadi "abaikan bahasa Inggris di sekitarmu",
+    # qwen2.5 malah jatuh ke prior bahasa aslinya dan menjawab dalam
+    # MANDARIN -- instruksi itu cuma bilang ke mana JANGAN pergi, bukan ke
+    # mana harus pergi. Menyebut bahasa targetnya eksplisit memberi jangkar
+    # yang jelas. Lihat build_prompt() di llm/router.py.
+    response_language: str = "Bahasa Indonesia"
+
     # Vector DB
     chroma_persist_dir: str = "./chroma_data"
+
+    # Seberapa jauh (poin similarity) sebuah chunk boleh tertinggal dari
+    # peringkat 1 dan masih layak disebut sebagai sumber (SRS FCR-003 poin
+    # 12.a). Ambang RELATIF, bukan absolut: jawaban dari satu kecocokan
+    # presisi menyisakan satu citation, jawaban yang memang butuh sintesis
+    # beberapa dokumen tetap mengutip semuanya karena skornya berdekatan.
+    # Lihat retrieve_context() di rag/vectorstore.py.
+    citation_similarity_gap: int = 15
 
     # Guardrail — dipisah koma di .env, contoh: "rahasia,internal"
     sensitive_keywords: str = "rahasia,internal,confidential"

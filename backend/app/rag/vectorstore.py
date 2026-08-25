@@ -32,9 +32,10 @@ def _extract_pages_with_fallback(doc) -> list[dict]:
     the PDF page it came from -- SRS FCR-003 poin 12.a: citations should
     name a page, not just a filename).
 
-    Primary pass: pymupdf4llm.to_markdown() provides clean markdown
-    formatting (especially for tables), which the MarkdownTextSplitter
-    downstream handles well.
+    Primary pass: pymupdf4llm.to_markdown(page_chunks=True) provides clean
+    markdown formatting (especially for tables), which the MarkdownTextSplitter
+    downstream handles well, AND returns one dict per page with
+    metadata["page"] (1-indexed) already attached.
 
     Known issue (confirmed via diagnostic against Project NEXUS BRD, page 6):
     when a table is immediately followed by non-tabular text (bulleted lists,
@@ -44,93 +45,85 @@ def _extract_pages_with_fallback(doc) -> list[dict]:
     region, so it never gets rendered into the markdown output. This affects
     any PDF with this common layout pattern, not just the test document.
 
-    Safety-net pass: pymupdf4llm inserts '-----' page-break separators
-    between pages in the markdown output. We split on those to get per-page
-    markdown segments, then compare each segment's significant-word set
-    against the corresponding page's raw plain text from fitz. If a page's
-    markdown segment is missing more than 20% of the words in its plain text,
-    we append the raw plain text as a fallback so the content reaches the
-    chunker/indexer regardless of what the markdown pass dropped.
+    Safety-net pass: for each page we compare the markdown's significant-word
+    set against that page's raw plain text from fitz. If a page's markdown
+    covers less than COVERAGE_THRESHOLD of the plain-text words, we append the
+    raw plain text as a fallback so the content reaches the index.
 
-    The 20% threshold is intentionally tight: table-only pages typically have
-    near-100% coverage because the table cell text renders identically in both
-    plain text and markdown. Pages that genuinely dropped post-table prose
-    show 30-50% coverage gaps — well above the noise floor.
+    Returns a list of {"page": int, "text": str}, one entry per PDF page IN
+    ORDER. "page" comes from pymupdf4llm's own per-page metadata, cross-checked
+    against fitz's page index, so it is always populated.
 
-    Returns a list of {"page": int | None, "text": str}, one entry per PDF
-    page IN ORDER. "page" is only None in the rare case where pymupdf4llm's
-    '-----' page-break count doesn't match doc.page_count (segments_match
-    below) -- when that happens we can't safely attribute ANY page number,
-    so the whole document comes back as a single page=None entry rather
-    than guessing wrong numbers.
+    ── 2026-08-25: why this no longer splits on '-----' ─────────────────────
+    This used to call to_markdown() for the whole document and split the
+    result on '\\n\\n-----\\n\\n' page-break separators, guarding the result with
+    `len(md_segments) == len(doc)`. That was wrong in BOTH directions:
+
+      * A normal PDF ends with a trailing separator, so the split produced
+        page_count + 1 segments, the guard failed, and every page number was
+        discarded (page=None for the whole document). Three of the four
+        documents in the dev corpus had zero page citations for this reason.
+
+      * A PDF whose first page yields no markdown (a scanned or image-only
+        cover sheet) still got a separator for it, so the leading empty
+        segment cancelled out the trailing one. len() then MATCHED
+        page_count, the guard PASSED -- while every segment pointed one page
+        ahead. Confirmed on Project NEXUS BRD: the FR-01..FR-12 table that
+        really sits on page 7 was paired with page 8's markdown, and
+        citations named pages 2/3/8 that never mention the requirement asked
+        about. The coverage safety net hid this by firing on all 11 pages
+        (0-32% coverage) -- it was comparing page N's plain text against page
+        N+1's markdown, so of course they barely overlapped.
+
+    The guard compared cardinality, not alignment, so it could not detect the
+    second case even in principle. page_chunks=True removes the heuristic:
+    page numbers come from the library instead of from list position.
     """
-    # ── Primary pass: pymupdf4llm markdown ──────────────────────────────────
-    md_output = pymupdf4llm.to_markdown(doc=doc)
-
-    # ── Split markdown into per-page segments ────────────────────────────────
-    # pymupdf4llm inserts '\n\n-----\n\n' between pages. Split on that to
-    # align markdown segments with their source pages. The resulting list
-    # should have the same length as doc.page_count; if the split count
-    # doesn't match (e.g. content contains '-----' for other reasons), we
-    # fall back gracefully to the full-doc word-set instead.
-    PAGE_BREAK = "\n\n-----\n\n"
-    md_segments = md_output.split(PAGE_BREAK)
-
     def _significant_words(text: str) -> set[str]:
         """Lowercase alphabetic words longer than 3 chars (ignores numbers and
         short stop-words that create noise between plain-text and markdown)."""
         return {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text)}
 
-    md_words_global = _significant_words(md_output)
-    segments_match = len(md_segments) == len(doc)
-
     COVERAGE_THRESHOLD = 0.80  # flag if page markdown covers < 80% of plain-text words
 
-    if not segments_match:
-        # Can't attribute page numbers safely -- fall back to the ORIGINAL
-        # (pre-page-numbering) behaviour: one blob for the whole document,
-        # fallback sections appended at the end, page=None throughout.
-        fallback_sections: list[str] = []
-        for page_num, page in enumerate(doc):
-            plain_text = page.get_text()
-            if not plain_text.strip():
-                continue
-            page_words = _significant_words(plain_text)
-            if not page_words:
-                continue
-            covered = page_words & md_words_global
-            coverage = len(covered) / len(page_words)
-            if coverage < COVERAGE_THRESHOLD:
-                clean = plain_text.strip()
-                fallback_sections.append(
-                    f"\n\n<!-- plain-text fallback page {page_num + 1}"
-                    f" (pymupdf4llm coverage {coverage:.0%}) -->\n{clean}"
-                )
-        full_text = md_output + ("\n" + "\n".join(fallback_sections) if fallback_sections else "")
-        return [{"page": None, "text": full_text}]
+    # ── Primary pass: per-page markdown, page numbers from the library ──────
+    # Keyed by page number from metadata rather than by list position, so a
+    # page pymupdf4llm skips entirely cannot shift every page after it.
+    md_by_page: dict[int, str] = {}
+    try:
+        for entry in pymupdf4llm.to_markdown(doc=doc, page_chunks=True):
+            pno = (entry.get("metadata") or {}).get("page")
+            if pno is not None:
+                md_by_page[int(pno)] = entry.get("text") or ""
+    except Exception as e:
+        # Never fail the upload over markdown formatting. fitz's plain text
+        # below is authoritative for page numbers regardless, so the worst
+        # case is unformatted (but correctly attributed) text.
+        print(f"pymupdf4llm per-page extraction failed, using plain text only: {e}")
 
     pages_out: list[dict] = []
     for page_num, page in enumerate(doc):
+        page_no = page_num + 1
+        page_text = md_by_page.get(page_no, "")
         plain_text = page.get_text()
-        page_text = md_segments[page_num]
 
         if plain_text.strip():
             page_words = _significant_words(plain_text)
             if page_words:
-                md_page_words = _significant_words(page_text)
-                covered = page_words & md_page_words
+                covered = page_words & _significant_words(page_text)
                 coverage = len(covered) / len(page_words)
                 if coverage < COVERAGE_THRESHOLD:
                     clean = plain_text.strip()
                     page_text = (
-                        page_text + f"\n\n<!-- plain-text fallback page {page_num + 1}"
+                        page_text + f"\n\n<!-- plain-text fallback page {page_no}"
                         f" (pymupdf4llm coverage {coverage:.0%}) -->\n{clean}"
                     )
-        # Blank/image-only page: keep its (likely empty) markdown segment as-is,
-        # still numbered -- so later pages don't shift down just because an
-        # earlier page had nothing extractable.
+        # Blank/image-only page: keep its (likely empty) markdown as-is, still
+        # numbered -- so later pages don't shift just because an earlier page
+        # had nothing extractable. This is exactly the case the old '-----'
+        # split got wrong.
 
-        pages_out.append({"page": page_num + 1, "text": page_text})
+        pages_out.append({"page": page_no, "text": page_text})
 
     return pages_out
 
@@ -460,45 +453,99 @@ def retrieve_context(
     docs = docs[:top_k]
 
     # index -> distance, cuma untuk doc yang punya "_distance" (leg vector --
-    # chat-scoped/FAQ/KB divisi -- bukan BM25). Dipakai bareng buat confidence
-    # DAN buat nentuin chunk mana yang layak masuk citation, lihat di bawah.
+    # chat-scoped/FAQ/KB divisi). Dokumen dari leg BM25 dibangun lewat
+    # collection.get() di get_bm25_retriever(), yang tidak mengembalikan
+    # distance sama sekali, jadi mereka TIDAK ada di dict ini.
     distance_by_index = {i: d.metadata["_distance"] for i, d in enumerate(docs) if "_distance" in d.metadata}
 
-    # TOP_MATCHES (3) dipakai untuk DUA hal sekaligus, sengaja disatukan
-    # supaya konsisten -- "seberapa yakin" dan "sumber mana yang disebut"
-    # semestinya merujuk ke bukti yang SAMA, bukan dua definisi berbeda:
+    # TOP_MATCHES (3) = berapa banyak chunk yang LAYAK DISEBUT sebagai sumber.
+    # context_chunks TETAP lengkap sampai top_k -- LLM masih menerima konteks
+    # penuh untuk menjawab (termasuk kasus FR-12 "multi-document synthesis"
+    # yang memang butuh banyak chunk); yang dipersempit hanya bagian mana yang
+    # dikutip. Ditambahkan 2026-08-24 setelah citation "FR-01" ikut menyebut
+    # halaman-halaman yang cuma "di sekitar secara topik" dalam window top_k.
     #
-    # 1. Confidence = rata-rata similarity dari 3 chunk TERBAIK (distance
-    #    terkecil), bukan semua sampai top_k=10. Diubah 2026-08-24 --
-    #    sebelumnya rata-rata dari semua chunk hasil ensemble (termasuk yang
-    #    cuma "di sekitar" tapi tidak betul-betul dipakai LLM buat jawab)
-    #    bikin skor jadi bias turun: 1 chunk yang match presisi (mis.
-    #    similarity ~92%) ketarik ke bawah sama chunk lain yang cuma "cukup
-    #    relevan" (mis. 55-70%). Tetap ambil >1 (bukan cuma top-1) supaya
-    #    jawaban yang genuinely butuh sintesis dari beberapa sumber tidak
-    #    direduksi ke satu titik data yang rapuh.
+    # ── 2026-08-25: dipilih berdasar PERINGKAT ENSEMBLE, bukan distance ─────
+    # Sebelumnya best_indices diambil dari `distance_by_index` (3 distance
+    # terkecil). Karena dict itu HANYA berisi dokumen leg vector, chunk yang
+    # ditemukan HANYA oleh BM25 tidak akan pernah bisa dikutip -- padahal BM25
+    # ada justru untuk menangkap identifier eksak ("FR-02", nomor part) yang
+    # ranking embedding-nya jelek.
     #
-    # 2. Source citation (SRS FCR-003 poin 12.a) -- ditandai via
-    #    "is_top_match" di tiap chunk, dikonsumsi _build_source_citations()
-    #    di chat/routes.py. Ditambahkan 2026-08-24 setelah user melaporkan
-    #    citation "FR-01" ikut menyebut 5 halaman lain yang sama sekali
-    #    tidak membahas FR-01 (halaman 2/3/6/8/10 dari Project NEXUS BRD --
-    #    cuma "di sekitar secara topik" dalam window top_k=10, sama seperti
-    #    masalah yang bikin confidence bias turun). context_chunks TETAP
-    #    lengkap sampai top_k (LLM masih dapat konteks penuh buat jawab,
-    #    termasuk kasus FR-12 "multi-document synthesis" yang genuinely
-    #    butuh banyak chunk) -- yang dipersempit cuma bagian mana yang
-    #    LAYAK DISEBUT sebagai sumber.
+    # Persis itu yang terjadi 2026-08-25: "jelaskan req ID FR-01" dijawab
+    # BENAR dari chunk halaman 7 (ditemukan BM25 lewat kecocokan string
+    # eksak), tapi citation-nya menyebut halaman 6 dan 9 -- dua tetangga topik
+    # dari leg vector -- karena chunk halaman 7 tidak punya "_distance"
+    # sehingga tidak pernah masuk best_indices. Jawabannya benar, sumbernya
+    # salah total.
+    #
+    # EnsembleRetriever mengembalikan dokumen SUDAH terurut menurut skor RRF
+    # gabungan kedua leg, jadi posisi 0..n ADALAH peringkat relevansi
+    # gabungan, dan chunk BM25 bisa ikut bersaing. Kalau BM25 tidak tersedia,
+    # docs datang langsung dari Chroma yang juga sudah terurut distance
+    # menaik -- rumus posisi yang sama tetap benar untuk kedua jalur.
     TOP_MATCHES = 3
-    best_indices = set(sorted(distance_by_index, key=lambda i: distance_by_index[i])[:TOP_MATCHES])
+    ranked = list(range(min(TOP_MATCHES, len(docs))))
 
-    if distance_by_index:
-        best_distances = [distance_by_index[i] for i in best_indices]
-        similarities = [_distance_to_similarity_percent(dist) for dist in best_distances]
+    # ── 2026-08-25: relevance FLOOR, relatif terhadap peringkat 1 ────────────
+    # TOP_MATCHES sebelumnya jumlah TETAP: selalu mengutip 3 chunk, sekuat apa
+    # pun peringkat 2 dan 3. Untuk "jelaskan req ID FR-01" -- yang jawabannya
+    # ada di SATU chunk saja -- hasilnya "hal. 7, 9, 11": halaman 7 benar,
+    # halaman 9 dan 11 cuma pengisi slot. Efek yang sama membuat confidence
+    # bias turun: 1 chunk similarity 95% dirata-rata dengan 2 chunk 10%
+    # menghasilkan 38%.
+    #
+    # Sekarang peringkat 1 SELALU dikutip, dan peringkat 2-3 hanya ikut kalau
+    # similarity-nya masih dalam CITATION_SIMILARITY_GAP poin dari peringkat 1.
+    # Ambangnya RELATIF, bukan absolut, jadi menyesuaikan sendiri: jawaban dari
+    # satu kecocokan presisi menyisakan satu citation, sedangkan jawaban yang
+    # memang tersebar di beberapa dokumen (kasus FR-12 "multi-document
+    # synthesis") tetap mengutip semuanya karena skornya berdekatan. Tidak ada
+    # angka absolut yang harus dikalibrasi ulang per korpus -- masalah yang
+    # sudah dimiliki escalation_confidence_threshold.
+    #
+    # Chunk dari leg BM25 tidak punya similarity yang sebanding:
+    #   * di peringkat 1 -> dianggap acuan tertinggi (reference 100%), karena
+    #     BM25 menaruhnya di puncak justru pada query identifier eksak; efeknya
+    #     peringkat 2-3 harus benar-benar kuat untuk ikut terkutip.
+    #   * di peringkat 2-3 -> tetap dikutip. Tidak ada bukti dia lemah, dan dia
+    #     sampai ke situ lewat peringkat RRF gabungan.
+    CITATION_SIMILARITY_GAP = settings.citation_similarity_gap
+
+    def _similarity(i):
+        if i not in distance_by_index:
+            return None
+        return _distance_to_similarity_percent(distance_by_index[i]) * 100
+
+    best_indices: set[int] = set()
+    if ranked:
+        first = ranked[0]
+        best_indices.add(first)
+        reference = _similarity(first)
+        if reference is None:
+            reference = 100.0
+        floor = reference - CITATION_SIMILARITY_GAP
+        for i in ranked[1:]:
+            sim = _similarity(i)
+            if sim is None or sim >= floor:
+                best_indices.add(i)
+
+    # Confidence dihitung dari chunk yang BENAR-BENAR DIKUTIP -- "seberapa
+    # yakin" dan "sumber mana yang disebut" merujuk ke bukti yang SAMA. Karena
+    # floor di atas sudah membuang chunk pengisi, satu kecocokan presisi tidak
+    # lagi ketarik turun oleh tetangga topik. Chunk BM25 yang terkutip dilewati
+    # saat merata-rata: tetap dikutip, cuma tidak punya angka yang sebanding.
+    scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]
+    if scored:
+        similarities = [_distance_to_similarity_percent(dist) for dist in scored]
         confidence = round((sum(similarities) / len(similarities)) * 100)
     else:
-        # Tidak ada satupun dokumen dari leg vector (koleksi kosong, atau
-        # hasil ensemble kebetulan semua dari BM25) -> tidak relevan ditampilkan skor.
+        # Tidak satupun chunk terkutip punya distance -- jawabannya bersandar
+        # pada kecocokan kata kunci (BM25) yang tidak punya skala sebanding
+        # dengan cosine similarity. Lebih jujur mengosongkan skor daripada
+        # menampilkan angka dari chunk yang TIDAK dikutip. chat/routes.py sudah
+        # menjaga None ini sebelum membandingkan ke ambang eskalasi, dan
+        # chat/page.jsx menyembunyikan baris keyakinan kalau null.
         confidence = None
 
     # SRS FCR-003 poin 12.a: "Answers show source references" -- dulu baris

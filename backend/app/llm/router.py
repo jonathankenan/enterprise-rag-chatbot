@@ -52,6 +52,31 @@ def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
 
 
 def build_prompt(user_message: str, context_chunks: list[dict], chat_history: list = None, session_has_document: bool = False) -> str:
+    # 2026-08-25: the language rule used to live inside CRITICAL INSTRUCTIONS
+    # (as #4 of 6), which lost consistently -- Indonesian questions came back
+    # answered in English. Not a model-capability problem (on-prem is
+    # qwen2.5:7b, which handles Indonesian fine) and not a missing
+    # instruction: it was outvoted by position and volume. Everything after
+    # it -- the whole English system prompt and a fully English PROVIDED
+    # CONTEXT of up to 15k chars -- pushed the model back toward English, and
+    # small models weight the tokens nearest the generation point hardest.
+    #
+    # So it now sits on its own, as the LAST thing before "YOUR RESPONSE:",
+    # and explicitly says to ignore the language of the surrounding prompt
+    # rather than just "match the user".
+    _lang = settings.response_language
+    LANGUAGE_RULE = (
+        f"IMPORTANT — LANGUAGE: Write your ENTIRE response in {_lang}. "
+        f"(Tulis SELURUH jawaban dalam {_lang}.)\n"
+        "The instructions above and the PROVIDED CONTEXT are written in English "
+        "for internal reasons. That is NOT a reason to answer in English, and it "
+        "is NOT a reason to answer in any other language either.\n"
+        f"Only if USER LATEST MESSAGE is itself clearly written in a language "
+        f"other than {_lang} should you answer in that language instead. "
+        f"Never answer in any language except {_lang} or the language of "
+        "USER LATEST MESSAGE.\n\n"
+    )
+
     history_text = ""
     if chat_history:
         history_text = "CONVERSATION HISTORY:\n"
@@ -70,10 +95,10 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
                 "You will be provided with a CONVERSATION HISTORY.\n\n"
                 "CRITICAL INSTRUCTIONS:\n"
                 "1. Answer the user's questions clearly and concisely using your general knowledge.\n"
-                "2. You MUST respond in the exact same language that the user used in their latest message.\n"
-                "3. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n\n"
+                "2. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n\n"
                 f"{history_text}"
                 f"USER LATEST MESSAGE: {user_message}\n\n"
+                f"{LANGUAGE_RULE}"
                 "YOUR RESPONSE:"
             )
 
@@ -96,12 +121,12 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         "1. If the context information provided below contains the answer, use it to answer the question.\n"
         f"{instruction_2}"
         "3. NEVER mention the words 'context', 'provided context', 'document', or explain how you got the answer. Just give the answer naturally.\n"
-        "4. You MUST respond in the exact same language that the user used in their latest message.\n"
-        "5. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n"
-        "6. The user's message may contain placeholders like [ID_NIK_1], [EMAIL_ADDRESS_1], or [PERSON_1]. These represent real personal data that has been hidden for privacy reasons. Treat each placeholder as if it were the actual data it represents, and respond naturally and specifically about it (e.g. confirm you've noted it, or answer questions about it). If you need to refer to that data in your response, use the EXACT placeholder tag (e.g. [ID_NIK_1]) verbatim — do not invent a fake value, do not describe it generically, and do not ignore it.\n\n"
+        "4. NEVER parrot or simply repeat what the user said. You must actually respond to it.\n"
+        "5. The user's message may contain placeholders like [ID_NIK_1], [EMAIL_ADDRESS_1], or [PERSON_1]. These represent real personal data that has been hidden for privacy reasons. Treat each placeholder as if it were the actual data it represents, and respond naturally and specifically about it (e.g. confirm you've noted it, or answer questions about it). If you need to refer to that data in your response, use the EXACT placeholder tag (e.g. [ID_NIK_1]) verbatim — do not invent a fake value, do not describe it generically, and do not ignore it.\n\n"
         f"{history_text}"
         f"{context_text}"
         f"USER LATEST MESSAGE: {user_message}\n\n"
+        f"{LANGUAGE_RULE}"
         "YOUR RESPONSE:"
     )
 
