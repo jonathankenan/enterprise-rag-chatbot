@@ -23,7 +23,7 @@ from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
 from app.rag.vectorstore import retrieve_context
-from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS
+from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
 from app.llm.router import route_and_generate
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 from app.chat.pdf_export import generate_pdf
@@ -325,22 +325,35 @@ async def send_message(
     db.commit()
 
     # ---------- SRS hal. 17, poin 9.a: Intent classification ----------
-    # Dicek PALING AWAL, sebelum get_standalone_query() (yang butuh 1
-    # pemanggilan LLM) maupun retrieve_context() (ensemble 4-leg: dokumen
-    # chat + FAQ + KB divisi + BM25) — buat sapaan/basa-basi murni ("halo",
-    # "makasih"), KEDUANYA di-skip total. Bukan cuma penghematan kosmetik:
-    # pesan sependek "oke" tidak pernah butuh RAG sama sekali.
+    # LAPIS 1 (regex, gratis) dicek PALING AWAL, sebelum analyze_query()
+    # (LLM) maupun retrieve_context() (ensemble 4-leg) — buat sapaan/
+    # basa-basi murni ("halo", "makasih"), KEDUANYA di-skip total.
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
         search_query = payload.content
         context_chunks, retrieval_confidence = [], None
         session_has_document = False
     else:
-        from app.llm.router import get_standalone_query
-        search_query = await get_standalone_query(payload.content, chat_history, effective_provider)
+        # LAPIS 2 (LLM, nebeng ke pemanggilan yang sudah wajib ada buat
+        # rephrase query — lihat llm/router.py: analyze_query()) TIMPA nilai
+        # `intent` dari placeholder QUESTION lapis 1 jadi kategori yang
+        # lebih kaya (document_query/faq_lookup/summary_request/dst).
+        from app.llm.router import analyze_query
+        analysis = await analyze_query(payload.content, chat_history, effective_provider)
+        search_query = analysis["standalone_query"]
+        intent = analysis["intent"]
 
+        # OR keyword sengaja DIPERTAHANKAN sebagai jaring pengaman —
+        # kalau LLM tidak menangkap "summary_request" (mis. keluaran JSON
+        # gagal di-parse, fallback ke QUESTION), kata kunci eksplisit ini
+        # tetap menangkapnya. Deteksi ganda, bukan saling menggantikan.
         query_lower = search_query.lower()
-        if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
+        is_summary = (
+            intent == Intent.SUMMARY_REQUEST
+            or "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower
+        )
+
+        if is_summary:
             from app.rag.vectorstore import get_all_session_chunks, has_session_document
             context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
             session_has_document = has_session_document(chat_id=chat.id)
@@ -353,6 +366,7 @@ async def send_message(
             from app.rag.vectorstore import has_session_document
             context_chunks, retrieval_confidence = retrieve_context(
                 search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
+                weight_hint=intent,
             )
             session_has_document = has_session_document(chat_id=chat.id)
 

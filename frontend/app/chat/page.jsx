@@ -209,7 +209,7 @@ export default function ChatPage() {
       prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "creating" } : m))
     );
     try {
-      const ticket = await api.createTicket(messageId);
+      const ticket = await api.createTicket(chatId, messageId);
       setMessages((prev) =>
         prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "created", ticket_id: ticket.id } : m))
       );
@@ -227,6 +227,27 @@ export default function ChatPage() {
     setMessages((prev) =>
       prev.map((m) => (m.message_id === messageId ? { ...m, escalation_status: "dismissed" } : m))
     );
+  }
+
+  // Tombol "Hubungi Admin" — SELALU terlihat di chat, tidak bergantung
+  // confidence score AI atau AI menebak niat user dari kalimat bebas.
+  // Dibahas eksplisit: deteksi niat via LLM punya masalah discoverability
+  // (user yang tidak tahu "kalimat sakti" tidak akan pernah ketemu fitur
+  // eskalasi ini) — tombol permanen jauh lebih pasti & mudah ditemukan.
+  const [manualEscalating, setManualEscalating] = useState(false);
+
+  async function handleManualEscalate() {
+    if (!chatId) return;
+    setManualEscalating(true);
+    try {
+      const ticket = await api.createTicket(chatId);
+      setActiveTickets((prev) => [ticket, ...prev]);
+      router.push(`/helpdesk/tickets/${ticket.id}`);
+    } catch (err) {
+      alert(err.message || "Gagal menghubungi admin");
+    } finally {
+      setManualEscalating(false);
+    }
   }
 
   async function handleFileUpload(e) {
@@ -442,22 +463,44 @@ export default function ChatPage() {
       <div style={{ flex: 1, padding: "20px 40px", display: "flex", flexDirection: "column", maxWidth: "900px", margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
           <h1 style={{ margin: 0 }}>Generic ChatBot AI</h1>
-          {chatId && messages.length > 0 && (
-            <button
-              onClick={handleExportPdf}
-              disabled={exportingPdf}
-              style={{
-                padding: "8px 16px",
-                background: "#28a745",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: exportingPdf ? "wait" : "pointer"
-              }}
-            >
-              {exportingPdf ? "Mengekspor..." : "⬇ Export PDF"}
-            </button>
-          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            {/* SELALU terlihat (tidak menunggu confidence rendah atau AI
+                menebak niat) — lihat handleManualEscalate() untuk alasan
+                lengkap kenapa ini lebih baik dari deteksi via LLM. */}
+            {chatId && (
+              <button
+                onClick={handleManualEscalate}
+                disabled={manualEscalating}
+                title="Chat langsung dengan admin, tidak perlu menunggu AI"
+                style={{
+                  padding: "8px 16px",
+                  background: "#0070f3",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: manualEscalating ? "wait" : "pointer"
+                }}
+              >
+                {manualEscalating ? "Menghubungkan..." : "🎫 Hubungi Admin"}
+              </button>
+            )}
+            {chatId && messages.length > 0 && (
+              <button
+                onClick={handleExportPdf}
+                disabled={exportingPdf}
+                style={{
+                  padding: "8px 16px",
+                  background: "#28a745",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: exportingPdf ? "wait" : "pointer"
+                }}
+              >
+                {exportingPdf ? "Mengekspor..." : "⬇ Export PDF"}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* SRS ISR-001.g: waktu login sebelumnya + jumlah percobaan gagal

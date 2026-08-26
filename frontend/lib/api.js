@@ -213,10 +213,13 @@ export const api = {
   listTickets: (statusFilter) =>
     request(`/api/helpdesk/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
 
-  createTicket: (messageId) =>
+  // messageId opsional — kosong berarti eskalasi MANUAL (tombol "Hubungi
+  // Admin" yang selalu terlihat), terisi berarti dari banner tawaran
+  // confidence rendah (perilaku lama).
+  createTicket: (chatId, messageId = null) =>
     request("/api/helpdesk/tickets", {
       method: "POST",
-      body: JSON.stringify({ message_id: messageId }),
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
     }),
 
   getTicket: (ticketId) => request(`/api/helpdesk/tickets/${ticketId}`),

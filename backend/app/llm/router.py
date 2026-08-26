@@ -13,6 +13,7 @@ Alur guardrail lengkap:
    a. Cek kategori terlarang (saran hukum/medis/dst) -> ganti pesan penolakan
    b. DEMASK jawaban -> kembalikan placeholder PII ke data asli untuk user
 """
+import json
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -20,6 +21,7 @@ from app.llm.local_llm import call_local_llm
 from app.llm.commercial_llm import call_commercial_llm
 from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.output_filter import check_output_restricted, get_refusal_message
+from app.guardrail.intent_classifier import Intent, LAYER2_INTENTS
 
 COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
@@ -131,47 +133,101 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
     )
 
 
-async def get_standalone_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> str:
+async def analyze_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> dict:
     """
-    [DARI TEMAN ANDA] Kondensasikan riwayat chat + pertanyaan terbaru jadi satu
-    query pencarian mandiri. Membuang basa-basi percakapan (mis. "makasih",
-    "terus gimana") supaya hasil pencarian vector database lebih akurat.
+    Gabungan 2 tugas dalam SATU pemanggilan LLM (bukan 2 panggilan
+    terpisah): (1) rangkai ulang jadi query pencarian mandiri — fungsi asli
+    fungsi ini dari awal (dulu bernama get_standalone_query), dan (2) Intent
+    Classification lapis 2 (SRS hal. 17, poin 9.a — lihat
+    guardrail/intent_classifier.py untuk penjelasan lapis 1 vs lapis 2).
+
+    Digabung SENGAJA supaya intent classification yang lebih kaya (bukan
+    cuma "perlu RAG atau tidak" dari lapis 1) TIDAK menambah biaya/latency
+    — pemanggilan LLM ini sudah wajib ada buat re-phrase query, kita cuma
+    minta 1 field JSON tambahan dari hasil yang sama.
+
+    Return dict SELALU punya kedua key ({"standalone_query": str, "intent":
+    str}) — kalau parsing JSON gagal (LLM tidak taat format, jaringan
+    timeout, dst), fallback ke user_message apa adanya + Intent.QUESTION,
+    TIDAK PERNAH melempar exception ke pemanggil (chat/routes.py tidak perlu
+    try/except tambahan cuma buat ini).
     """
+    fallback = {"standalone_query": user_message, "intent": Intent.QUESTION}
     if not chat_history:
-        return user_message
+        # Pesan pertama di chat -- tidak ada riwayat buat di-rangkai ulang,
+        # TAPI intent classification tetap perlu jalan (beda dari perilaku
+        # lama yang skip total di sini) supaya bobot retrieval tetap bisa
+        # disesuaikan sejak pesan pertama, bukan baru mulai di pesan ke-2.
+        history_text = "(belum ada riwayat, ini pesan pertama di percakapan ini)\n"
+    else:
+        history_text = ""
+        for msg in chat_history:
+            sender = "User" if msg.sender.value == "user" else "Assistant"
+            history_text += f"{sender}: {msg.content}\n"
 
-    history_text = ""
-    for msg in chat_history:
-        sender = "User" if msg.sender.value == "user" else "Assistant"
-        history_text += f"{sender}: {msg.content}\n"
+    prompt = f"""Given the following conversation and a follow-up question, do TWO things and respond with ONLY a JSON object (no markdown, no explanation):
 
-    prompt = f"""
-Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone search query.
-RULES:
-1. Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
-2. Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
-3. IMPORTANT: You must translate the final standalone query into ENGLISH, regardless of the language the user is speaking. 
-4. If the user asks about multiple distinct entities or specific IDs (e.g., 'FR-04 and FR-05'), keep them together in a clean format like 'Requirement FR-04 and Requirement FR-05 specifics', keeping the IDs exactly as written.
-5. Respond ONLY with the standalone query, nothing else. No quotes, no explanations.
+1. "standalone_query": rephrase the follow-up question into a standalone ENGLISH search query.
+   RULES for standalone_query:
+   - Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
+   - Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
+   - Always translate to ENGLISH regardless of the input language.
+   - If asking about multiple distinct entities/IDs (e.g., 'FR-04 and FR-05'), keep them together, IDs exactly as written.
+   - If the follow-up is NOT a real question (e.g. it's just chitchat that slipped through), just clean it up minimally.
+
+2. "intent": classify the follow-up question into EXACTLY ONE of these categories:
+   - "document_query": asking about content of a document the user uploaded to THIS chat
+   - "faq_lookup": a general/procedural question likely answerable from company FAQ or policy knowledge base
+   - "summary_request": explicitly asking to summarize ALL of the uploaded document(s), not search for something specific
+   - "general_chat": needs a reply but isn't really an information-seeking question (opinion, casual remark, unclear intent)
+   - "question": doesn't clearly fit any category above
+
 Chat History:
 {history_text}
 Follow-up Input: {user_message}
-Standalone English Query:"""
 
+JSON:"""
+
+    raw = None
     if preferred_provider in COMMERCIAL_PROVIDERS:
         try:
-            query = await call_commercial_llm(prompt, provider=preferred_provider)
-            return query.strip()
+            raw = await call_commercial_llm(prompt, provider=preferred_provider)
         except Exception:
-            pass
+            raw = None
+    if raw is None:
+        try:
+            raw = await call_local_llm(prompt)
+        except Exception:
+            return fallback
+
+    return _parse_query_analysis(raw, fallback)
+
+
+def _parse_query_analysis(raw: str, fallback: dict) -> dict:
+    """
+    LLM kadang membungkus JSON dengan markdown fence (```json ... ```)
+    walau sudah diminta "no markdown" -- di-strip dulu sebelum di-parse.
+    Validasi intent terhadap LAYER2_INTENTS (bukan dipakai mentah) supaya
+    kalau LLM ngarang kategori yang tidak ada di daftar, tetap jatuh ke
+    Intent.QUESTION yang aman, bukan string sembarangan yang bisa bikin
+    retrieve_context() bingung soal bobot mana yang harus dipakai.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
 
     try:
-        query = await call_local_llm(prompt)
-        return query.strip()
-    except Exception:
-        pass
-
-    return user_message
+        parsed = json.loads(text)
+        query = str(parsed.get("standalone_query") or fallback["standalone_query"]).strip()
+        intent = parsed.get("intent")
+        if intent not in LAYER2_INTENTS:
+            intent = Intent.QUESTION
+        return {"standalone_query": query or fallback["standalone_query"], "intent": intent}
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return fallback
 
 
 async def route_and_generate(

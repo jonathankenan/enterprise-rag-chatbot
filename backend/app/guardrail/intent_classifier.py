@@ -3,21 +3,47 @@
 Intent Classification — SRS FCR-003 hal. 17, poin 9: "Sistem melakukan:
 a) Intent classification, b) Role validation, c) Filtering guardrail".
 Role validation (RBAC) dan Filtering guardrail (filters.py/prompt_injection.py)
-sudah ada; ini menutup poin (a) yang sebelumnya belum ada langkah terpisah.
+sudah ada; ini menutup poin (a).
 
-Pendekatan berbasis ATURAN (regex), bukan panggilan LLM tambahan — beda dari
-get_standalone_query() yang memang butuh LLM buat merangkai ulang kalimat.
-Klasifikasi di sini cuma perlu jawab pertanyaan sempit "perlu RAG atau
-tidak", jadi heuristik sudah cukup dan JAUH lebih murah/cepat (tidak nambah
-1 pemanggilan LLM lagi di setiap pesan, tidak nambah latency).
+DUA LAPIS, bukan cuma satu (versi sebelumnya cuma lapis 1):
+
+Lapis 1 — ATURAN (regex, DI SINI). Cuma jawab pertanyaan sempit "perlu
+diproses lebih jauh sama sekali atau tidak" — GREETING/CHITCHAT murni.
+Gratis & instan, tidak nambah 1 pun pemanggilan LLM.
+
+Lapis 2 — LLM (lihat llm/router.py: analyze_query()), NEBENG ke
+pemanggilan LLM yang SUDAH ADA buat merangkai ulang query pencarian
+(dulu bernama get_standalone_query) — bukan pemanggilan LLM baru
+terpisah. Klasifikasi lebih kaya (DOCUMENT_QUERY/FAQ_LOOKUP/dst) makan
+biaya kalau berdiri sendiri; nebeng di sini artinya HARGANYA SAMA
+dengan sebelum ada intent classification sama sekali (pemanggilan itu
+sudah wajib ada buat re-phrase query, kita cuma minta 1 field ekstra
+dari hasil yang sama).
+
+Kategori lapis 2 dipakai buat menyesuaikan BOBOT ensemble retrieval
+(lihat rag/vectorstore.py: retrieve_context(weight_hint=...)) — bukan
+cuma label kosong. "escalation_request" SENGAJA TIDAK ADA di sini lagi
+(sempat direncanakan, lalu dibatalkan) — eskalasi berbasis deteksi niat
+via LLM punya masalah discoverability (user yang tidak tahu "kalimat
+sakti" tidak akan pernah ketemu fitur eskalasi). Diganti tombol "Hubungi
+Admin" yang SELALU terlihat di chat/page.jsx — deterministik, tidak
+bergantung interpretasi AI sama sekali.
 """
 import re
 
 
 class Intent:
-    GREETING = "greeting"      # "halo", "selamat pagi", dst — sapaan pembuka
-    CHITCHAT = "chitchat"       # "makasih", "oke", "sip" — basa-basi, bukan pertanyaan
-    QUESTION = "question"       # default — perlu diproses lewat RAG seperti biasa
+    # ---------- Lapis 1 (regex) ----------
+    GREETING = "greeting"        # "halo", "selamat pagi", dst — sapaan pembuka
+    CHITCHAT = "chitchat"        # "makasih", "oke", "sip" — basa-basi, bukan pertanyaan
+
+    # ---------- Lapis 2 (LLM, cuma dipakai kalau lolos lapis 1) ----------
+    DOCUMENT_QUERY = "document_query"  # nanya isi dokumen yang di-upload KE CHAT ini
+    FAQ_LOOKUP = "faq_lookup"          # pertanyaan umum/prosedural (kandidat cocok FAQ/KB divisi)
+    SUMMARY_REQUEST = "summary_request"  # minta ringkasan SELURUH dokumen chat (bukan pencarian semantik)
+    GENERAL_CHAT = "general_chat"      # obrolan yang butuh dijawab tapi bukan pencarian informasi
+
+    QUESTION = "question"  # fallback generik — dipakai kalau LLM classification gagal/tidak jalan
 
 
 # Cuma cocok kalau pesan itu PENDEK dan SELURUHNYA basa-basi — pesan
@@ -43,11 +69,35 @@ _CHITCHAT_PATTERNS = [re.compile(p, re.I) for p in [
 # diedit di sini.
 SKIP_RETRIEVAL_INTENTS = frozenset({Intent.GREETING, Intent.CHITCHAT})
 
+# Kategori lapis 2 yang VALID — dipakai buat validasi output LLM (llm/router.py)
+# supaya kalau LLM "berhalusinasi" ngasih kategori yang tidak ada di daftar
+# ini, sistem jatuh ke QUESTION (fallback aman), bukan dipakai mentah-mentah.
+LAYER2_INTENTS = frozenset({
+    Intent.DOCUMENT_QUERY, Intent.FAQ_LOOKUP, Intent.SUMMARY_REQUEST,
+    Intent.GENERAL_CHAT, Intent.QUESTION,
+})
 
-def classify_intent(text: str) -> str:
+
+def classify_intent_rule_based(text: str) -> str | None:
+    """
+    Lapis 1 SAJA. Kembalikan None (bukan Intent.QUESTION) kalau tidak cocok
+    greeting/chitchat — None berarti "lanjut ke lapis 2", beda makna dari
+    Intent.QUESTION yang berarti "sudah pasti fallback lapis 2 gagal".
+    """
     stripped = text.strip()
     if any(p.match(stripped) for p in _GREETING_PATTERNS):
         return Intent.GREETING
     if any(p.match(stripped) for p in _CHITCHAT_PATTERNS):
         return Intent.CHITCHAT
-    return Intent.QUESTION
+    return None
+
+
+def classify_intent(text: str) -> str:
+    """
+    Dipertahankan untuk kompatibilitas mundur (dipanggil chat/routes.py
+    SEBELUM tahu apakah bakal lanjut ke lapis 2 atau tidak) — kalau lapis 1
+    tidak cocok, kembalikan Intent.QUESTION sebagai placeholder sementara;
+    chat/routes.py akan TIMPA nilai ini dengan hasil lapis 2 (analyze_query())
+    kalau pesannya memang lanjut diproses LLM.
+    """
+    return classify_intent_rule_based(text) or Intent.QUESTION

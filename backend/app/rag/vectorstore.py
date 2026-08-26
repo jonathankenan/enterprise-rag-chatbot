@@ -11,6 +11,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
 
 from app.config import settings
+from app.guardrail.intent_classifier import Intent
 
 _embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="all-MiniLM-L6-v2"
@@ -404,9 +405,41 @@ def _distance_to_similarity_percent(distance: float) -> float:
     return max(0.0, min(1.0, 1 - (distance / 2)))
 
 
+# Urutan tiap tuple SELALU (chroma_dokumen_chat, faq, kb_divisi) — 3 leg yang
+# SELALU dipanggil apa pun hint-nya (lihat docstring retrieve_context()).
+# Jumlah 3 angka SENGAJA tidak harus 1.0 -- itu porsi "sisa" setelah leg BM25
+# (kalau ada) dikasih porsi tetap 0.3, lihat _resolve_weights().
+_DEFAULT_WEIGHTS = (0.35, 0.2, 0.25)
+_WEIGHT_PROFILES = {
+    # User nanya dokumen yang DIA SENDIRI upload ke chat ini -> leg chroma
+    # (dokumen chat, di-scope chat_id) paling dominan.
+    Intent.DOCUMENT_QUERY: (0.55, 0.15, 0.15),
+    # Pertanyaan umum/prosedural -> leg FAQ paling relevan.
+    Intent.FAQ_LOOKUP: (0.15, 0.55, 0.15),
+    # Obrolan yang tidak jelas arahnya -> bobot rata, tidak ada leg yang
+    # "diyakini" lebih relevan dari yang lain.
+    Intent.GENERAL_CHAT: (0.3, 0.25, 0.25),
+}
+_BM25_SHARE = 0.3  # porsi tetap buat leg BM25 kalau ada -- angka ini TIDAK berubah oleh weight_hint
+
+
+def _resolve_weights(weight_hint: str | None, has_bm25: bool) -> list[float]:
+    base = _WEIGHT_PROFILES.get(weight_hint, _DEFAULT_WEIGHTS)
+    if not has_bm25:
+        return list(base)
+    # Skalakan 3 bobot dasar supaya jumlahnya (1 - _BM25_SHARE), MENJAGA
+    # RASIO relatif antar-leg dari profil yang dipilih -- bukan angka
+    # terpisah per profil x per-ada-bm25-atau-tidak (kombinasi eksplisit
+    # akan jadi 4 x 2 = 8 tuple yang harus dikalibrasi manual satu-satu).
+    total = sum(base)
+    remaining = 1.0 - _BM25_SHARE
+    scaled = [round(w / total * remaining, 4) for w in base]
+    return scaled + [_BM25_SHARE]
+
+
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
-    user_divisi: str | None = None,
+    user_divisi: str | None = None, weight_hint: str | None = None,
 ) -> tuple[list[dict], int | None]:
     """
     Kembalikan (potongan_teks, retrieval_confidence). Confidence 0-100
@@ -427,6 +460,15 @@ def retrieve_context(
     SELALU diikutsertakan sebagai leg RETRIEVAL tambahan, bukan cuma kalau
     chat itu sendiri tidak punya dokumen.
 
+    weight_hint: hasil Intent Classification lapis 2 (guardrail/
+    intent_classifier.py, lihat llm/router.py: analyze_query()) — TIDAK
+    mengubah leg mana yang di-QUERY (ketiga/keempat leg tetap sama-sama
+    dipanggil), cuma mengubah SEBERAPA BESAR pengaruh tiap leg ke ranking
+    RRF akhir. Contoh: "document_query" (user nanya dokumen yang dia
+    upload sendiri) menaikkan bobot leg dokumen chat, "faq_lookup"
+    menaikkan bobot leg FAQ. None/tidak dikenali -> bobot default (perilaku
+    lama, sebelum ada weight_hint).
+
     Skor akhir = rata-rata similarity dari 3 chunk TERBAIK (distance
     terkecil) di antara semua kandidat leg vector, BUKAN rata-rata dari
     semua top_k=10 chunk yang diambil buat konteks LLM. Lihat komentar di
@@ -439,13 +481,9 @@ def retrieve_context(
     bm25_retriever = get_bm25_retriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
 
     retrievers = [chroma_retriever, faq_retriever, kb_retriever]
-    # Dokumen chat sendiri diberi bobot sedikit lebih tinggi — asumsinya
-    # dokumen yang SENGAJA di-upload user ke chat ini lebih spesifik ke
-    # kebutuhannya saat itu, dibanding FAQ/KB divisi yang lebih umum.
-    weights = [0.35, 0.2, 0.25]
+    weights = _resolve_weights(weight_hint, has_bm25=bm25_retriever is not None)
     if bm25_retriever:
         retrievers.append(bm25_retriever)
-        weights = [0.3, 0.15, 0.25, 0.3]
 
     ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
     docs = ensemble.invoke(search_query)

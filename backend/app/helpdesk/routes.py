@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, Chat, Message, SenderType
+from app.models import Role, User, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, Chat, Message, SenderType, TicketStatus
 from app.schemas import (
     TicketResponse, TicketDetailResponse, MessageResponse,
     CreateTicketRequest, HelpdeskMessageResponse,
@@ -99,20 +99,50 @@ def create_ticket(
     user: User = Depends(get_current_user),
 ):
     """
-    User SENDIRI yang konfirmasi tawaran eskalasi (SRS: "sistem menawarkan
-    eskalasi" — bukan langsung membuat tiket tanpa izin). message_id harus
-    jawaban AI di CHAT MILIK user ini, dan confidence-nya memang di bawah
-    ambang — dua validasi ini mencegah user membuat tiket dari pesan
-    sembarangan (mis. jawaban high-confidence, atau chat milik orang lain).
+    2 jalur eskalasi, User SENDIRI yang memutuskan keduanya (SRS: "sistem
+    menawarkan eskalasi" — bukan langsung membuat tiket tanpa izin):
+
+    1. message_id TERISI — dari banner tawaran confidence rendah, mengikat
+       tiket ke jawaban AI spesifik yang memicu.
+    2. message_id KOSONG — tombol "Hubungi Admin" yang SELALU terlihat di
+       chat, tidak bergantung skor confidence ATAU AI menebak-nebak niat
+       user dari kalimat bebas. Ditambahkan setelah didiskusikan: deteksi
+       niat lewat LLM ("saya mau bicara admin") punya masalah discoverability
+       — user yang tidak tahu "kalimat sakti" apa pun tidak akan pernah
+       ketemu fitur ini. Tombol permanen jauh lebih pasti & mudah ditemukan.
     """
+    chat = db.query(Chat).filter(Chat.id == payload.chat_id).first()
+    if not chat or chat.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+
+    if payload.message_id is None:
+        # Jalur manual — cegah spam tiket kalau tombol diklik berkali-kali:
+        # pakai ulang tiket "open" yang sudah ada utk chat ini kalau ada.
+        existing_manual = (
+            db.query(HelpdeskTicket)
+            .filter(HelpdeskTicket.chat_id == chat.id, HelpdeskTicket.message_id.is_(None), HelpdeskTicket.status == TicketStatus.OPEN)
+            .first()
+        )
+        if existing_manual:
+            return _ticket_detail(existing_manual, db)
+
+        ticket = HelpdeskTicket(chat_id=chat.id, user_id=user.id, message_id=None, confidence_score=None)
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        log_guardrail_event(
+            db, user.id, EventType.HELPDESK_ESCALATED,
+            detail=f"chat_id={chat.id}, ticket_id={ticket.id} (manual, tombol Hubungi Admin)",
+            metadata={"manual": True},
+        )
+        return _ticket_detail(ticket, db)
+
+    # ---------- Jalur banner confidence rendah (perilaku lama, tidak berubah) ----------
     message = db.query(Message).filter(Message.id == payload.message_id).first()
     if not message or message.sender != SenderType.assistant:
         raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
-
-    chat = db.query(Chat).filter(Chat.id == message.chat_id).first()
-    if not chat or chat.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Pesan ini bukan milik Anda")
-
+    if message.chat_id != chat.id:
+        raise HTTPException(status_code=400, detail="Pesan ini bukan bagian dari percakapan yang dimaksud")
     if message.confidence_score is None:
         raise HTTPException(status_code=400, detail="Pesan ini tidak memenuhi syarat eskalasi")
 

@@ -275,7 +275,11 @@ class ChatReplyResponse(BaseModel):
 
 # ---- Helpdesk (FCR-003 poin 7 — eskalasi ke human helpdesk) ----
 class CreateTicketRequest(BaseModel):
-    message_id: str  # jawaban AI low-confidence yang user setuju dieskalasi
+    chat_id: str
+    # None = eskalasi MANUAL (user klik tombol "Hubungi Admin", tidak
+    # terikat 1 jawaban AI tertentu) — terisi = eskalasi dari banner tawaran
+    # confidence rendah (jawaban AI spesifik yang memicu).
+    message_id: str | None = None
 
 
 class TicketResponse(BaseModel):
