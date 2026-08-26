@@ -126,6 +126,21 @@ class Settings(BaseSettings):
     # Microsoft menolak tukar authorization code dengan token.
     azure_redirect_uri: str = "http://localhost:3000/auth/azure/callback"
 
+    # Direktori Azure AD TIRUAN untuk pengembangan — lihat
+    # auth/mock_directory.py. Dipakai kalau tenant Azure (BEI maupun
+    # developer) tidak tersedia: seluruh alur SSO milik kita tetap bisa diuji
+    # tanpa Microsoft sama sekali.
+    #
+    # BYPASS OTENTIKASI. Kalau true, siapa pun yang membuka halaman picker
+    # bisa masuk sebagai pegawai mana pun tanpa kredensial apa pun. Default
+    # HARUS tetap false, dan jangan pernah dinyalakan di lingkungan yang bisa
+    # dijangkau orang lain. Setiap login lewat jalur ini dicatat ke audit log
+    # dengan severity "high" supaya tidak bisa terjadi diam-diam.
+    azure_mock_enabled: bool = False
+    # Tempat picker di-host. Perlu absolut karena yang membukanya adalah
+    # BROWSER (hasil redirect), bukan backend sendiri.
+    azure_mock_picker_url: str = "http://localhost:8000/api/auth/azure/mock-picker"
+
     @property
     def sensitive_keyword_list(self) -> list[str]:
         return [k.strip().lower() for k in self.sensitive_keywords.split(",") if k.strip()]
