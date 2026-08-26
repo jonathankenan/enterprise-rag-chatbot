@@ -34,6 +34,17 @@ def _segment(source: str, name: str) -> str:
     raise LookupError(f"{name} not found")
 
 
+def _assignment(source: str, name: str) -> str:
+    """Same idea as _segment but for a module-level constant (e.g. a compiled
+    regex), so the tests use the shipping pattern rather than a copy."""
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == name for t in node.targets
+        ):
+            return ast.get_source_segment(source, node)
+    raise LookupError(f"{name} not found")
+
+
 # ---------------------------------------------------------------- load units
 _ns: dict = {}
 exec("from pydantic import BaseModel", _ns)
@@ -45,6 +56,16 @@ _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
 _tail = "\n".join(l[4:] if l.startswith("    ") else l for l in _tail.split("\n"))
 _helper = _segment(VECTOR_SRC, "_distance_to_similarity_percent")
+# The tail gained a lexical gate on 2026-08-26 (_has_query_id/_is_toc), so it
+# now also closes over `re`, the tokenizer, the identifier regex and the two
+# identifier helpers. Loaded the same way as everything else here — from the
+# shipping source, not a copy.
+_lexical = "\n".join([
+    _segment(VECTOR_SRC, "custom_bm25_tokenizer"),
+    _assignment(VECTOR_SRC, "_IDENTIFIER_RE"),
+    _segment(VECTOR_SRC, "extract_query_identifiers"),
+    _segment(VECTOR_SRC, "text_mentions_identifier"),
+])
 
 
 def _config_default(name: str):
@@ -61,12 +82,33 @@ class _Settings:
     citation_similarity_gap = _config_default("citation_similarity_gap")
 
 
-def select(docs, top_k=10):
-    """Run the real is_top_match/confidence block over stub documents."""
-    ns = {"docs": list(docs), "top_k": top_k, "settings": _Settings}
+def select(docs, top_k=10, search_query=""):
+    """Run the real is_top_match/confidence block over stub documents.
+
+    search_query defaults to "" — no identifier token, so the 2026-08-26
+    lexical gate stays inert and these tests exercise the similarity floor on
+    its own, exactly as they did before the gate existed. Pass a real query to
+    test the gate itself.
+    """
+    ns = {"docs": list(docs), "top_k": top_k, "settings": _Settings,
+          "search_query": search_query, "re": __import__("re")}
+    exec(_lexical, ns)
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
     return ns["__r__"]
+
+
+GAP = _Settings.citation_similarity_gap
+
+
+def dist_for(sim_pct: float) -> float:
+    """Inverse of _distance_to_similarity_percent: the distance a chunk needs
+    to land on a given similarity. Lets a test say "rank 2 sits one point
+    inside the gap" instead of hardcoding a distance that silently encodes
+    whatever citation_similarity_gap happened to be when it was written --
+    which is exactly how three tests broke when the gap moved 15 -> 5 on
+    2026-08-26."""
+    return 2 * (1 - sim_pct / 100)
 
 
 class Doc:
@@ -171,18 +213,21 @@ def test_page_zero_is_recorded_not_skipped():
 def test_top_matches_gates_citations_but_not_context():
     """Vector-only path: Chroma returns distance-ascending, so the first three
     positions are the three closest."""
+    # ranks 2 and 3 sit inside the gap whatever it is set to, so this test
+    # stays about the top-3 window and not about the floor's exact value.
+    sims = [95, 95 - GAP / 3, 95 - 2 * GAP / 3]
     docs = [
-        Doc(filename="BRD.pdf", page=1, _distance=0.10),
-        Doc(filename="BRD.pdf", page=2, _distance=0.20),
-        Doc(filename="BRD.pdf", page=3, _distance=0.30),
-        Doc(filename="BRD.pdf", page=4, _distance=0.55),
-        Doc(filename="BRD.pdf", page=5, _distance=0.60),
+        Doc(filename="BRD.pdf", page=1, _distance=dist_for(sims[0])),
+        Doc(filename="BRD.pdf", page=2, _distance=dist_for(sims[1])),
+        Doc(filename="BRD.pdf", page=3, _distance=dist_for(sims[2])),
+        Doc(filename="BRD.pdf", page=4, _distance=dist_for(95 - GAP - 20)),
+        Doc(filename="BRD.pdf", page=5, _distance=dist_for(95 - GAP - 25)),
     ]
     chunks, confidence = select(docs)
     assert len(chunks) == 5, "full context must still reach the LLM"
     assert [c["is_top_match"] for c in chunks] == [True, True, True, False, False]
     assert build_citations(chunks)[0].pages == [1, 2, 3]
-    assert confidence == 90
+    assert confidence == round(sum(sims) / len(sims))
 
 
 def test_selection_follows_ensemble_rank_not_raw_distance():
@@ -238,11 +283,11 @@ def test_close_scores_all_survive_the_floor():
 
 
 def test_rank_two_just_inside_and_just_outside_the_gap():
-    """The boundary itself: default gap is 15 points from rank 1."""
-    inside = [Doc(filename="a.pdf", page=1, _distance=0.10),   # sim 95
-              Doc(filename="a.pdf", page=2, _distance=0.22)]   # sim 89 -> keep
-    outside = [Doc(filename="a.pdf", page=1, _distance=0.10),  # sim 95
-               Doc(filename="a.pdf", page=2, _distance=0.45)]  # sim 77.5 -> drop
+    """The boundary itself, expressed relative to the configured gap."""
+    inside = [Doc(filename="a.pdf", page=1, _distance=dist_for(95)),
+              Doc(filename="a.pdf", page=2, _distance=dist_for(95 - GAP + 1))]   # keep
+    outside = [Doc(filename="a.pdf", page=1, _distance=dist_for(95)),
+               Doc(filename="a.pdf", page=2, _distance=dist_for(95 - GAP - 1))]  # drop
     assert build_citations(select(inside)[0])[0].pages == [1, 2]
     assert build_citations(select(outside)[0])[0].pages == [1]
 
@@ -260,8 +305,8 @@ def test_unscored_rank_one_sets_a_strict_bar():
 
 
 def test_fewer_than_three_vector_chunks_still_scores():
-    docs = [Doc(filename="Memo.pdf", page=1, _distance=0.15),
-            Doc(filename="Memo.pdf", page=2, _distance=0.40)]
+    docs = [Doc(filename="Memo.pdf", page=1, _distance=dist_for(92.5)),
+            Doc(filename="Memo.pdf", page=2, _distance=dist_for(92.5 - GAP / 2))]
     chunks, confidence = select(docs)
     assert all(c["is_top_match"] for c in chunks)
     assert confidence is not None
@@ -320,6 +365,121 @@ def test_confidence_skips_unscored_chunks_but_still_cites_them():
     chunks, confidence = select(docs)
     assert build_citations(chunks)[0].pages == [1, 2, 7]
     assert confidence == 95, "mean of the two scored chunks only"
+
+
+# ------------------------------------------- lexical gate (added 2026-08-26)
+# Regression cover for the reported bug: "jelaskan req ID FR-01" cited
+# hal. 1, 3, 7 -- page 1 is the cover sheet (no "FR-01" anywhere on it) and
+# page 3 is the Table of Contents (has the string, but only as a nav line).
+# Measured on the real corpus, the whole top-10 spanned 8 similarity points,
+# so the floor alone could never separate them.
+
+def test_identifier_query_drops_chunks_that_lack_the_identifier():
+    docs = [
+        Doc("|**FR-01**|Retrieval Accuracy|... 92% (MRR@5)|Must Have|",
+            filename="BRD.pdf", page=7, _distance=dist_for(95)),
+        Doc("BUSINESS REQUIREMENTS DOCUMENT — PROJECT NEXUS — Document ID: BRD-2026",
+            filename="BRD.pdf", page=1, _distance=dist_for(94)),   # cover sheet
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert build_citations(chunks)[0].pages == [7], "cover sheet has no FR-01"
+    assert len(chunks) == 2, "full context still reaches the LLM"
+
+
+def test_table_of_contents_is_never_cited_even_holding_the_identifier():
+    docs = [
+        Doc("|**FR-01**|Retrieval Accuracy|...|", filename="BRD.pdf", page=7,
+            _distance=dist_for(95)),
+        Doc("Scope & Boundaries ........... Page 5\n"
+            "Detailed Functional Requirements (FR-01 to FR-15) ........... Page 6\n"
+            "Non-Functional Requirements ........... Page 7",
+            filename="BRD.pdf", page=3, _distance=dist_for(94)),
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert build_citations(chunks)[0].pages == [7]
+
+
+def test_gate_also_applies_to_bm25_chunks():
+    """The `sim is None` branch used to admit BM25 hits unconditionally — that
+    is how the ToC page got cited in the first place."""
+    docs = [
+        Doc("|**FR-01**|Retrieval Accuracy|...|", filename="BRD.pdf", page=7,
+            _distance=dist_for(95)),
+        Doc("Table of Contents\nExecutive Summary ....... Page 2\n"
+            "Functional Requirements (FR-01 to FR-15) ....... Page 6\n"
+            "Appendix ....... Page 11",
+            filename="BRD.pdf", page=3),                            # BM25-only
+        Doc("Average cost per voice call sits at $6.20",
+            filename="BRD.pdf", page=4),                            # BM25-only, no id
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert build_citations(chunks)[0].pages == [7]
+
+
+def test_bm25_chunk_holding_the_identifier_is_still_citable():
+    """The gate must not undo commit 2013249 — an exact-match BM25 chunk is
+    precisely what these identifier queries are retrieved by."""
+    docs = [
+        Doc("## 5. Detailed Functional Requirements", filename="BRD.pdf", page=7,
+            _distance=dist_for(95)),
+        Doc("|Req ID|Category|...|\n|**FR-01**|Retrieval Accuracy|92% (MRR@5)|",
+            filename="BRD.pdf", page=7),                            # BM25-only
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert [c["is_top_match"] for c in chunks] == [True, True]
+
+
+def test_query_without_identifier_leaves_the_gate_inert():
+    """Multi-document synthesis (the FR-12 case) must keep working."""
+    docs = [
+        Doc("Overdraft fee is $35.00 per occurrence", filename="Fees.pdf", page=2,
+            _distance=dist_for(95)),
+        Doc("Capped at 3 occurrences per calendar day", filename="Terms.pdf", page=9,
+            _distance=dist_for(95 - GAP + 1)),
+    ]
+    chunks, _ = select(docs, search_query="overdraft fee policy summary")
+    assert [c["is_top_match"] for c in chunks] == [True, True]
+    assert {c.filename for c in build_citations(chunks)} == {"Fees.pdf", "Terms.pdf"}
+
+
+# ------------------------------------ identifier extraction (added 2026-08-26)
+_lex_ns: dict = {"re": __import__("re")}
+exec(_lexical, _lex_ns)
+extract_ids = _lex_ns["extract_query_identifiers"]
+
+
+def test_identifier_recognises_requirement_style_ids():
+    assert extract_ids("Requirement FR-14 specifics") == {"fr-14"}
+    assert extract_ids("Priority of NFR-PERF-03") == {"nfr-perf-03"}
+    assert extract_ids("mitigation for RSK-02") == {"rsk-02"}
+    assert extract_ids("update frequency of DOC-FEE-2026") == {"doc-fee-2026"}
+
+
+def test_bare_numbers_are_not_identifiers():
+    """The first cut of this rule counted any token containing a digit, which
+    would have treated "92" in a figure question as an item identifier and
+    filtered context on it."""
+    assert extract_ids("retrieval accuracy 92 percent target") == set()
+    assert extract_ids("what is the 600 ms TTFT threshold") == set()
+    assert extract_ids("compare Platinum and Gold card benefits") == set()
+
+
+def test_id_match_tags_every_chunk():
+    docs = [
+        Doc("|**FR-01**|Retrieval Accuracy|...|", filename="BRD.pdf", page=7,
+            _distance=dist_for(95)),
+        Doc("BUSINESS REQUIREMENTS DOCUMENT — PROJECT NEXUS", filename="BRD.pdf",
+            page=1, _distance=dist_for(94)),
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert [c["id_match"] for c in chunks] == [True, False]
+
+
+def test_id_match_is_true_for_all_when_query_has_no_identifier():
+    docs = [Doc("overdraft fee $35.00", filename="Fees.pdf", page=2, _distance=dist_for(95)),
+            Doc("unrelated text", filename="Fees.pdf", page=3, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="overdraft fee policy summary")
+    assert all(c["id_match"] for c in chunks)
 
 
 # ---------------------------------------------------------------- standalone

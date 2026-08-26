@@ -47,7 +47,16 @@ class Settings(BaseSettings):
     # presisi menyisakan satu citation, jawaban yang memang butuh sintesis
     # beberapa dokumen tetap mengutip semuanya karena skornya berdekatan.
     # Lihat retrieve_context() di rag/vectorstore.py.
-    citation_similarity_gap: int = 15
+    #
+    # 2026-08-26: 15 -> 5. Diukur pada korpus satu dokumen (Project_NEXUS,
+    # 39 chunk), SELURUH top-10 cuma membentang 8 poin (74.69%..66.59%) --
+    # floor 15 poin jatuh di 59.69% dan tidak pernah membuang satu chunk pun.
+    # all-MiniLM-L6-v2 pada dokumen yang seluruh isinya satu topik memang
+    # menghasilkan pita similarity sempit. Daya pisah utama sekarang ada di
+    # saringan leksikal (_has_query_id/_is_toc di retrieve_context); angka ini
+    # tinggal jadi pengaman untuk query TANPA identifier, yang tidak tersentuh
+    # saringan itu.
+    citation_similarity_gap: int = 5
 
     # Guardrail — dipisah koma di .env, contoh: "rahasia,internal"
     sensitive_keywords: str = "rahasia,internal,confidential"

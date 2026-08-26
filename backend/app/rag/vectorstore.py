@@ -370,6 +370,29 @@ def custom_bm25_tokenizer(text: str) -> list[str]:
     return re.findall(r'\b[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*\b', text.lower())
 
 
+# Identifier bergaya requirement: huruf, lalu bagian angka setelah tanda hubung.
+# Cocok: fr-01, nfr-perf-01, rsk-02, doc-fee-2026. TIDAK cocok: 92, 600, 1.200.
+#
+# 2026-08-26: definisi awal saya "token apa pun yang mengandung angka" SALAH --
+# pertanyaan seperti "berapa akurasi 92 persen" akan memperlakukan "92" sebagai
+# identifier, lalu menyaring sitasi (dan kini konteks) berdasarkan kehadiran
+# string "92". Bukan itu maksudnya. Yang dituju cuma identifier item, karena
+# identifier itulah satu-satunya hal yang bisa dicek keberadaannya secara
+# deterministik terhadap korpus.
+_IDENTIFIER_RE = re.compile(r"[a-z]{2,}(?:-[a-z]+)*-\d+(?:\.\d+)*")
+
+
+def extract_query_identifiers(text: str) -> set[str]:
+    """Identifier item yang disebut sebuah query, sudah lowercase."""
+    return {t for t in custom_bm25_tokenizer(text) if _IDENTIFIER_RE.fullmatch(t)}
+
+
+def text_mentions_identifier(text: str, identifiers: set[str]) -> bool:
+    if not identifiers:
+        return True
+    return bool(identifiers & set(custom_bm25_tokenizer(text)))
+
+
 def get_bm25_retriever(chat_id: str, collection_name: str = "kb_general", top_k: int = 10):
     collection = get_collection(collection_name)
     if collection.count() == 0:
@@ -517,6 +540,46 @@ def retrieve_context(
             return None
         return _distance_to_similarity_percent(distance_by_index[i]) * 100
 
+    # ── 2026-08-26: saringan LEKSIKAL sebelum floor similarity ──────────────
+    # Floor di bawah ternyata tidak pernah menyaring apa pun pada korpus satu
+    # dokumen. Diukur langsung pada "Requirement FR-01 specifics" terhadap
+    # Project_NEXUS (39 chunk): SELURUH top-10 membentang cuma 74.69%..66.59%
+    # -- 8 poin -- sementara CITATION_SIMILARITY_GAP=15 menaruh floor di
+    # 59.69%. Semua chunk lolos. Penyebabnya bukan angka gap-nya keliru, tapi
+    # all-MiniLM-L6-v2 pada korpus yang seluruh isinya membahas proyek yang
+    # sama memang menghasilkan pita similarity sempit -- ambang berbasis
+    # SELISIH POIN tidak punya daya pisah di situ.
+    #
+    # Yang benar-benar diskriminatif untuk pertanyaan ber-identifier adalah
+    # leksikal: chunk yang dikutip HARUS memuat identifier yang ditanyakan.
+    # Dua kasus nyata yang ditutup aturan ini (dilaporkan 2026-08-26, citation
+    # "FR-01" menyebut hal. 1, 3, 7):
+    #   * hal. 1 = halaman sampul, tidak memuat "FR-01" sama sekali -- masuk
+    #     lewat kemiripan topik umum, bukan karena membahas FR-01.
+    #   * hal. 3 = Daftar Isi, memuat "FR-01" tapi cuma sebagai baris navigasi
+    #     ("Detailed Functional Requirements (FR-01 to FR-15) ..... Page 6").
+    #     Aturan identifier saja tidak cukup membuangnya, makanya _is_toc().
+    #
+    # Keduanya masuk lewat celah `sim is None` di bawah: chunk yang HANYA
+    # ditemukan BM25 tidak punya "_distance", jadi dulu dikutip TANPA SYARAT
+    # sekuat/selemah apa pun. BM25 sengaja diberi hak kutip (2026-08-25, chunk
+    # hal. 7 yang benar cuma ketemu lewat kecocokan string eksak) -- hak itu
+    # dipertahankan, tapi sekarang bersyarat.
+    #
+    # Query TANPA identifier (mis. "ringkas kebijakan biaya") tidak terkena:
+    # query_ids kosong -> _has_query_id() selalu True -> perilaku lama utuh,
+    # termasuk kasus sintesis multi-dokumen FR-12.
+    query_ids = extract_query_identifiers(search_query)
+
+    def _has_query_id(i):
+        return text_mentions_identifier(docs[i].page_content, query_ids)
+
+    def _is_toc(i):
+        # Baris Daftar Isi dikenali dari dot leader ("Bab ......... Page 6").
+        # Ambang 3 supaya tabel/teks biasa yang kebetulan punya satu elipsis
+        # panjang tidak ikut terbuang.
+        return len(re.findall(r"\.{4,}", docs[i].page_content)) >= 3
+
     best_indices: set[int] = set()
     if ranked:
         first = ranked[0]
@@ -526,6 +589,8 @@ def retrieve_context(
             reference = 100.0
         floor = reference - CITATION_SIMILARITY_GAP
         for i in ranked[1:]:
+            if _is_toc(i) or not _has_query_id(i):
+                continue
             sim = _similarity(i)
             if sim is None or sim >= floor:
                 best_indices.add(i)
@@ -572,6 +637,14 @@ def retrieve_context(
             "page": meta.get("page"),
             "source_type": source_type,
             "is_top_match": i in best_indices,
+            # Apakah chunk ini benar-benar menyebut identifier yang ditanya.
+            # True untuk SEMUA chunk kalau query memang tidak menyebut
+            # identifier apa pun (query_ids kosong) -- lihat
+            # text_mentions_identifier(). Dipakai chat/routes.py untuk dua hal
+            # yang tidak bisa dipercayakan ke model kecil: menolak identifier
+            # yang tidak ada di korpus, dan menjaga konteks tetap pada item
+            # yang ditanya. Lihat komentar di sana.
+            "id_match": text_mentions_identifier(d.page_content, query_ids),
         })
     return chunks, confidence
 
