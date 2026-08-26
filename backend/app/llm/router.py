@@ -74,7 +74,23 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         f"Only if USER LATEST MESSAGE is itself clearly written in a language "
         f"other than {_lang} should you answer in that language instead. "
         f"Never answer in any language except {_lang} or the language of "
-        "USER LATEST MESSAGE.\n\n"
+        "USER LATEST MESSAGE.\n"
+        # 2026-08-26: model on-prem menerjemahkan "retrieval accuracy" jadi
+        # "ketepatan/akurasi PENYIMPANAN" -- penyimpanan itu storage, artinya
+        # terbalik dari retrieval. Fatal justru karena retrieval adalah inti
+        # sistem ini; kalau muncul saat demo, orang yang paham RAG langsung
+        # menangkapnya. Istilah teknis dibiarkan dalam bahasa Inggris saja
+        # daripada mengandalkan model kecil menerjemahkannya dengan benar.
+        "TECHNICAL TERMS: do NOT translate established technical terms — keep "
+        "them in English (retrieval, embedding, chunk, latency, throughput, "
+        "uptime, encryption, endpoint, token, prompt, fine-tuning, guardrail). "
+        "Translating them produces wrong meanings; 'retrieval' in particular is "
+        "NOT 'penyimpanan' (that is storage). Requirement IDs, metric names and "
+        # JANGAN pakai "Must Have" sebagai contoh di sini. Pernah dipakai, dan
+        # blok ini duduk PERSIS sebelum "YOUR RESPONSE:" -- jadi kata terakhir
+        # yang dibaca model sebelum menjawab adalah nilai priority yang justru
+        # sedang dilarang dikarang oleh GROUNDING_RULE di atasnya.
+        "units stay verbatim too (FR-01, NFR-PERF-01, MRR@5, TTFT, 92%, 600 ms).\n\n"
     )
 
     history_text = ""
@@ -110,6 +126,45 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
     context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
 
+    # ── 2026-08-26: GROUNDING_RULE, sengaja di AKHIR seperti LANGUAGE_RULE ───
+    # NFR-PERF-01/02 dijawab "Prioritasnya Wajib Memiliki (Must Have)",
+    # padahal tabel NFR (hal. 8) TIDAK punya kolom Priority sama sekali --
+    # kolomnya cuma Metric Identifier / Performance Indicator / Target
+    # Threshold / Max Allowable Limit. Angkanya benar, field-nya dikarang.
+    #
+    # Dua sumbernya:
+    #   * KONTEKS: context_chunks sengaja tetap penuh sampai top_k (cuma
+    #     citation yang dipersempit -- lihat retrieve_context()), jadi chunk
+    #     tabel FR hal. 7 yang MEMUAT "Must/Should/Could Have" ikut terkirim,
+    #     bahkan di peringkat 0, saat user bertanya soal NFR. Mempersempit
+    #     konteks DITOLAK: itu justru yang dibutuhkan kasus sintesis FR-12.
+    #   * RIWAYAT: FR-01 dan FR-02 ditanya lebih dulu di chat yang sama, kedua
+    #     jawaban berakhir "Prioritasnya adalah ...", model meneruskan pola
+    #     jawabannya sendiri.
+    #
+    # Percobaan pertama menaruh ini sebagai "instruksi 6" di dalam CRITICAL
+    # INSTRUCTIONS -- TIDAK BERHASIL, model on-prem tetap mengarang priority.
+    # Sama persis dengan bug bahasa di commit 2013249: aturan yang terkubur di
+    # tengah prompt kalah oleh pola di konteks dan di riwayat. Yang berhasil
+    # di sana adalah memindahkannya ke ujung, dekat titik generasi. Ditaruh
+    # SEBELUM LANGUAGE_RULE supaya aturan bahasa tetap jadi yang paling akhir
+    # (posisi itu yang sudah terbukti memperbaikinya -- jangan digeser).
+    GROUNDING_RULE = (
+        "IMPORTANT — DO NOT INVENT FIELDS: The context holds MANY different items "
+        "(requirements, table rows, records), each with its own columns. A value "
+        "belongs ONLY to the item it is written against.\n"
+        "Before stating any attribute — priority, status, owner, category, target, "
+        "date — check that it appears in the context ON THE SAME ROW as the item "
+        "asked about. If it does not, say nothing about it.\n"
+        "In particular: NEVER write \"Must Have\", \"Should Have\", \"Could Have\" or "
+        "any priority unless that exact phrase sits on that item's own row. Some "
+        "tables have a Priority column and others do not; a neighbouring table "
+        "having one is NOT a reason to give this item one.\n"
+        "Do not copy the shape of your own earlier answers in this conversation. "
+        "An answer that omits a field the item does not have is CORRECT and "
+        "complete — do not fill the gap to make it look consistent.\n\n"
+    )
+
     instruction_2 = "2. If the context is irrelevant or missing, you MUST still answer the user's question using your own internal knowledge as a general AI.\n"
     if session_has_document:
         instruction_2 = "2. If the PROVIDED CONTEXT says '[NO RELEVANT CONTEXT FOUND]' or does not contain the answer, politely state that the document does not contain the information. You MUST state this refusal in the exact same language the user is speaking.\n"
@@ -126,6 +181,7 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         f"{history_text}"
         f"{context_text}"
         f"USER LATEST MESSAGE: {user_message}\n\n"
+        f"{GROUNDING_RULE}"
         f"{LANGUAGE_RULE}"
         "YOUR RESPONSE:"
     )

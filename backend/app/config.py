@@ -26,6 +26,23 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
 
+    # Panjang context window yang diminta ke Ollama. HARUS lebih besar dari
+    # prompt terpanjang yang bisa dihasilkan build_prompt() -- konteks dipotong
+    # di 15.000 karakter (~3.750 token) DITAMBAH aturan (~800) dan riwayat.
+    # Kalau kurang, Ollama memotong prompt tanpa error apa pun dan jawabannya
+    # jadi salah karena sebagian konteks tidak pernah terbaca.
+    #
+    # Ada harganya di VRAM: diukur pada GTX 1660 6GB, qwen2.5:7b Q4_K_M naik
+    # dari 5,12 GB (ctx 4096) ke 5,38 GB (ctx 8192). Kartu itu cuma sanggup
+    # menampung 4,19 GB, jadi sisanya jalan di CPU dan kecepatan turun ke
+    # sekitar sepertiga. Kalau ganti model/GPU, cek ulang lewat /api/ps
+    # apakah size_vram masih sama dengan size total.
+    ollama_num_ctx: int = 8192
+
+    # 0.8 (default Ollama) terlalu tinggi untuk sistem yang menyalin angka dari
+    # dokumen. Tidak di-nol-kan: chatbot ini juga melayani percakapan umum.
+    ollama_temperature: float = 0.2
+
     # Bahasa jawaban default (SRS: aplikasi berbahasa Indonesia).
     #
     # 2026-08-25: instruksi relatif ("jawab dalam bahasa yang sama dengan
