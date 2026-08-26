@@ -333,6 +333,9 @@ async def send_message(
     # Diisi daftar identifier (mis. ["FR-14"]) kalau query menyebut identifier
     # yang TIDAK ADA di korpus — lihat penjagaan identifier di bawah.
     identifier_missing: list[str] | None = None
+    # Diisi kalau identifier yang ditanya ADA di korpus, tapi setiap
+    # kemunculannya cuma di dalam cuplikan contoh — lihat penjagaan di bawah.
+    identifier_in_example: list[str] | None = None
 
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
@@ -397,6 +400,25 @@ async def send_message(
                     # kosong dan cabang ini tidak aktif sama sekali.
                     context_chunks = id_chunks
 
+                    # ── identifier yang cuma hidup di dalam contoh ──────────
+                    # Kegagalan ketiga, beda dari dua di atas. Ditanya
+                    # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
+                    # dokumen sungguhan, lengkap dengan "skor 0.892
+                    # menunjukkan kesamaan tinggi antara kueri Anda dan
+                    # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
+                    # tempelan di dalam CONTOH respons API (hal. 9), dan
+                    # 0.892 angka mati yang diketik penulis dokumen.
+                    #
+                    # Saringan id_match di atas tidak bisa menangkapnya:
+                    # dia menanyakan "apakah string ini muncul", dan memang
+                    # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
+                    #
+                    # Ini terjadi di Groq — model komersial yang jauh lebih
+                    # besar dari on-prem mana pun yang kita pakai — jadi
+                    # menaikkan ukuran model bukan jawabannya.
+                    if all(c.get("id_in_example") for c in id_chunks):
+                        identifier_in_example = sorted(i.upper() for i in query_ids)
+
     if identifier_missing:
         # Jawab tanpa memanggil LLM sama sekali. Menyerahkan penolakan ini ke
         # model justru sudah terbukti gagal dua kali, dan tidak ada yang perlu
@@ -426,9 +448,26 @@ async def send_message(
                 pii_entities=user_pii_entities,
                 session_has_document=session_has_document,
                 retrieval_confidence=retrieval_confidence,
+                identifier_in_example=identifier_in_example,
             )
         except CommercialLLMError as e:
             raise HTTPException(status_code=502, detail=str(e))
+
+        if identifier_in_example:
+            # Peringatannya ditempelkan KODE, bukan diminta lewat prompt.
+            # EXAMPLE_RULE di router.py memang ikut dikirim, tapi kepatuhan
+            # model terhadap aturan prompt sudah gagal berkali-kali di sesi
+            # ini — sedangkan pertanyaan "apakah item ini nyata" sudah
+            # dijawab pasti oleh kode. Jadi jawabannya tidak boleh bergantung
+            # pada model mau menuruti atau tidak.
+            daftar = ", ".join(identifier_in_example)
+            result.reply = (
+                f"Catatan: {daftar} bukan dokumen atau item yang benar-benar ada. "
+                "Namanya cuma muncul sebagai contoh di dalam cuplikan "
+                "(payload API, blok kode, atau template), jadi nilai apa pun "
+                "yang menyertainya — skor, nominal, tanggal — adalah angka "
+                "ilustrasi, bukan hasil pengukuran.\n\n"
+            ) + result.reply
 
     # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM (dengan detail lengkap) ----------
     if result.pii_detected:

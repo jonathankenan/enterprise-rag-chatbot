@@ -51,7 +51,7 @@ def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
     return has_keyword or has_pii
 
 
-def build_prompt(user_message: str, context_chunks: list[dict], chat_history: list = None, session_has_document: bool = False) -> str:
+def build_prompt(user_message: str, context_chunks: list[dict], chat_history: list = None, session_has_document: bool = False, identifier_in_example: list[str] | None = None) -> str:
     # 2026-08-25: the language rule used to live inside CRITICAL INSTRUCTIONS
     # (as #4 of 6), which lost consistently -- Indonesian questions came back
     # answered in English. Not a model-capability problem (on-prem is
@@ -165,6 +165,31 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         "complete — do not fill the gap to make it look consistent.\n\n"
     )
 
+    # ── 2026-08-26: identifier yang cuma hidup di dalam contoh ──────────────
+    # Dipasang hanya kalau chat/routes.py sudah MEMASTIKAN lewat kode bahwa
+    # setiap kemunculan identifier itu ada di dalam cuplikan contoh (lihat
+    # identifier_only_in_example() di rag/vectorstore.py). Aturan ini tidak
+    # pernah aktif untuk pertanyaan biasa, jadi tidak menambah beban prompt
+    # pada 99% permintaan.
+    #
+    # Peringatan utama untuk user tetap ditempelkan secara deterministik di
+    # chat/routes.py. Aturan ini pelengkap: mengurangi kemungkinan model
+    # menulis kalimat yang BERTENTANGAN dengan peringatan itu.
+    EXAMPLE_RULE = ""
+    if identifier_in_example:
+        daftar = ", ".join(identifier_in_example)
+        EXAMPLE_RULE = (
+            f"IMPORTANT — {daftar} IS AN EXAMPLE, NOT A REAL RECORD: it appears in "
+            "the context ONLY inside an illustrative snippet (an API sample payload, "
+            "a code block, a template). No such item actually exists in this corpus.\n"
+            "You may describe what the snippet shows, but you must NOT present it as "
+            "a real document, requirement, or record.\n"
+            "Every number inside that snippet — scores, amounts, dates, IDs — is a "
+            "placeholder typed by the author to illustrate a format. NEVER describe "
+            "such a number as a measurement of the user's question, of relevance, or "
+            "of anything happening now.\n\n"
+        )
+
     instruction_2 = "2. If the context is irrelevant or missing, you MUST still answer the user's question using your own internal knowledge as a general AI.\n"
     if session_has_document:
         instruction_2 = "2. If the PROVIDED CONTEXT says '[NO RELEVANT CONTEXT FOUND]' or does not contain the answer, politely state that the document does not contain the information. You MUST state this refusal in the exact same language the user is speaking.\n"
@@ -181,6 +206,7 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
         f"{history_text}"
         f"{context_text}"
         f"USER LATEST MESSAGE: {user_message}\n\n"
+        f"{EXAMPLE_RULE}"
         f"{GROUNDING_RULE}"
         f"{LANGUAGE_RULE}"
         "YOUR RESPONSE:"
@@ -238,6 +264,7 @@ async def route_and_generate(
     pii_entities: list[dict] | None = None,
     session_has_document: bool = False,
     retrieval_confidence: int | None = None,
+    identifier_in_example: list[str] | None = None,
 ) -> LLMResult:
     """
     Fungsi utama yang dipanggil oleh endpoint chat.
@@ -265,7 +292,9 @@ async def route_and_generate(
 
     # ---------- BEFORE LLM: mask PII sebelum masuk ke prompt (pakai entities yang sudah ada) ----------
     masked_message, pii_mapping = mask_pii(user_message, entities=pii_entities) if pii_detected else (user_message, {})
-    final_prompt = build_prompt(masked_message, context_chunks, chat_history, session_has_document=session_has_document)
+    final_prompt = build_prompt(masked_message, context_chunks, chat_history,
+                               session_has_document=session_has_document,
+                               identifier_in_example=identifier_in_example)
 
     # ---------- Pilih & panggil LLM ----------
     if is_sensitive:

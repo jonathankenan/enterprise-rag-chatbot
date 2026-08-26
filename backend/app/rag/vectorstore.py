@@ -393,6 +393,70 @@ def text_mentions_identifier(text: str, identifiers: set[str]) -> bool:
     return bool(identifiers & set(custom_bm25_tokenizer(text)))
 
 
+# Wilayah "contoh": blok kode berpagar, kode sebaris, dan pasangan
+# "kunci": "nilai" bergaya JSON.
+#
+# Blok berpagar dan kode sebaris baru dihitung sebagai contoh kalau ISINYA
+# berstruktur (memuat ":" atau "{"). Syarat itu ada supaya dokumen yang
+# kebetulan menulis identifiernya sebagai kode sebaris -- `FR-01` -- tidak
+# ikut dianggap contoh. Yang dicari adalah identifier yang muncul sebagai
+# DATA di dalam cuplikan, bukan identifier yang cuma dicetak monospace.
+_FENCED_RE = re.compile(r"```.*?```", re.S)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_JSON_PAIR_RE = re.compile(r'"[\w.-]+"\s*:\s*"[^"]*"')
+
+
+def _example_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for rx in (_FENCED_RE, _INLINE_CODE_RE):
+        for m in rx.finditer(text):
+            if ":" in m.group(0) or "{" in m.group(0):
+                spans.append(m.span())
+    for m in _JSON_PAIR_RE.finditer(text):
+        spans.append(m.span())
+    return spans
+
+
+def identifier_only_in_example(text: str, identifiers: set[str]) -> bool:
+    """
+    True kalau SETIAP kemunculan identifier di teks ini berada di dalam
+    cuplikan contoh (payload API, blok kode, JSON), bukan di prosa atau baris
+    tabel yang membahasnya.
+
+    2026-08-26. Ditanya "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
+    dokumen sungguhan -- lengkap dengan "skor 0.892 menunjukkan kesamaan
+    tinggi antara kueri Anda dan dokumen ini". Padahal DOC-FEE-2026 di
+    Project NEXUS cuma nama tempelan di dalam CONTOH respons API pada
+    bagian 7.2:
+
+        Expected Response: { "status": "success", "chunks": [{
+          "doc_id": "DOC-FEE-2026", "text": "...", "score": 0.892 }] }
+
+    Dokumen itu tidak ada; 0.892 angka mati yang diketik penulis dokumen.
+    Model mengubah ilustrasi statis jadi pengukuran hidup atas kueri user.
+
+    Saringan id_match tidak bisa menangkap ini -- dia menanyakan "apakah
+    string ini muncul", dan jawabannya memang ya. Yang kurang adalah
+    membedakan MUNCUL SEBAGAI APA. Hal ini juga terjadi di Groq, model yang
+    jauh lebih besar dari model on-prem mana pun yang kita pakai, jadi
+    menaikkan ukuran model bukan jawabannya.
+
+    Kembalikan False kalau identifiernya tidak muncul sama sekali: "tidak
+    ada" adalah urusan text_mentions_identifier, bukan fungsi ini.
+    """
+    if not identifiers:
+        return False
+    spans = _example_spans(text)
+    lowered = text.lower()
+    ketemu = False
+    for ident in identifiers:
+        for m in re.finditer(re.escape(ident), lowered):
+            ketemu = True
+            if not any(a <= m.start() < b for a, b in spans):
+                return False   # ada kemunculan di luar contoh
+    return ketemu
+
+
 def get_bm25_retriever(chat_id: str, collection_name: str = "kb_general", top_k: int = 10):
     collection = get_collection(collection_name)
     if collection.count() == 0:
@@ -645,6 +709,9 @@ def retrieve_context(
             # yang tidak ada di korpus, dan menjaga konteks tetap pada item
             # yang ditanya. Lihat komentar di sana.
             "id_match": text_mentions_identifier(d.page_content, query_ids),
+            # Identifiernya ADA di chunk ini, tapi cuma sebagai data di dalam
+            # cuplikan contoh -- lihat identifier_only_in_example().
+            "id_in_example": identifier_only_in_example(d.page_content, query_ids),
         })
     return chunks, confidence
 

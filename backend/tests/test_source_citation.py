@@ -65,6 +65,13 @@ _lexical = "\n".join([
     _assignment(VECTOR_SRC, "_IDENTIFIER_RE"),
     _segment(VECTOR_SRC, "extract_query_identifiers"),
     _segment(VECTOR_SRC, "text_mentions_identifier"),
+    # 2026-08-26: chunk juga ditandai id_in_example, jadi tail-nya sekarang
+    # ikut menutup identifier_only_in_example beserta pola wilayah contohnya.
+    _assignment(VECTOR_SRC, "_FENCED_RE"),
+    _assignment(VECTOR_SRC, "_INLINE_CODE_RE"),
+    _assignment(VECTOR_SRC, "_JSON_PAIR_RE"),
+    _segment(VECTOR_SRC, "_example_spans"),
+    _segment(VECTOR_SRC, "identifier_only_in_example"),
 ])
 
 
