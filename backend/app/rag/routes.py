@@ -13,7 +13,7 @@ from app.models import Document, User
 from app.auth.utils import get_current_user
 from app.rag.vectorstore import extract_pages_from_pdf, index_document
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
-from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
+from app.guardrail.prompt_injection import is_document_injection, get_document_matched_signals
 from app.guardrail.audit_log import log_guardrail_event, EventType
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -45,15 +45,17 @@ async def upload_document(
     # disebut eksplisit di SRS FCR-003 (hal. 15, poin c): "Filtering prompt
     # injection via file atau prompting".
     #
-    # Catatan: ini scan seluruh teks dokumen sekaligus (bukan per-chunk), jadi
-    # untuk dokumen yang sangat panjang ada risiko false-positive kalau satu
-    # frasa terlarang muncul secara kebetulan di antara ribuan kata yang sah
-    # (mis. dokumen hukum yang mengutip istilah "bahan peledak" dalam konteks
-    # akademis). Ini trade-off yang disengaja demi kesederhanaan implementasi;
-    # kalau ke depan false-positive jadi masalah nyata, evaluasi per-paragraf
-    # lebih tepat daripada per-dokumen utuh.
+    # Catatan lama di sini memperkirakan false-positive pada dokumen panjang
+    # kalau teksnya dinilai sekaligus. Perkiraan itu terbukti: Project NEXUS
+    # BRD ditolak karena bagian "Risk Assessment"-nya MEMBAHAS prompt
+    # injection. Sejak 2026-08-26 pemeriksaan injection dinilai per jendela
+    # (is_document_injection) sehingga vonisnya tidak lagi bergantung pada
+    # panjang dokumen — lihat guardrail/prompt_injection.py.
+    #
+    # is_prompt_blocked() BELUM ikut diperbaiki dan masih menilai seluruh
+    # teks sekaligus, jadi kelemahan yang sama masih berlaku untuknya.
     doc_blocked = is_prompt_blocked(text)
-    doc_injection = is_prompt_injection(text)
+    doc_injection = is_document_injection(text)
 
 
     if doc_blocked or doc_injection:
@@ -63,7 +65,7 @@ async def upload_document(
             metadata["category"] = get_blocked_category(text)
         if doc_injection:
             metadata["reason"] = "prompt_injection" if not doc_blocked else "blocked_keyword+prompt_injection"
-            metadata["matched_patterns"] = get_matched_signals(text)
+            metadata["matched_patterns"] = get_document_matched_signals(text)
 
         log_guardrail_event(
             db, user.id, EventType.DOCUMENT_BLOCKED,
