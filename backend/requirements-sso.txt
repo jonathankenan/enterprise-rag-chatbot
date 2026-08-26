@@ -1,0 +1,10 @@
+# Azure AD / LDAP-M365 SSO (see backend/app/auth/routes.py).
+# Installed separately, with --no-deps, because msal's declared
+# `cryptography<46` conflicts with the `cryptography==48.0.1` pin in
+# requirements.txt (needed for pyhanko/xhtml2pdf's PDF export). See the
+# comment above the cryptography pin in requirements.txt for the full story.
+#
+# Install with:
+#   pip install -r requirements-sso.txt --no-deps
+#   pip install "PyJWT[crypto]<3,>=1.0.0"   # msal's own runtime dep, skipped by --no-deps
+msal==1.31.0

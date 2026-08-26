@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import Chat, Message, SenderType, User, SystemSettings, Role
-from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse
+from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import (
@@ -149,6 +149,73 @@ def rename_chat(
         detail=f"chat_id={chat.id}, renamed from='{old_title}' to='{chat.title}'",
     )
     return chat
+
+
+def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
+    """
+    SRS FCR-003 poin 12.a: "Answers show source references". context_chunks
+    sudah punya filename/page/source_type sejak retrieve_context() (lihat
+    rag/vectorstore.py) -- ini DEDUP jadi satu entri per dokumen/FAQ unik
+    (bukan satu per chunk, satu dokumen bisa nyumbang banyak chunk ke context
+    yang sama), sambil MENGUMPULKAN semua nomor halaman yang chunk-nya ikut
+    kepakai, supaya label-nya bisa jadi "file.pdf (hal. 2, 5)" bukan cuma
+    "file.pdf" -- dua chunk beda halaman dari dokumen yang sama tetap satu
+    entri citation, bukan dua.
+    """
+    order: list[str] = []          # key insertion order, buat urutan citation stabil
+    labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file
+    filenames: dict[str, str | None] = {}
+    source_types: dict[str, str] = {}
+    pages: dict[str, set[int]] = {}
+
+    for chunk in context_chunks:
+        # is_top_match ditandai retrieve_context() -- cuma 3 chunk dengan
+        # similarity TERBAIK (sama seperti yang dipakai untuk confidence_score,
+        # lihat komentar di sana) yang layak disebut sebagai sumber. Chunk lain
+        # tetap masuk PROVIDED CONTEXT ke LLM (context_chunks di sini utuh),
+        # tapi tidak semuanya "sumber jawaban ini" -- 2026-08-24, ditambahkan
+        # setelah citation "FR-01" ikut menyebut 5 halaman lain yang tidak ada
+        # kaitan sama sekali (cuma "di sekitar secara topik" di window top_k).
+        # .get(..., True) -- default True supaya get_all_session_chunks() ("ringkas
+        # semua", tidak diranking/tidak ditandai is_top_match) tetap kutip semuanya,
+        # sesuai maksud awal permintaan "ringkas SEMUA dokumen ini".
+        if not chunk.get("is_top_match", True):
+            continue
+
+        source_type = chunk.get("source_type", "chat_document")
+        if source_type == "faq":
+            key = "faq"
+            filename = None
+            label = "FAQ Helpdesk"
+        else:
+            filename = chunk.get("filename") or "Dokumen tanpa nama"
+            # source_type ikut jadi bagian key -- filename yang sama secara
+            # kebetulan muncul di kb_divisi DAN chat_document (jarang, tapi
+            # mungkin) tetap dianggap 2 sumber berbeda, bukan digabung.
+            key = f"{source_type}:{filename}"
+            label = filename
+
+        if key not in labels:
+            order.append(key)
+            labels[key] = label
+            filenames[key] = filename
+            source_types[key] = source_type
+            pages[key] = set()
+
+        page = chunk.get("page")
+        if page is not None:
+            pages[key].add(page)
+
+    citations = []
+    for key in order:
+        sorted_pages = sorted(pages[key])
+        label = labels[key]
+        if sorted_pages:
+            label = f"{label} (hal. {', '.join(str(p) for p in sorted_pages)})"
+        citations.append(SourceCitation(
+            label=label, filename=filenames[key], source_type=source_types[key], pages=sorted_pages,
+        ))
+    return citations
 
 
 @router.post("/message", response_model=ChatReplyResponse)
@@ -367,7 +434,7 @@ async def send_message(
         is_sensitive=result.is_sensitive,
         confidence_score=result.confidence_score,
         pii_detected=result.pii_detected,
-        sources=context_chunks,
+        sources=_build_source_citations(context_chunks),
         new_title=new_title,
         message_id=ai_msg.id,
         escalation_offered=escalation_offered,

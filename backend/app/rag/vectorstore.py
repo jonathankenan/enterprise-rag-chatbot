@@ -23,13 +23,19 @@ def get_collection(name: str = "kb_general"):
     return _client.get_or_create_collection(name=name, embedding_function=_embedding_fn)  # type: ignore
 
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
+def _extract_pages_with_fallback(doc) -> list[dict]:
     """
-    Extract PDF to text for RAG indexing using a hybrid strategy.
+    Shared extraction core for extract_text_from_pdf() (flat string, used by
+    the FAQ bulk-import path which just wants everything joined -- see
+    faq/parser.py) and extract_pages_from_pdf() (per-page, used by
+    index_document()/index_kb_document() so each chunk can be tagged with
+    the PDF page it came from -- SRS FCR-003 poin 12.a: citations should
+    name a page, not just a filename).
 
-    Primary pass: pymupdf4llm.to_markdown() provides clean markdown
-    formatting (especially for tables), which the MarkdownTextSplitter
-    downstream handles well.
+    Primary pass: pymupdf4llm.to_markdown(page_chunks=True) provides clean
+    markdown formatting (especially for tables), which the MarkdownTextSplitter
+    downstream handles well, AND returns one dict per page with
+    metadata["page"] (1-indexed) already attached.
 
     Known issue (confirmed via diagnostic against Project NEXUS BRD, page 6):
     when a table is immediately followed by non-tabular text (bulleted lists,
@@ -39,79 +45,117 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     region, so it never gets rendered into the markdown output. This affects
     any PDF with this common layout pattern, not just the test document.
 
-    Safety-net pass: pymupdf4llm inserts '-----' page-break separators
-    between pages in the markdown output. We split on those to get per-page
-    markdown segments, then compare each segment's significant-word set
-    against the corresponding page's raw plain text from fitz. If a page's
-    markdown segment is missing more than 20% of the words in its plain text,
-    we append the raw plain text as a fallback so the content reaches the
-    chunker/indexer regardless of what the markdown pass dropped.
+    Safety-net pass: for each page we compare the markdown's significant-word
+    set against that page's raw plain text from fitz. If a page's markdown
+    covers less than COVERAGE_THRESHOLD of the plain-text words, we append the
+    raw plain text as a fallback so the content reaches the index.
 
-    The 20% threshold is intentionally tight: table-only pages typically have
-    near-100% coverage because the table cell text renders identically in both
-    plain text and markdown. Pages that genuinely dropped post-table prose
-    show 30-50% coverage gaps — well above the noise floor.
+    Returns a list of {"page": int, "text": str}, one entry per PDF page IN
+    ORDER. "page" comes from pymupdf4llm's own per-page metadata, cross-checked
+    against fitz's page index, so it is always populated.
+
+    ── 2026-08-25: why this no longer splits on '-----' ─────────────────────
+    This used to call to_markdown() for the whole document and split the
+    result on '\\n\\n-----\\n\\n' page-break separators, guarding the result with
+    `len(md_segments) == len(doc)`. That was wrong in BOTH directions:
+
+      * A normal PDF ends with a trailing separator, so the split produced
+        page_count + 1 segments, the guard failed, and every page number was
+        discarded (page=None for the whole document). Three of the four
+        documents in the dev corpus had zero page citations for this reason.
+
+      * A PDF whose first page yields no markdown (a scanned or image-only
+        cover sheet) still got a separator for it, so the leading empty
+        segment cancelled out the trailing one. len() then MATCHED
+        page_count, the guard PASSED -- while every segment pointed one page
+        ahead. Confirmed on Project NEXUS BRD: the FR-01..FR-12 table that
+        really sits on page 7 was paired with page 8's markdown, and
+        citations named pages 2/3/8 that never mention the requirement asked
+        about. The coverage safety net hid this by firing on all 11 pages
+        (0-32% coverage) -- it was comparing page N's plain text against page
+        N+1's markdown, so of course they barely overlapped.
+
+    The guard compared cardinality, not alignment, so it could not detect the
+    second case even in principle. page_chunks=True removes the heuristic:
+    page numbers come from the library instead of from list position.
     """
-    doc = fitz.Document(stream=file_bytes, filetype="pdf")
-
-    # ── Primary pass: pymupdf4llm markdown ──────────────────────────────────
-    md_output = pymupdf4llm.to_markdown(doc=doc)
-
-    # ── Split markdown into per-page segments ────────────────────────────────
-    # pymupdf4llm inserts '\n\n-----\n\n' between pages. Split on that to
-    # align markdown segments with their source pages. The resulting list
-    # should have the same length as doc.page_count; if the split count
-    # doesn't match (e.g. content contains '-----' for other reasons), we
-    # fall back gracefully to the full-doc word-set instead.
-    PAGE_BREAK = "\n\n-----\n\n"
-    md_segments = md_output.split(PAGE_BREAK)
-
     def _significant_words(text: str) -> set[str]:
         """Lowercase alphabetic words longer than 3 chars (ignores numbers and
         short stop-words that create noise between plain-text and markdown)."""
         return {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text)}
 
-    # Full-doc fallback word-set — used when page-count doesn't align
-    md_words_global = _significant_words(md_output)
-    segments_match = len(md_segments) == len(doc)
-
     COVERAGE_THRESHOLD = 0.80  # flag if page markdown covers < 80% of plain-text words
 
-    fallback_sections: list[str] = []
+    # ── Primary pass: per-page markdown, page numbers from the library ──────
+    # Keyed by page number from metadata rather than by list position, so a
+    # page pymupdf4llm skips entirely cannot shift every page after it.
+    md_by_page: dict[int, str] = {}
+    try:
+        for entry in pymupdf4llm.to_markdown(doc=doc, page_chunks=True):
+            pno = (entry.get("metadata") or {}).get("page")
+            if pno is not None:
+                md_by_page[int(pno)] = entry.get("text") or ""
+    except Exception as e:
+        # Never fail the upload over markdown formatting. fitz's plain text
+        # below is authoritative for page numbers regardless, so the worst
+        # case is unformatted (but correctly attributed) text.
+        print(f"pymupdf4llm per-page extraction failed, using plain text only: {e}")
 
+    pages_out: list[dict] = []
     for page_num, page in enumerate(doc):
+        page_no = page_num + 1
+        page_text = md_by_page.get(page_no, "")
         plain_text = page.get_text()
-        if not plain_text.strip():
-            continue  # blank/image-only page
 
-        page_words = _significant_words(plain_text)
-        if not page_words:
-            continue
+        if plain_text.strip():
+            page_words = _significant_words(plain_text)
+            if page_words:
+                covered = page_words & _significant_words(page_text)
+                coverage = len(covered) / len(page_words)
+                if coverage < COVERAGE_THRESHOLD:
+                    clean = plain_text.strip()
+                    page_text = (
+                        page_text + f"\n\n<!-- plain-text fallback page {page_no}"
+                        f" (pymupdf4llm coverage {coverage:.0%}) -->\n{clean}"
+                    )
+        # Blank/image-only page: keep its (likely empty) markdown as-is, still
+        # numbered -- so later pages don't shift just because an earlier page
+        # had nothing extractable. This is exactly the case the old '-----'
+        # split got wrong.
 
-        # Use the page-local markdown segment when available — this gives a
-        # much more accurate signal than the full-doc word-set, because words
-        # from the dropped sections (e.g. 4.2 bullet list) often appear
-        # elsewhere in the document, artificially inflating the coverage score.
-        if segments_match:
-            md_page_words = _significant_words(md_segments[page_num])
-        else:
-            md_page_words = md_words_global
+        pages_out.append({"page": page_no, "text": page_text})
 
-        covered = page_words & md_page_words
-        coverage = len(covered) / len(page_words)
+    return pages_out
 
-        if coverage < COVERAGE_THRESHOLD:
-            clean = plain_text.strip()
-            fallback_sections.append(
-                f"\n\n<!-- plain-text fallback page {page_num + 1}"
-                f" (pymupdf4llm coverage {coverage:.0%}) -->\n{clean}"
-            )
 
+def extract_text_from_pdf(file_bytes) -> str:
+    """
+    Extract PDF to a single flat text string. Used by the FAQ bulk-import
+    path (faq/routes.py) which parses Q&A pairs out of the whole document
+    and doesn't need per-page attribution -- see extract_pages_from_pdf()
+    for the version chat-document/KB-divisi upload uses instead, which DOES
+    keep page numbers (for source citations, SRS FCR-003 poin 12.a).
+    """
+    doc = fitz.Document(stream=file_bytes, filetype="pdf")
+    pages = _extract_pages_with_fallback(doc)
     doc.close()
+    return "\n\n-----\n\n".join(p["text"] for p in pages)
 
-    if fallback_sections:
-        return md_output + "\n" + "\n".join(fallback_sections)
-    return md_output
+
+def extract_pages_from_pdf(file_bytes) -> list[dict]:
+    """
+    Same extraction as extract_text_from_pdf(), kept PER PAGE instead of
+    joined into one string. Used by index_document()/index_kb_document() so
+    every chunk can carry the PDF page number it came from. Side effect:
+    chunking now happens per-page (chunk_text() is called once per page,
+    not once for the whole flattened document), so a chunk can never span
+    two different pages anymore -- which is also just more correct for RAG
+    in general, not only for citations.
+    """
+    doc = fitz.Document(stream=file_bytes, filetype="pdf")
+    pages = _extract_pages_with_fallback(doc)
+    doc.close()
+    return pages
 
 
 
@@ -127,15 +171,34 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[st
     return [c for c in chunks if c.strip()]
 
 
-def index_document(text: str, doc_id: str, filename: str, chat_id: str, collection_name: str = "kb_general"):
+def index_document(pages: list[dict], doc_id: str, filename: str, chat_id: str, collection_name: str = "kb_general"):
+    """
+    pages: output of extract_pages_from_pdf() -- list of {"page": int|None, "text": str}.
+    Chunked PER PAGE (not on the whole document joined together) so every
+    chunk's metadata can carry the page it came from -- see "page" below,
+    consumed by retrieve_context() -> chat/routes.py's _build_source_citations()
+    for SRS FCR-003 poin 12.a (source references naming a page).
+    """
     collection = get_collection(collection_name)
-    chunks = chunk_text(text)
+    documents: list[str] = []
+    metadatas: list[dict] = []
+    for page_info in pages:
+        for c in chunk_text(page_info["text"]):
+            documents.append(c)
+            meta = {"filename": filename, "doc_id": doc_id, "chunk_index": len(documents) - 1, "chat_id": chat_id}
+            # ChromaDB metadata tidak bisa nyimpen None (sama seperti alasan
+            # KB_COMPANY_WIDE_SENTINEL di bawah untuk `divisi`) -- kalau
+            # extract_pages_from_pdf() tidak bisa memetakan halaman dengan
+            # aman (page_info["page"] is None), key "page" DIHILANGKAN sama
+            # sekali daripada disimpan sebagai None, .get("page") di
+            # retrieve_context() sudah aman kembalikan None untuk key yang absen.
+            if page_info["page"] is not None:
+                meta["page"] = page_info["page"]
+            metadatas.append(meta)
 
-    ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
-    metadatas = [{"filename": filename, "doc_id": doc_id, "chunk_index": i, "chat_id": chat_id} for i in range(len(chunks))]
-
-    collection.add(documents=chunks, ids=ids, metadatas=metadatas)  # type: ignore
-    return len(chunks)
+    ids = [f"{doc_id}_chunk_{i}" for i in range(len(documents))]
+    collection.add(documents=documents, ids=ids, metadatas=metadatas)  # type: ignore
+    return len(documents)
 
 
 FAQ_COLLECTION_NAME = "kb_faq_helpdesk"
@@ -168,23 +231,33 @@ KB_DIVISI_COLLECTION_NAME = "kb_divisi"
 KB_COMPANY_WIDE_SENTINEL = "company_wide"  # ChromaDB metadata tidak bisa nyimpen None, jadi dipakai literal string ini
 
 
-def index_kb_document(text: str, doc_id: str, filename: str, divisi: str | None) -> int:
+def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None) -> int:
     """
     Multi-Tenant Knowledge Base — SRS poin 11 & hal. 68. divisi=None berarti
     dokumen Company Wide (POJK/Peraturan BEI/SK, bisa ditarik SEMUA divisi).
     Beda dari index_faq_entry() (1 FAQ = 1 chunk pendek), dokumen KB divisi
     dipecah chunk_text() sama seperti index_document() biasa karena isinya
     dokumen kebijakan panjang, bukan tanya-jawab atomik.
+
+    pages: output of extract_pages_from_pdf() -- lihat index_document() untuk
+    alasan chunking per-halaman (bukan dokumen digabung dulu baru dipecah).
     """
     collection = get_collection(KB_DIVISI_COLLECTION_NAME)
-    chunks = chunk_text(text)
     divisi_tag = divisi or KB_COMPANY_WIDE_SENTINEL
+    documents: list[str] = []
+    metadatas: list[dict] = []
+    for page_info in pages:
+        for c in chunk_text(page_info["text"]):
+            documents.append(c)
+            meta = {"doc_id": doc_id, "filename": filename, "chunk_index": len(documents) - 1, "divisi": divisi_tag}
+            # See index_document() -- ChromaDB metadata can't store None.
+            if page_info["page"] is not None:
+                meta["page"] = page_info["page"]
+            metadatas.append(meta)
 
-    ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
-    metadatas = [{"doc_id": doc_id, "filename": filename, "chunk_index": i, "divisi": divisi_tag} for i in range(len(chunks))]
-
-    collection.add(documents=chunks, ids=ids, metadatas=metadatas)  # type: ignore
-    return len(chunks)
+    ids = [f"{doc_id}_chunk_{i}" for i in range(len(documents))]
+    collection.add(documents=documents, ids=ids, metadatas=metadatas)  # type: ignore
+    return len(documents)
 
 
 def delete_kb_document_from_index(doc_id: str):
@@ -334,7 +407,7 @@ def _distance_to_similarity_percent(distance: float) -> float:
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
     user_divisi: str | None = None,
-) -> tuple[list[str], int | None]:
+) -> tuple[list[dict], int | None]:
     """
     Kembalikan (potongan_teks, retrieval_confidence). Confidence 0-100
     dihitung dari distance yang didapat SEKALI di dalam NativeChromaRetriever
@@ -353,6 +426,11 @@ def retrieve_context(
     (Company Wide + divisi user_divisi SAJA — lihat KbDivisiRetriever)
     SELALU diikutsertakan sebagai leg RETRIEVAL tambahan, bukan cuma kalau
     chat itu sendiri tidak punya dokumen.
+
+    Skor akhir = rata-rata similarity dari 3 chunk TERBAIK (distance
+    terkecil) di antara semua kandidat leg vector, BUKAN rata-rata dari
+    semua top_k=10 chunk yang diambil buat konteks LLM. Lihat komentar di
+    dekat perhitungannya di bawah untuk alasannya.
     """
     chroma_retriever = NativeChromaRetriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
     faq_retriever = FaqChromaRetriever(top_k=top_k)
@@ -374,16 +452,127 @@ def retrieve_context(
 
     docs = docs[:top_k]
 
-    distances = [d.metadata["_distance"] for d in docs if "_distance" in d.metadata]
-    if distances:
-        similarities = [_distance_to_similarity_percent(dist) for dist in distances]
+    # index -> distance, cuma untuk doc yang punya "_distance" (leg vector --
+    # chat-scoped/FAQ/KB divisi). Dokumen dari leg BM25 dibangun lewat
+    # collection.get() di get_bm25_retriever(), yang tidak mengembalikan
+    # distance sama sekali, jadi mereka TIDAK ada di dict ini.
+    distance_by_index = {i: d.metadata["_distance"] for i, d in enumerate(docs) if "_distance" in d.metadata}
+
+    # TOP_MATCHES (3) = berapa banyak chunk yang LAYAK DISEBUT sebagai sumber.
+    # context_chunks TETAP lengkap sampai top_k -- LLM masih menerima konteks
+    # penuh untuk menjawab (termasuk kasus FR-12 "multi-document synthesis"
+    # yang memang butuh banyak chunk); yang dipersempit hanya bagian mana yang
+    # dikutip. Ditambahkan 2026-08-24 setelah citation "FR-01" ikut menyebut
+    # halaman-halaman yang cuma "di sekitar secara topik" dalam window top_k.
+    #
+    # ── 2026-08-25: dipilih berdasar PERINGKAT ENSEMBLE, bukan distance ─────
+    # Sebelumnya best_indices diambil dari `distance_by_index` (3 distance
+    # terkecil). Karena dict itu HANYA berisi dokumen leg vector, chunk yang
+    # ditemukan HANYA oleh BM25 tidak akan pernah bisa dikutip -- padahal BM25
+    # ada justru untuk menangkap identifier eksak ("FR-02", nomor part) yang
+    # ranking embedding-nya jelek.
+    #
+    # Persis itu yang terjadi 2026-08-25: "jelaskan req ID FR-01" dijawab
+    # BENAR dari chunk halaman 7 (ditemukan BM25 lewat kecocokan string
+    # eksak), tapi citation-nya menyebut halaman 6 dan 9 -- dua tetangga topik
+    # dari leg vector -- karena chunk halaman 7 tidak punya "_distance"
+    # sehingga tidak pernah masuk best_indices. Jawabannya benar, sumbernya
+    # salah total.
+    #
+    # EnsembleRetriever mengembalikan dokumen SUDAH terurut menurut skor RRF
+    # gabungan kedua leg, jadi posisi 0..n ADALAH peringkat relevansi
+    # gabungan, dan chunk BM25 bisa ikut bersaing. Kalau BM25 tidak tersedia,
+    # docs datang langsung dari Chroma yang juga sudah terurut distance
+    # menaik -- rumus posisi yang sama tetap benar untuk kedua jalur.
+    TOP_MATCHES = 3
+    ranked = list(range(min(TOP_MATCHES, len(docs))))
+
+    # ── 2026-08-25: relevance FLOOR, relatif terhadap peringkat 1 ────────────
+    # TOP_MATCHES sebelumnya jumlah TETAP: selalu mengutip 3 chunk, sekuat apa
+    # pun peringkat 2 dan 3. Untuk "jelaskan req ID FR-01" -- yang jawabannya
+    # ada di SATU chunk saja -- hasilnya "hal. 7, 9, 11": halaman 7 benar,
+    # halaman 9 dan 11 cuma pengisi slot. Efek yang sama membuat confidence
+    # bias turun: 1 chunk similarity 95% dirata-rata dengan 2 chunk 10%
+    # menghasilkan 38%.
+    #
+    # Sekarang peringkat 1 SELALU dikutip, dan peringkat 2-3 hanya ikut kalau
+    # similarity-nya masih dalam CITATION_SIMILARITY_GAP poin dari peringkat 1.
+    # Ambangnya RELATIF, bukan absolut, jadi menyesuaikan sendiri: jawaban dari
+    # satu kecocokan presisi menyisakan satu citation, sedangkan jawaban yang
+    # memang tersebar di beberapa dokumen (kasus FR-12 "multi-document
+    # synthesis") tetap mengutip semuanya karena skornya berdekatan. Tidak ada
+    # angka absolut yang harus dikalibrasi ulang per korpus -- masalah yang
+    # sudah dimiliki escalation_confidence_threshold.
+    #
+    # Chunk dari leg BM25 tidak punya similarity yang sebanding:
+    #   * di peringkat 1 -> dianggap acuan tertinggi (reference 100%), karena
+    #     BM25 menaruhnya di puncak justru pada query identifier eksak; efeknya
+    #     peringkat 2-3 harus benar-benar kuat untuk ikut terkutip.
+    #   * di peringkat 2-3 -> tetap dikutip. Tidak ada bukti dia lemah, dan dia
+    #     sampai ke situ lewat peringkat RRF gabungan.
+    CITATION_SIMILARITY_GAP = settings.citation_similarity_gap
+
+    def _similarity(i):
+        if i not in distance_by_index:
+            return None
+        return _distance_to_similarity_percent(distance_by_index[i]) * 100
+
+    best_indices: set[int] = set()
+    if ranked:
+        first = ranked[0]
+        best_indices.add(first)
+        reference = _similarity(first)
+        if reference is None:
+            reference = 100.0
+        floor = reference - CITATION_SIMILARITY_GAP
+        for i in ranked[1:]:
+            sim = _similarity(i)
+            if sim is None or sim >= floor:
+                best_indices.add(i)
+
+    # Confidence dihitung dari chunk yang BENAR-BENAR DIKUTIP -- "seberapa
+    # yakin" dan "sumber mana yang disebut" merujuk ke bukti yang SAMA. Karena
+    # floor di atas sudah membuang chunk pengisi, satu kecocokan presisi tidak
+    # lagi ketarik turun oleh tetangga topik. Chunk BM25 yang terkutip dilewati
+    # saat merata-rata: tetap dikutip, cuma tidak punya angka yang sebanding.
+    scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]
+    if scored:
+        similarities = [_distance_to_similarity_percent(dist) for dist in scored]
         confidence = round((sum(similarities) / len(similarities)) * 100)
     else:
-        # Tidak ada satupun dokumen dari leg vector (koleksi kosong, atau
-        # hasil ensemble kebetulan semua dari BM25) -> tidak relevan ditampilkan skor.
+        # Tidak satupun chunk terkutip punya distance -- jawabannya bersandar
+        # pada kecocokan kata kunci (BM25) yang tidak punya skala sebanding
+        # dengan cosine similarity. Lebih jujur mengosongkan skor daripada
+        # menampilkan angka dari chunk yang TIDAK dikutip. chat/routes.py sudah
+        # menjaga None ini sebelum membandingkan ke ambang eskalasi, dan
+        # chat/page.jsx menyembunyikan baris keyakinan kalau null.
         confidence = None
 
-    chunks = [d.page_content for d in docs]
+    # SRS FCR-003 poin 12.a: "Answers show source references" -- dulu baris
+    # ini cuma `[d.page_content for d in docs]`, membuang semua metadata
+    # (filename/doc_id/chunk_index dari KbDivisiRetriever & NativeChromaRetriever,
+    # faq_id dari FaqChromaRetriever) padahal sudah ADA di `d.metadata` sejak
+    # index_document()/index_kb_document()/index_faq_entry(). Sekarang setiap
+    # chunk jadi dict supaya metadata itu bisa diteruskan sampai ke
+    # ChatReplyResponse.sources (lihat _build_source_citations() di chat/routes.py)
+    # -- build_prompt() di llm/router.py cuma pakai chunk["text"], tidak berubah.
+    chunks = []
+    for i, d in enumerate(docs):
+        meta = d.metadata
+        if "faq_id" in meta:
+            source_type = "faq"
+        elif "divisi" in meta:
+            source_type = "kb_divisi"
+        else:
+            source_type = "chat_document"
+        chunks.append({
+            "text": d.page_content,
+            "filename": meta.get("filename"),
+            "chunk_index": meta.get("chunk_index"),
+            "page": meta.get("page"),
+            "source_type": source_type,
+            "is_top_match": i in best_indices,
+        })
     return chunks, confidence
 
 def has_session_document(chat_id: str, collection_name: str = "kb_general") -> bool:
@@ -394,10 +583,21 @@ def has_session_document(chat_id: str, collection_name: str = "kb_general") -> b
     ids = results.get("ids")
     return bool(ids and len(ids) > 0)
 
-def get_all_session_chunks(chat_id: str, limit: int = 15, collection_name: str = "kb_general") -> list[str]:
+def get_all_session_chunks(chat_id: str, limit: int = 15, collection_name: str = "kb_general") -> list[dict]:
     collection = get_collection(collection_name)
     if collection.count() == 0:
         return []
-    results = collection.get(where={"chat_id": chat_id}, limit=limit, include=["documents"])
+    results = collection.get(where={"chat_id": chat_id}, limit=limit, include=["documents", "metadatas"])
     docs = results.get("documents")
-    return docs if docs else []
+    metas = results.get("metadatas")
+    docs_list = docs if docs else []
+    metas_list = metas if metas else []
+    # Chat-scoped collection only (where chat_id=...) -- always "chat_document",
+    # never faq/kb_divisi, same reasoning as retrieve_context() above.
+    return [
+        {
+            "text": d, "filename": (m or {}).get("filename"), "chunk_index": (m or {}).get("chunk_index"),
+            "page": (m or {}).get("page"), "source_type": "chat_document",
+        }
+        for d, m in zip(docs_list, metas_list)
+    ]

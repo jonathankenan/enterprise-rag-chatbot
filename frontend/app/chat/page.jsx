@@ -186,6 +186,12 @@ export default function ChatPage() {
           message_id: result.message_id,
           escalation_offered: result.escalation_offered,
           escalation_status: result.escalation_offered ? "offered" : null,
+          // SRS FCR-003 poin 12.a: "Answers show source references" -- daftar
+          // dokumen/FAQ unik yang dipakai backend buat jawaban ini (lihat
+          // SourceCitation di app/schemas.py + _build_source_citations() di
+          // app/chat/routes.py). Sebelumnya field ini ada di response tapi
+          // tidak pernah dibaca frontend sama sekali.
+          sources: result.sources,
         },
       ]);
     } catch (err) {
@@ -500,6 +506,15 @@ export default function ChatPage() {
                       • keyakinan: {m.confidence_score}%
                     </span>
                   )}
+                </div>
+              )}
+              {/* SRS FCR-003 poin 12.a: referensi dokumen/FAQ, TERPISAH dari
+                  baris "sumber: {llm_used}" di atas -- itu nama provider LLM
+                  (Groq/on-prem/dst), ini nama dokumen/FAQ yang dipakai untuk
+                  jawaban. Sengaja tidak digabung biar tidak ambigu. */}
+              {m.sources && m.sources.length > 0 && (
+                <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+                  📎 Referensi: {m.sources.map((s) => s.label).join(", ")}
                 </div>
               )}
               {m.pii_detected && (
