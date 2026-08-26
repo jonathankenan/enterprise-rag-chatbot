@@ -46,8 +46,17 @@ def _norm(text: str) -> str:
     pemisah yang dicari polanya, jadi tiap jawaban berkoma desimal (penulisan
     normal bahasa Indonesia) dihitung salah. Lima dari 22 soal gagal karena
     ini, bukan karena modelnya keliru.
+
+    Perbaikan itu sendiri lalu melahirkan bug kedua: desimal nol ikut
+    direkatkan, jadi "$35.00" berubah jadi "3500" dan pola \\b35\\b tidak
+    pernah cocok. Nilai mata uang di Project NEXUS memang ditulis lengkap
+    dengan sennya. Jadi ".00"/",0" di ujung angka dibuang LEBIH DULU:
+
+        "$35.00" -> "35"      "45.0"  -> "45"
+        "1.000"  -> "1000"    (nol ribuan TIDAK ikut terbuang)
     """
-    t = re.sub(r"(?<=\d)[.,\s](?=\d)", "", text.lower())
+    t = re.sub(r"(?<=\d)[.,]0{1,2}\b", "", text.lower())
+    t = re.sub(r"(?<=\d)[.,\s](?=\d)", "", t)
     return re.sub(r"\s+", " ", t)
 
 
@@ -60,8 +69,16 @@ def _has(*terms):
 
 
 def _refuses(*forbidden):
-    """Menolak menjawab, dan tidak menyebut nilai terlarang apa pun."""
-    deny = r"(tidak (ada|ter\w+|men\w+|di\w+)|belum|bukan|no such|does not|not (found|available|specif|contain))"
+    """
+    Menolak menjawab, dan tidak menyebut nilai terlarang apa pun.
+
+    Daftar "deny" harus longgar terhadap PILIHAN KATA. Versi pertama memakai
+    tidak (ada|ter\\w+|men\\w+|di\\w+) dan meleset pada "tidak MEMILIKI
+    informasi" -- penolakan yang benar-benar sah -- karena awalan "mem-"
+    tidak ada di daftar. Penolakan qwen2.5:7b di B1 dihitung salah gara-gara
+    itu.
+    """
+    deny = r"(tidak (ada|ter\w+|men\w+|mem\w+|di\w+)|belum|bukan|no such|does not|not (found|available|specif|contain))"
     def check(r):
         n = _norm(r)
         if any(re.search(f, n) for f in forbidden):
@@ -107,8 +124,14 @@ CASES = [
     # --- D. kondisional / caveat ---
     ("D1", "caveat", "apakah chatbot boleh mengeksekusi wire transfer?",
      "out of scope direct wire transfer execution", _has(r"\b1000\b", r"(tidak|not|portal)")),
+    # Term dipisah supaya tidak menuntut kata benda tertentu menempel pada
+    # angkanya. "two consecutive turns" punya banyak terjemahan yang sama
+    # benarnya -- "dua putaran obrolan berurutan", "dua giliran berturut-turut"
+    # -- dan versi pertama pemeriksa ini cuma menerima yang menempel langsung,
+    # jadi kedua model dihitung salah padahal jawabannya persis benar.
     ("D2", "caveat", "kapan sistem menawarkan eskalasi ke supervisor manusia?",
-     "Requirement FR-07 sentiment routing escalation", _has(r"\b085\b", r"(dua|two|2)\s*(turn|giliran|kali|berturut)")),
+     "Requirement FR-07 sentiment routing escalation",
+     _has(r"\b085\b", r"\b(dua|two|2)\b", r"(berturut|berurutan|consecutive|turn|giliran|putaran)")),
     ("D3", "caveat", "berapa grace period kartu kredit?",
      "Requirement FR-10 credit card grace period", _has(r"\b21\b", r"(statement|penutupan|closing)")),
     ("D4", "caveat", "apa yang terjadi setelah 3 kali salah passcode?",
