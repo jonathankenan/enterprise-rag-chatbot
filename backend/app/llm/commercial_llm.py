@@ -1,10 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota A]
-Konektor ke berbagai LLM "commercial" (API pihak ketiga).
-Dipakai untuk data yang TIDAK sensitif (lihat logika switching di router.py).
-
-Provider yang didukung: groq, gemini, mistral, cloudflare
-"""
+"""Konektor ke LLM "commercial" (API pihak ketiga) untuk data TIDAK sensitif (lihat logika switching di router.py). Provider: groq, gemini, mistral, cloudflare."""
 import httpx
 
 from app.config import settings
@@ -23,11 +17,7 @@ _gemini_model_cache: str | None = None
 
 
 async def _find_gemini_model(client: httpx.AsyncClient, capability: str = "generateContent") -> str:
-    """
-    Cari model Gemini yang aktif untuk API key ini dan mendukung 'capability'
-    yang diminta (mis. generateContent). Pendekatan ini lebih tahan terhadap
-    perubahan nama/versi model dari Google, dibanding hardcode nama model.
-    """
+    """Cari model Gemini aktif yang mendukung `capability` — lebih tahan perubahan nama/versi model daripada hardcode."""
     global _gemini_model_cache
     if _gemini_model_cache:
         return _gemini_model_cache
@@ -48,15 +38,12 @@ async def _find_gemini_model(client: httpx.AsyncClient, capability: str = "gener
     if not models:
         raise CommercialLLMError(f"Tidak ada model Gemini yang mendukung '{capability}' untuk API key ini")
 
-    # Prioritaskan model "gemini-flash-latest" yang stabil untuk menghindari error 404
-    # pada model-model eksperimental atau belum dirilis.
-    model = next(
+    model = next(  # prioritaskan model stabil "gemini-flash-latest" untuk hindari error 404 pada model eksperimental
         (m for m in models if "gemini-flash-latest" in m["name"]),
         None
     )
     if not model:
-        # Fallback ke model gemma jika flash tidak tersedia
-        model = next(
+        model = next(  # fallback ke gemma kalau flash tidak tersedia
             (m for m in models if "gemma" in m["name"]),
             models[0]
         )
@@ -76,10 +63,7 @@ async def _call_gemini(prompt: str) -> str:
                 params={"key": settings.gemini_api_key},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    # Guardrail SRS Model Usage Policy poin b: batasi panjang
-                    # response supaya token commercial tidak membengkak tanpa
-                    # kendali (sebelumnya tidak pernah diset sama sekali).
-                    "generationConfig": {"maxOutputTokens": settings.max_response_tokens_commercial},
+                    "generationConfig": {"maxOutputTokens": settings.max_response_tokens_commercial},  # Guardrail SRS Model Usage Policy poin b
                 },
             )
             response.raise_for_status()
@@ -95,8 +79,7 @@ async def _call_gemini(prompt: str) -> str:
 
 
 # ============================================================
-# HELPER UMUM — untuk provider yang formatnya OpenAI-compatible
-# (Groq, Mistral pakai pola ini)
+# HELPER UMUM — provider OpenAI-compatible (Groq, Mistral)
 # ============================================================
 
 async def _call_openai_compatible(
@@ -122,8 +105,7 @@ async def _call_openai_compatible(
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    # Guardrail SRS Model Usage Policy poin b (lihat catatan di _call_gemini)
-                    "max_tokens": settings.max_response_tokens_commercial,
+                    "max_tokens": settings.max_response_tokens_commercial,  # Guardrail SRS Model Usage Policy poin b
                 },
             )
             response.raise_for_status()
@@ -183,8 +165,7 @@ async def _call_cloudflare(prompt: str) -> str:
                 headers={"Authorization": f"Bearer {settings.cloudflare_api_token}"},
                 json={
                     "messages": [{"role": "user", "content": prompt}],
-                    # Guardrail SRS Model Usage Policy poin b (lihat catatan di _call_gemini)
-                    "max_tokens": settings.max_response_tokens_commercial,
+                    "max_tokens": settings.max_response_tokens_commercial,  # Guardrail SRS Model Usage Policy poin b
                 },
             )
             response.raise_for_status()
@@ -211,10 +192,7 @@ _PROVIDER_MAP = {
 
 
 async def call_commercial_llm(prompt: str, provider: str | None = None) -> str:
-    """
-    Router internal untuk LLM commercial.
-    provider: salah satu dari _PROVIDER_MAP, atau None -> pakai default dari .env
-    """
+    """Router internal untuk LLM commercial — provider None berarti pakai default dari .env."""
     chosen = provider or settings.commercial_provider
     handler = _PROVIDER_MAP.get(chosen)
     if not handler:

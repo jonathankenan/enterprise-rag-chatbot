@@ -1,17 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Multi-Tenant Knowledge Base — SRS poin 11 & hal. 68/70: "Knowledge Base
-dapat dibuatkan terpisah untuk setiap divisi... Terdapat Knowledge Base
-Company Wide dengan klasifikasi informasi umum internal seperti POJK,
-Peraturan BEI, SK yang dapat di akses oleh semua divisi."
-
-Otorisasi (SRS hal. 64: "Admin IT" vs "Admin User [divisi]" — 2 level admin
-berbeda, TANPA field/flag tambahan, cukup baca User.divisi milik admin itu
-sendiri lewat get_divisi_scope()):
-  - IT_ADMIN dengan divisi=None -> admin GLOBAL, kelola KB divisi mana pun + Company Wide.
-  - IT_ADMIN dengan divisi="PTI" -> admin TERBATAS, cuma boleh kelola KB PTI
-    sendiri. TIDAK bisa upload/hapus dokumen Company Wide atau divisi lain.
-"""
+"""Multi-Tenant Knowledge Base (SRS poin 11, hal. 68/70) — per-divisi + Company Wide (POJK/Peraturan BEI/SK dapat diakses semua divisi). Otorisasi 2 level admin lewat get_divisi_scope() (SRS hal. 64)."""
 import io
 import uuid
 
@@ -36,12 +23,7 @@ KB_PDF_REJECTED_MESSAGE = (
 
 
 def _assert_can_manage(admin: User, target_divisi: str | None):
-    """
-    target_divisi=None berarti upload/hapus dokumen COMPANY WIDE. Cuma
-    admin GLOBAL (scope None) yang boleh menyentuh Company Wide — admin
-    divisi TIDAK boleh, supaya informasi "umum internal" (POJK/Peraturan
-    BEI/SK) tetap satu sumber kebenaran yang dikurasi terpusat.
-    """
+    """target_divisi=None = Company Wide, cuma admin global (scope None) yang boleh menyentuhnya."""
     scope = get_divisi_scope(admin)
     if scope is None:
         return  # admin global — bebas
@@ -57,9 +39,7 @@ def list_documents(db: Session = Depends(get_db), admin: User = Depends(require_
     scope = get_divisi_scope(admin)
     query = db.query(KbDocument)
     if scope is not None:
-        # Admin divisi lihat dokumen divisinya + Company Wide (buat konteks
-        # "ini yang berlaku ke user saya juga"), meski cuma boleh HAPUS yang divisinya sendiri.
-        query = query.filter((KbDocument.divisi == scope) | (KbDocument.divisi.is_(None)))
+        query = query.filter((KbDocument.divisi == scope) | (KbDocument.divisi.is_(None)))  # admin divisi lihat divisinya + Company Wide, tapi cuma boleh HAPUS divisinya sendiri
     return query.order_by(KbDocument.created_at.desc()).all()
 
 
@@ -78,15 +58,9 @@ async def upload_kb_document(
 
     file_bytes = await file.read()
     pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
-    # Flat text still needed here for the guardrail scan below -- indexing
-    # itself uses `pages` so chunks can be tagged with page numbers (SRS
-    # FCR-003 poin 12.a).
-    text = "\n\n".join(p["text"] for p in pages)
+    text = "\n\n".join(p["text"] for p in pages)  # flat text buat guardrail scan; indexing pakai `pages` supaya bisa ditag nomor halaman
 
-    # Sama seperti upload dokumen chat & FAQ — konten yang masuk ke RAG
-    # (apalagi ini bisa ditarik SELURUH divisi atau company-wide) wajib
-    # lolos guardrail F2-04 sebelum diindeks.
-    if is_prompt_blocked(text) or is_prompt_injection(text):
+    if is_prompt_blocked(text) or is_prompt_injection(text):  # sama seperti dokumen chat & FAQ, wajib lolos F2-04 sebelum diindeks
         log_guardrail_event(
             db, admin.id, EventType.DOCUMENT_BLOCKED,
             detail=f"kb_document_upload:{file.filename}",

@@ -1,18 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota A & B]
-F1-05 (LLM Switching) + F2-04 (Guardrail Before/After LLM).
-
-Alur guardrail lengkap:
-1. BEFORE LLM:
-   a. Deteksi PII pada prompt user SEKALI SAJA -> hasilnya dipakai untuk
-      keputusan sensitif DAN untuk masking (tidak dihitung ulang)
-   b. MASK PII sebelum dikirim ke LLM mana pun
-   c. PII atau kata kunci sensitif -> paksa on-prem
-2. GENERATE: kirim prompt (sudah di-mask kalau ada PII) ke LLM sesuai pilihan
-3. AFTER LLM:
-   a. Cek kategori terlarang (saran hukum/medis/dst) -> ganti pesan penolakan
-   b. DEMASK jawaban -> kembalikan placeholder PII ke data asli untuk user
-"""
+"""LLM Switching (F1-05) + Guardrail Before/After LLM (F2-04): mask PII -> pilih & panggil LLM -> cek output -> demask."""
 import json
 from dataclasses import dataclass, field
 
@@ -38,15 +24,7 @@ class LLMResult:
 
 
 def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
-    """
-    Prompt dianggap sensitif kalau salah satu dari dua kondisi terpenuhi:
-    1. Mengandung kata kunci sensitif (misal "rahasia", "internal")
-    2. Mengandung PII (NIK, NPWP, kartu kredit, dll)
-
-    pii_entities diterima sebagai PARAMETER (hasil dari detect_pii_entities()
-    yang sudah dihitung di route_and_generate), BUKAN dihitung ulang di sini,
-    supaya Presidio tidak dijalankan dua kali untuk teks yang sama.
-    """
+    """Sensitif kalau ada kata kunci sensitif ATAU PII — pii_entities diterima sebagai parameter, tidak dihitung ulang."""
     lowered = text.lower()
     has_keyword = any(keyword in lowered for keyword in settings.sensitive_keyword_list)
     has_pii = len(pii_entities) > 0
@@ -54,18 +32,7 @@ def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
 
 
 def build_prompt(user_message: str, context_chunks: list[dict], chat_history: list = None, session_has_document: bool = False) -> str:
-    # 2026-08-25: the language rule used to live inside CRITICAL INSTRUCTIONS
-    # (as #4 of 6), which lost consistently -- Indonesian questions came back
-    # answered in English. Not a model-capability problem (on-prem is
-    # qwen2.5:7b, which handles Indonesian fine) and not a missing
-    # instruction: it was outvoted by position and volume. Everything after
-    # it -- the whole English system prompt and a fully English PROVIDED
-    # CONTEXT of up to 15k chars -- pushed the model back toward English, and
-    # small models weight the tokens nearest the generation point hardest.
-    #
-    # So it now sits on its own, as the LAST thing before "YOUR RESPONSE:",
-    # and explicitly says to ignore the language of the surrounding prompt
-    # rather than just "match the user".
+    # Aturan bahasa ditaruh PALING AKHIR (dekat "YOUR RESPONSE:") -- model kecil paling condong ke token terdekat, dulu kalah suara saat masih di urutan #4.
     _lang = settings.response_language
     LANGUAGE_RULE = (
         f"IMPORTANT — LANGUAGE: Write your ENTIRE response in {_lang}. "
@@ -107,7 +74,6 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
     # RAG Prompt (Documents Present)
     if context_chunks:
         raw_context = "\n\n".join(f"- {c['text']}" for c in context_chunks)
-    # else: raw_context already set to "[NO RELEVANT CONTEXT FOUND]" above
     if len(raw_context) > 15000:
         raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
     context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
@@ -134,30 +100,9 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
 
 
 async def analyze_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> dict:
-    """
-    Gabungan 2 tugas dalam SATU pemanggilan LLM (bukan 2 panggilan
-    terpisah): (1) rangkai ulang jadi query pencarian mandiri — fungsi asli
-    fungsi ini dari awal (dulu bernama get_standalone_query), dan (2) Intent
-    Classification lapis 2 (SRS hal. 17, poin 9.a — lihat
-    guardrail/intent_classifier.py untuk penjelasan lapis 1 vs lapis 2).
-
-    Digabung SENGAJA supaya intent classification yang lebih kaya (bukan
-    cuma "perlu RAG atau tidak" dari lapis 1) TIDAK menambah biaya/latency
-    — pemanggilan LLM ini sudah wajib ada buat re-phrase query, kita cuma
-    minta 1 field JSON tambahan dari hasil yang sama.
-
-    Return dict SELALU punya kedua key ({"standalone_query": str, "intent":
-    str}) — kalau parsing JSON gagal (LLM tidak taat format, jaringan
-    timeout, dst), fallback ke user_message apa adanya + Intent.QUESTION,
-    TIDAK PERNAH melempar exception ke pemanggil (chat/routes.py tidak perlu
-    try/except tambahan cuma buat ini).
-    """
+    """1 panggilan LLM, 2 tugas: rephrase jadi search query + Intent Classification lapis 2 — tidak pernah raise, selalu fallback aman."""
     fallback = {"standalone_query": user_message, "intent": Intent.QUESTION}
     if not chat_history:
-        # Pesan pertama di chat -- tidak ada riwayat buat di-rangkai ulang,
-        # TAPI intent classification tetap perlu jalan (beda dari perilaku
-        # lama yang skip total di sini) supaya bobot retrieval tetap bisa
-        # disesuaikan sejak pesan pertama, bukan baru mulai di pesan ke-2.
         history_text = "(belum ada riwayat, ini pesan pertama di percakapan ini)\n"
     else:
         history_text = ""
@@ -204,14 +149,7 @@ JSON:"""
 
 
 def _parse_query_analysis(raw: str, fallback: dict) -> dict:
-    """
-    LLM kadang membungkus JSON dengan markdown fence (```json ... ```)
-    walau sudah diminta "no markdown" -- di-strip dulu sebelum di-parse.
-    Validasi intent terhadap LAYER2_INTENTS (bukan dipakai mentah) supaya
-    kalau LLM ngarang kategori yang tidak ada di daftar, tetap jatuh ke
-    Intent.QUESTION yang aman, bukan string sembarangan yang bisa bikin
-    retrieve_context() bingung soal bobot mana yang harus dipakai.
-    """
+    """Strip markdown fence kalau ada, validasi intent ke LAYER2_INTENTS, fallback aman kalau parsing gagal."""
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -239,35 +177,16 @@ async def route_and_generate(
     session_has_document: bool = False,
     retrieval_confidence: int | None = None,
 ) -> LLMResult:
-    """
-    Fungsi utama yang dipanggil oleh endpoint chat.
-    preferred_provider: "on-prem" | "groq" | "gemini" | "mistral" | "cloudflare"
-    pii_entities: kalau caller (chat/routes.py) sudah menjalankan
-      detect_pii_entities(user_message) sendiri (mis. untuk keperluan masking
-      sebelum simpan ke histori — lihat SRS 3.j), berikan hasilnya di sini
-      supaya Presidio TIDAK dijalankan ulang untuk teks yang sama. Kalau None,
-      dihitung sendiri seperti sebelumnya (backward compatible).
-    retrieval_confidence: skor 0-100 dari compute_retrieval_confidence()
-      (vectorstore.py), dihitung caller SEBELUM route_and_generate dipanggil
-      (butuh search_query & chat_id yang tidak tersedia di sini). Dulu
-      confidence_score ini diminta dari LLM sendiri lewat instruksi prompt
-      "[CONFIDENCE: X]" — diganti karena angka self-report LLM tidak
-      grounded/tidak konsisten antar-provider (lihat diskusi saat fitur ini
-      diubah). Sekarang murni pass-through: fungsi ini TIDAK menghitung
-      confidence apa pun sendiri, cuma meneruskan apa yang caller berikan.
-    """
-    # ---------- Deteksi PII SEKALI SAJA — hasilnya dipakai berulang di bawah ----------
+    """Fungsi utama endpoint chat — mask PII, pilih LLM (on-prem kalau sensitif), cek output terlarang, demask."""
     if pii_entities is None:
         pii_entities = detect_pii_entities(user_message)
     pii_detected = len(pii_entities) > 0
 
     is_sensitive = detect_sensitive(user_message, pii_entities)
 
-    # ---------- BEFORE LLM: mask PII sebelum masuk ke prompt (pakai entities yang sudah ada) ----------
     masked_message, pii_mapping = mask_pii(user_message, entities=pii_entities) if pii_detected else (user_message, {})
     final_prompt = build_prompt(masked_message, context_chunks, chat_history, session_has_document=session_has_document)
 
-    # ---------- Pilih & panggil LLM ----------
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
         llm_used = "on-prem (data sensitif)"
@@ -281,21 +200,12 @@ async def route_and_generate(
         reply = await call_local_llm(final_prompt)
         llm_used = "on-prem (fallback)"
 
-    # ---------- AFTER LLM: cek kategori terlarang ----------
     blocked_category = check_output_restricted(reply)
     if blocked_category:
         reply = get_refusal_message(blocked_category)
         confidence_score = None
     else:
-        # Confidence sekarang murni dari retrieval_confidence (parameter),
-        # bukan diekstrak dari teks jawaban LLM lagi. Kalau tidak ada context
-        # sama sekali (percakapan umum tanpa RAG), retrieval_confidence sudah
-        # otomatis None dari compute_retrieval_confidence() (koleksi kosong)
-        # — baris `if not context_chunks` yang dulu ada di sini jadi redundan
-        # dan dihapus, bukan dihilangkan diam-diam.
-        confidence_score = retrieval_confidence
-
-        # ---------- AFTER LLM: demask PII kembali ke data asli ----------
+        confidence_score = retrieval_confidence  # pass-through dari caller, bukan dihitung di sini
         if pii_mapping:
             reply = demask(reply, pii_mapping)
 

@@ -1,10 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Endpoint: POST /api/auth/register, POST /api/auth/login,
-          GET /api/auth/me, POST /api/auth/change-password,
-          POST /api/auth/mfa/setup, POST /api/auth/mfa/setup/confirm,
-          POST /api/auth/mfa/verify
-"""
+"""Endpoint: register, login, me, change-password, mfa/setup, mfa/setup/confirm, mfa/verify, azure/login-url, azure/callback."""
 import base64
 import io
 from datetime import datetime, timedelta
@@ -63,15 +57,7 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
 
 
 def _complete_login(db: Session, user: User) -> TokenResponse:
-    """
-    Selesaikan login SUNGGUHAN — bikin access_token, catat LOGIN_SUCCESS,
-    hitung info ISR-001.g/ISR-002.c. Dipanggil dari 3 tempat: login() biasa
-    (user tanpa MFA), mfa_setup_confirm() (IT Admin baru pertama kali setup
-    MFA), dan mfa_verify() (IT Admin yang MFA-nya sudah aktif). Disatukan di
-    sini supaya LOGIN_SUCCESS/previous_login_at cuma dihitung SEKALI di titik
-    "login benar-benar selesai" — bukan di /login yang untuk akun ber-MFA
-    baru separuh jalan (password benar, MFA belum).
-    """
+    """Selesaikan login sungguhan (bikin access_token, catat LOGIN_SUCCESS) — dipanggil dari login()/mfa_setup_confirm()/mfa_verify() supaya cuma dihitung sekali."""
     previous_login = (
         db.query(AuditLog)
         .filter(AuditLog.user_id == user.id, AuditLog.event_type == EventType.LOGIN_SUCCESS)
@@ -92,9 +78,7 @@ def _complete_login(db: Session, user: User) -> TokenResponse:
     log_guardrail_event(db, user.id, EventType.LOGIN_SUCCESS, detail="Login berhasil")
     token = create_access_token(user_id=user.id)
 
-    # Akun "azure" login lewat SSO Azure AD (identitas dibuktikan Microsoft),
-    # tidak punya siklus password lokal — password_expired (ISR-002.c) cuma
-    # relevan buat akun "local" yang benar-benar simpan password di sini.
+    # Akun "azure" login lewat SSO, tidak punya siklus password lokal -- password_expired cuma relevan buat akun "local"
     password_expired = False
     if user.auth_provider == "local":
         password_age = datetime.utcnow() - (user.password_changed_at or user.created_at)
@@ -115,12 +99,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         record_failed_attempt(payload.email)
-        # SRS ISR-001.c: "upaya akses yang tidak terotorisasi harus dicatat,
-        # termasuk tindakan pengguna yang ditolak atau gagal" — sebelumnya
-        # EventType.LOGIN_FAILED sudah ada tapi tidak pernah dipanggil di
-        # mana pun. user_id None kalau emailnya bahkan tidak terdaftar
-        # (tidak ada akun untuk dikaitkan), tapi detail tetap simpan email
-        # yang dicoba supaya investigasi tetap bisa jalan.
+        # SRS ISR-001.c: catat upaya akses gagal -- user_id None kalau email bahkan tidak terdaftar
         log_guardrail_event(
             db, user.id if user else None, EventType.LOGIN_FAILED,
             detail=f"Percobaan login gagal untuk email={payload.email}",
@@ -129,11 +108,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 
     clear_attempts(payload.email)
 
-    # ---------- SRS ISR-001.d: password benar, tapi IT Admin WAJIB MFA ----------
-    # Password saja TIDAK CUKUP untuk role IT_ADMIN — login belum selesai,
-    # LOGIN_SUCCESS belum dicatat, access_token belum diterbitkan. User
-    # dikasih token sementara (5 menit) yang cuma bisa dipakai ke endpoint
-    # /mfa/setup atau /mfa/verify di bawah, bukan endpoint lain manapun.
+    # SRS ISR-001.d: password benar saja tidak cukup untuk IT_ADMIN -- wajib MFA, token sementara 5 menit
     if user.role == Role.IT_ADMIN:
         pending_token = create_pending_mfa_token(user.id)
         if not user.mfa_enabled:
@@ -145,14 +120,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse)
 def mfa_setup(payload: MfaSetupRequest, db: Session = Depends(get_db)):
-    """
-    Langkah 1 dari setup MFA pertama kali: generate secret BARU + QR code.
-    SENGAJA belum disimpan ke database di sini — kalau user batal di tengah
-    jalan (tidak pernah confirm), tidak ada secret setengah-jadi yang
-    nyangkut di akunnya. Baru benar-benar disimpan di /mfa/setup/confirm
-    setelah user membuktikan aplikasi authenticator-nya menghasilkan kode
-    yang cocok dengan secret ini.
-    """
+    """Langkah 1 setup MFA: generate secret baru + QR code, belum disimpan ke DB sampai user confirm."""
     user_id = decode_pending_mfa_token(payload.mfa_token)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -171,7 +139,7 @@ def mfa_setup(payload: MfaSetupRequest, db: Session = Depends(get_db)):
 
 @router.post("/mfa/setup/confirm", response_model=TokenResponse)
 def mfa_setup_confirm(payload: MfaSetupConfirmRequest, db: Session = Depends(get_db)):
-    """Langkah 2: user ketik kode 6-digit dari aplikasi authenticator-nya — kalau cocok, MFA resmi aktif & login selesai."""
+    """Langkah 2: kode 6-digit cocok -> MFA resmi aktif & login selesai."""
     user_id = decode_pending_mfa_token(payload.mfa_token)
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -190,7 +158,7 @@ def mfa_setup_confirm(payload: MfaSetupConfirmRequest, db: Session = Depends(get
 
 @router.post("/mfa/verify", response_model=TokenResponse)
 def mfa_verify(payload: MfaVerifyRequest, db: Session = Depends(get_db)):
-    """Untuk IT Admin yang MFA-nya SUDAH aktif — verifikasi kode 6-digit tiap login."""
+    """Untuk IT Admin yang MFA-nya sudah aktif — verifikasi kode 6-digit tiap login."""
     user_id = decode_pending_mfa_token(payload.mfa_token)
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.mfa_enabled or not user.totp_secret:
@@ -228,18 +196,11 @@ def change_password(
     return {"message": "Password berhasil diubah"}
 
 
-# ---------- SSO Azure AD — simulasi "Logon menggunakan LDAP M365 BEI" ----------
-# (SRS hal. 64). Tenant di sini TENANT DEVELOPER/PRIBADI, bukan tenant BEI
-# asli (yang tidak bisa diakses proyek magang ini) — simulasi ALUR OAuth-nya
-# beneran jalan (redirect ke Microsoft, tukar authorization code, verifikasi
-# identitas), cuma bukan terhubung ke direktori karyawan BEI sungguhan.
+# ---------- SSO Azure AD — simulasi "Logon menggunakan LDAP M365 BEI" (SRS hal. 64) ----------
+# Tenant di sini tenant developer/pribadi, bukan tenant BEI asli -- alur OAuth-nya beneran jalan, cuma tidak terhubung ke direktori karyawan BEI sungguhan.
 
 def _get_msal_app() -> msal.ConfidentialClientApplication:
-    # Pengecekan "sudah dikonfigurasi atau belum" ditaruh DI SINI (satu-satunya
-    # tempat), bukan diulang di tiap endpoint pemanggilnya — sebelumnya
-    # azure_login_url() punya pengecekan ini tapi azure_callback() lupa,
-    # akibatnya azure_callback() lempar 500 mentah (ValueError dari MSAL,
-    # authority URL tidak lengkap) bukan 400 yang rapi kalau .env kosong.
+    # Guard "sudah dikonfigurasi" satu-satunya di sini, supaya semua caller dapat 400 rapi (bukan 500 dari MSAL) kalau .env kosong
     if not (settings.azure_client_id and settings.azure_tenant_id and settings.azure_client_secret):
         raise HTTPException(status_code=400, detail="SSO Azure AD belum dikonfigurasi di server (lihat backend/.env)")
     return msal.ConfidentialClientApplication(
@@ -260,13 +221,7 @@ def azure_login_url():
 
 @router.post("/azure/callback", response_model=TokenResponse)
 def azure_callback(payload: AzureCallbackRequest, db: Session = Depends(get_db)):
-    """
-    Dipanggil frontend (halaman /auth/azure/callback) setelah Microsoft
-    redirect balik dengan `code`. Tukar code itu jadi token asli lewat MSAL
-    — kalau berhasil, `id_token_claims` berisi identitas yang SUDAH
-    diverifikasi Microsoft (kita tidak pernah lihat/pegang password akun
-    Microsoft-nya sama sekali, persis prinsip OAuth).
-    """
+    """Dipanggil frontend setelah Microsoft redirect balik dengan `code` — tukar code jadi token asli lewat MSAL."""
     result = _get_msal_app().acquire_token_by_authorization_code(
         payload.code, scopes=["User.Read"], redirect_uri=settings.azure_redirect_uri,
     )
@@ -280,10 +235,7 @@ def azure_callback(payload: AzureCallbackRequest, db: Session = Depends(get_db))
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        # SRS hal. 64: "Management penambahan user login Active Directory...
-        # dilakukan oleh user dengan role Admin IT dengan mendaftarkan
-        # credential yang SUDAH TERDAFTAR sebelumnya" — bukan auto-signup
-        # bebas siapa saja yang kebetulan berhasil login Microsoft.
+        # SRS hal. 64: akun harus SUDAH terdaftar oleh Admin IT, bukan auto-signup
         log_guardrail_event(
             db, None, EventType.LOGIN_FAILED,
             detail=f"Login Azure AD ditolak, akun belum terdaftar: email={email}",
@@ -297,8 +249,7 @@ def azure_callback(payload: AzureCallbackRequest, db: Session = Depends(get_db))
         user.auth_provider = "azure"
         db.commit()
 
-    # Sama seperti login() biasa — IT Admin tetap wajib MFA (SRS ISR-001.d),
-    # SSO cuma menggantikan langkah "verifikasi password", bukan menggantikan MFA.
+    # IT Admin tetap wajib MFA -- SSO cuma menggantikan verifikasi password
     if user.role == Role.IT_ADMIN:
         pending_token = create_pending_mfa_token(user.id)
         if not user.mfa_enabled:

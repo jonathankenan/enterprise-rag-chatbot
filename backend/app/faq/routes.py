@@ -1,16 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-CRUD FAQ Helpdesk — SRS FCR-003 poin 10.b: "Sistem memproses menggunakan
-RAG: ... b) FAQ helpdesk". Postgres (tabel FaqEntry) jadi source-of-truth
-yang gampang di-list/edit/hapus lewat UI; tiap create/delete di sini juga
-mengubah index ChromaDB (kb_faq_helpdesk, lihat rag/vectorstore.py) supaya
-2 sisi selalu sinkron — tidak ada FAQ "yatim" yang ada di Postgres tapi
-tidak ke-index, atau sebaliknya.
-
-Dibatasi Role.IT_ADMIN sepenuhnya (create/list/delete) — ini konten yang
-dibaca SEMUA chat lewat RAG, jadi harus dikurasi terpusat, bukan user biasa
-yang menambahkan sendiri (beda dari upload dokumen yang per-chat/personal).
-"""
+"""CRUD FAQ Helpdesk (SRS poin 10.b) — Postgres jadi source-of-truth, tiap create/delete juga sync ke index ChromaDB kb_faq_helpdesk. Dibatasi Role.IT_ADMIN."""
 import io
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -50,11 +38,7 @@ def create_faq(
     db.commit()
     db.refresh(entry)
 
-    # Diindeks SETELAH commit — kalau index_faq_entry() gagal (mis. ChromaDB
-    # down), setidaknya baris Postgres-nya sudah tersimpan (bukan hilang
-    # total), dan admin bisa lihat entrinya ada tapi belum ke-index kalau
-    # perlu troubleshoot, daripada gagal total tanpa jejak.
-    index_faq_entry(entry.id, entry.question, entry.answer)
+    index_faq_entry(entry.id, entry.question, entry.answer)  # diindeks setelah commit supaya baris Postgres tidak hilang kalau ini gagal
 
     log_guardrail_event(
         db, admin.id, EventType.FAQ_CREATED,
@@ -70,22 +54,11 @@ async def upload_faq_pdf(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
-    """
-    Bulk-import FAQ dari 1 file PDF — supaya IT Admin tidak perlu ketik
-    manual satu-satu lewat form kalau sudah punya dokumen FAQ existing.
-    PDF diharapkan berisi daftar tanya-jawab (format "Q:/A:",
-    "Pertanyaan:/Jawaban:", atau baris berakhiran "?" diikuti jawabannya —
-    lihat faq/parser.py). Tiap pasangan yang berhasil di-parse jadi 1 baris
-    FaqEntry terpisah (bukan 1 dokumen besar), supaya tetap sejalan dengan
-    desain index_faq_entry() — 1 entri = 1 embedding "Q: ...\\nA: ...".
-    """
+    """Bulk-import FAQ dari 1 PDF (format Q:/A:, Pertanyaan:/Jawaban:, atau baris "?") — tiap pasangan jadi 1 FaqEntry terpisah."""
     file_bytes = await file.read()
     text = extract_text_from_pdf(io.BytesIO(file_bytes))
 
-    # Sama seperti upload dokumen chat (rag/routes.py) — konten yang masuk
-    # ke RAG (apalagi FAQ ini company-wide, ditarik ke SEMUA chat) tetap
-    # wajib lolos guardrail F2-04 sebelum diindeks.
-    if is_prompt_blocked(text) or is_prompt_injection(text):
+    if is_prompt_blocked(text) or is_prompt_injection(text):  # FAQ company-wide, wajib lolos guardrail F2-04 sebelum diindeks
         log_guardrail_event(
             db, admin.id, EventType.DOCUMENT_BLOCKED,
             detail=f"faq_pdf_upload:{file.filename}",
@@ -101,11 +74,7 @@ async def upload_faq_pdf(
                    "'Pertanyaan: .../Jawaban: ...', atau baris pertanyaan (diakhiri '?') diikuti jawabannya.",
         )
 
-    # Sama seperti create_faq(): commit ke Postgres DULU baru index ke
-    # Chroma satu-satu — kalau indexing salah satu entri gagal di tengah
-    # jalan, entri lain tetap tersimpan sah di Postgres (bisa dicek/di-index
-    # ulang manual nanti), bukan hilang total gara-gara 1 gagal.
-    created = [FaqEntry(question=q, answer=a, created_by=admin.id) for q, a in pairs]
+    created = [FaqEntry(question=q, answer=a, created_by=admin.id) for q, a in pairs]  # commit Postgres dulu, baru index satu-satu
     db.add_all(created)
     db.commit()
     for entry in created:

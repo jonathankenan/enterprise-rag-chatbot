@@ -1,18 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Endpoint tiket helpdesk — SRS FCR-003 poin 7 "Eskalasi otomatis". Sesuai
-teks SRS literal ("sistem MENAWARKAN eskalasi ke human helpdesk"), tiket
-TIDAK dibuat otomatis oleh sistem lagi — chat/routes.py cuma menandai
-jawaban sebagai escalation_offered=True, lalu USER sendiri yang konfirmasi
-lewat POST /tickets di bawah kalau mau lanjut. "Human helpdesk" di sini
-diimplementasikan sebagai chat real-time (lihat helpdesk/ws.py untuk
-WebSocket-nya), bukan cuma tiket satu-arah yang dibaca sepihak oleh admin.
-
-list_tickets/close_ticket tetap dibatasi Role.IT_ADMIN (belum ada role SRS
-yang eksplisit representasi staf helpdesk, jadi IT Admin dipakai sebagai
-analog terdekat). get_ticket & POST /tickets bisa diakses PEMILIK tiket
-ATAU IT_ADMIN — pemilik perlu baca/kirim pesan di tiketnya sendiri.
-"""
+"""Endpoint tiket helpdesk (SRS poin 7) — sistem cuma MENAWARKAN eskalasi, user sendiri yang konfirmasi via POST /tickets. "Human helpdesk" diimplementasikan sebagai chat real-time (lihat helpdesk/ws.py)."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -41,9 +27,7 @@ def _get_ticket_or_403(ticket_id: str, db: Session, user: User) -> HelpdeskTicke
 
 def _ticket_detail(ticket: HelpdeskTicket, db: Session) -> TicketDetailResponse:
     chat = db.query(Chat).filter(Chat.id == ticket.chat_id).first()
-    # "Riwayat percakapan terlampir dalam tiket" (SRS) — demasked untuk pihak
-    # yang berwenang (pemilik chat aslinya, atau staf helpdesk yang menangani).
-    messages = [
+    messages = [  # riwayat percakapan terlampir (SRS), demasked untuk pihak berwenang
         MessageResponse(
             id=m.id, sender=m.sender, content=_display_content(m),
             llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
@@ -71,12 +55,7 @@ def list_tickets(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    IT Admin melihat SEMUA tiket (antrian helpdesk). User biasa cuma boleh
-    lihat tiketnya SENDIRI — dipaksa lewat filter user_id, bukan lewat
-    require_role, supaya user bisa navigasi balik ke tiket aktifnya sendiri
-    (lihat chat/page.jsx sidebar) tanpa endpoint terpisah.
-    """
+    """IT Admin melihat semua tiket; user biasa cuma tiketnya sendiri (filter user_id, bukan require_role, supaya user tetap bisa navigasi ke tiket aktifnya)."""
     query = db.query(HelpdeskTicket).join(User, HelpdeskTicket.user_id == User.id)
     if user.role != Role.IT_ADMIN:
         query = query.filter(HelpdeskTicket.user_id == user.id)
@@ -98,27 +77,13 @@ def create_ticket(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    2 jalur eskalasi, User SENDIRI yang memutuskan keduanya (SRS: "sistem
-    menawarkan eskalasi" — bukan langsung membuat tiket tanpa izin):
-
-    1. message_id TERISI — dari banner tawaran confidence rendah, mengikat
-       tiket ke jawaban AI spesifik yang memicu.
-    2. message_id KOSONG — tombol "Hubungi Admin" yang SELALU terlihat di
-       chat, tidak bergantung skor confidence ATAU AI menebak-nebak niat
-       user dari kalimat bebas. Ditambahkan setelah didiskusikan: deteksi
-       niat lewat LLM ("saya mau bicara admin") punya masalah discoverability
-       — user yang tidak tahu "kalimat sakti" apa pun tidak akan pernah
-       ketemu fitur ini. Tombol permanen jauh lebih pasti & mudah ditemukan.
-    """
+    """2 jalur eskalasi, user sendiri yang memutuskan: (1) message_id terisi = banner confidence rendah; (2) message_id kosong = tombol "Hubungi Admin" permanen, lebih discoverable daripada deteksi niat lewat LLM."""
     chat = db.query(Chat).filter(Chat.id == payload.chat_id).first()
     if not chat or chat.user_id != user.id:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
 
     if payload.message_id is None:
-        # Jalur manual — cegah spam tiket kalau tombol diklik berkali-kali:
-        # pakai ulang tiket "open" yang sudah ada utk chat ini kalau ada.
-        existing_manual = (
+        existing_manual = (  # cegah spam tiket kalau tombol diklik berkali-kali, pakai ulang tiket open yang ada
             db.query(HelpdeskTicket)
             .filter(HelpdeskTicket.chat_id == chat.id, HelpdeskTicket.message_id.is_(None), HelpdeskTicket.status == TicketStatus.OPEN)
             .first()
