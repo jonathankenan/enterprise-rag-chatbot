@@ -22,6 +22,7 @@ export default function ChatPage() {
   const [activeTickets, setActiveTickets] = useState([]); // tiket helpdesk milik user yang masih "open" — navigasi balik
   const [editingChatId, setEditingChatId] = useState(null); // id chat yang sedang di-rename inline
   const [editTitle, setEditTitle] = useState("");           // nilai input sementara saat rename
+  const [showArchived, setShowArchived] = useState(false);  // SRS poin 4: arsip chat, alternatif dari hapus permanen
 
   // Guard supaya loadChatHistory() (yang bisa memicu pembuatan chat baru
   // otomatis kalau history kosong) tidak terpanggil dua kali. React 18
@@ -80,19 +81,29 @@ export default function ChatPage() {
     router.push("/login");
   }
 
-  async function loadChatHistory() {
+  async function loadChatHistory(archived = showArchived) {
     try {
-      const history = await api.getChatHistory();
+      const history = await api.getChatHistory(archived);
       setChatHistory(history);
 
-      if (history.length > 0 && !chatId) {
-        selectChat(history[0].id);
-      } else if (history.length === 0) {
-        handleNewChat();
+      // Auto-create/auto-select cuma relevan untuk daftar AKTIF -- daftar arsip
+      // boleh saja kosong tanpa perlu memicu percakapan baru.
+      if (!archived) {
+        if (history.length > 0 && !chatId) {
+          selectChat(history[0].id);
+        } else if (history.length === 0) {
+          handleNewChat();
+        }
       }
     } catch (err) {
       console.error("Gagal memuat history:", err);
     }
+  }
+
+  function toggleArchivedView() {
+    const next = !showArchived;
+    setShowArchived(next);
+    loadChatHistory(next);
   }
 
   async function selectChat(id) {
@@ -131,6 +142,30 @@ export default function ChatPage() {
       loadChatHistory();
     } catch (err) {
       console.error("Gagal menghapus percakapan:", err);
+    }
+  }
+
+  async function handleArchiveChat(e, id) {
+    e.stopPropagation();
+    try {
+      await api.archiveChat(id);
+      if (chatId === id) {
+        setChatId(null);
+        setMessages([]);
+      }
+      loadChatHistory();
+    } catch (err) {
+      console.error("Gagal mengarsipkan percakapan:", err);
+    }
+  }
+
+  async function handleUnarchiveChat(e, id) {
+    e.stopPropagation();
+    try {
+      await api.unarchiveChat(id);
+      loadChatHistory();
+    } catch (err) {
+      console.error("Gagal memulihkan percakapan dari arsip:", err);
     }
   }
 
@@ -314,20 +349,31 @@ export default function ChatPage() {
         flexDirection: "column",
         background: "#f9f9f9"
       }}>
-        <h2>Riwayat Chat</h2>
-        <button
-          onClick={handleNewChat}
-          style={{
-            padding: "10px",
-            marginBottom: "20px",
-            background: "#0070f3",
-            color: "white",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer"
-          }}>
-          + Percakapan Baru
-        </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ margin: 0 }}>{showArchived ? "Arsip Chat" : "Riwayat Chat"}</h2>
+          <button
+            onClick={toggleArchivedView}
+            title={showArchived ? "Kembali ke riwayat aktif" : "Lihat percakapan yang diarsipkan"}
+            style={{ fontSize: "12px", background: "transparent", border: "1px solid #ccc", borderRadius: "4px", padding: "4px 8px", cursor: "pointer" }}
+          >
+            {showArchived ? "← Kembali" : "🗄️ Arsip"}
+          </button>
+        </div>
+        {!showArchived && (
+          <button
+            onClick={handleNewChat}
+            style={{
+              padding: "10px",
+              margin: "12px 0 20px",
+              background: "#0070f3",
+              color: "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer"
+            }}>
+            + Percakapan Baru
+          </button>
+        )}
         <div style={{ overflowY: "auto", flex: 1 }}>
           {chatHistory.map((chat) => (
             <div
@@ -381,11 +427,26 @@ export default function ChatPage() {
                   <>
                     <div style={{ fontWeight: "bold", fontSize: "14px", flex: 1, paddingRight: "8px" }}>{chat.title}</div>
                     <div style={{ display: "flex", gap: "2px", flexShrink: 0 }}>
-                      <button
-                        onClick={(e) => startEditing(e, chat)}
-                        title="Ubah nama"
-                        style={{ background: "transparent", border: "none", cursor: "pointer", color: "#555", padding: "0 3px", fontSize: "13px", lineHeight: "1" }}
-                      >✏️</button>
+                      {!showArchived && (
+                        <button
+                          onClick={(e) => startEditing(e, chat)}
+                          title="Ubah nama"
+                          style={{ background: "transparent", border: "none", cursor: "pointer", color: "#555", padding: "0 3px", fontSize: "13px", lineHeight: "1" }}
+                        >✏️</button>
+                      )}
+                      {showArchived ? (
+                        <button
+                          onClick={(e) => handleUnarchiveChat(e, chat.id)}
+                          title="Pulihkan dari arsip"
+                          style={{ background: "transparent", border: "none", cursor: "pointer", color: "#0070f3", padding: "0 3px", fontSize: "13px", lineHeight: "1" }}
+                        >📤</button>
+                      ) : (
+                        <button
+                          onClick={(e) => handleArchiveChat(e, chat.id)}
+                          title="Arsipkan percakapan"
+                          style={{ background: "transparent", border: "none", cursor: "pointer", color: "#555", padding: "0 3px", fontSize: "13px", lineHeight: "1" }}
+                        >🗄️</button>
+                      )}
                       <button
                         onClick={(e) => handleDeleteChat(e, chat.id)}
                         title="Hapus percakapan"

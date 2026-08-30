@@ -137,6 +137,9 @@ class UserDivisiUpdateRequest(BaseModel):
 class SystemSettingsResponse(BaseModel):
     commercial_llm_force_stopped: bool
     export_allowed_roles: list[str]
+    chat_rate_limit_max_messages: int
+    chat_rate_limit_window_seconds: int
+    chat_retention_days: int | None
     updated_by: str | None
     updated_at: datetime | None
 
@@ -148,6 +151,35 @@ class UpdateExportRolesRequest(BaseModel):
     roles: list[str]
 
 
+# ---- SRS poin 4.c-d: rate limit & API limiter dikonfigurasi IT Admin (dulu cuma .env) ----
+class UpdateRateLimitRequest(BaseModel):
+    max_messages: int
+    window_seconds: int
+
+    @field_validator("max_messages", "window_seconds")
+    @classmethod
+    def must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Nilai harus lebih besar dari 0")
+        return v
+
+
+# ---- SRS poin 6: konfigurasi retensi data historis ----
+class UpdateRetentionRequest(BaseModel):
+    retention_days: int | None  # None = tanpa batas (nonaktifkan retensi)
+
+    @field_validator("retention_days")
+    @classmethod
+    def must_be_positive_or_none(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("Retensi harus lebih besar dari 0 hari, atau kosongkan untuk tanpa batas")
+        return v
+
+
+class RetentionApplyResponse(BaseModel):
+    archived_count: int
+
+
 # ---- Chat ----
 class ChatCreate(BaseModel):
     title: str | None = "Percakapan Baru"
@@ -157,6 +189,7 @@ class ChatResponse(BaseModel):
     id: str
     title: str
     created_at: datetime
+    archived: bool = False
 
     class Config:
         from_attributes = True
