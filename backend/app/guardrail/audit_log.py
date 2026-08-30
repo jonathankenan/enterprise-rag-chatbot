@@ -38,6 +38,11 @@ class EventType:
     KB_DOCUMENT_UPLOADED = "kb_document_uploaded"  # SRS poin 11
     KB_DOCUMENT_DELETED = "kb_document_deleted"
     USER_DIVISI_CHANGED = "user_divisi_changed"
+    RATE_LIMIT_CONFIG_CHANGED = "rate_limit_config_changed"  # SRS poin 4.c-d
+    RETENTION_POLICY_CHANGED = "retention_policy_changed"    # SRS poin 6
+    RETENTION_POLICY_APPLIED = "retention_policy_applied"
+    CHAT_ARCHIVED = "chat_archived"
+    CHAT_UNARCHIVED = "chat_unarchived"
 
 
 class Severity:
@@ -72,6 +77,11 @@ _SEVERITY_MAP = {
     EventType.KB_DOCUMENT_UPLOADED: Severity.LOW,
     EventType.KB_DOCUMENT_DELETED: Severity.LOW,
     EventType.USER_DIVISI_CHANGED: Severity.HIGH,
+    EventType.RATE_LIMIT_CONFIG_CHANGED: Severity.MEDIUM,  # mempengaruhi semua user
+    EventType.RETENTION_POLICY_CHANGED: Severity.MEDIUM,
+    EventType.RETENTION_POLICY_APPLIED: Severity.MEDIUM,   # aksi massal, mengarsipkan banyak chat sekaligus
+    EventType.CHAT_ARCHIVED: Severity.LOW,
+    EventType.CHAT_UNARCHIVED: Severity.LOW,
 }
 
 

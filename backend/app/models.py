@@ -93,6 +93,8 @@ class Chat(Base):
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False)
     title = Column(String, default="Percakapan Baru")
     created_at = Column(DateTime, default=datetime.utcnow)
+    archived = Column(Boolean, nullable=False, default=False)  # SRS poin 4: arsip, alternatif dari hapus permanen
+    archived_at = Column(DateTime, nullable=True)
 
     owner = relationship("User", back_populates="chats")
     messages = relationship("Message", back_populates="chat", order_by="Message.created_at")
@@ -186,6 +188,9 @@ class SystemSettings(Base):
     id = Column(String, primary_key=True, default="global")
     commercial_llm_force_stopped = Column(Boolean, nullable=False, default=False)  # SRS hal. 10 Rules poin 2: force-stop LLM Commercial
     export_allowed_roles = Column(Text, nullable=False, default="it_admin,compliance")  # F2-08, string koma-pisah; IT_ADMIN dipaksa selalu ikut
+    chat_rate_limit_max_messages = Column(Integer, nullable=False, default=30)  # SRS poin 4.c, dulu cuma .env, sekarang bisa diubah IT Admin runtime
+    chat_rate_limit_window_seconds = Column(Integer, nullable=False, default=60)
+    chat_retention_days = Column(Integer, nullable=True)  # SRS poin 6: retensi historis; None = tanpa batas, belum ada kebijakan
     updated_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

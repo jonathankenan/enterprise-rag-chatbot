@@ -124,9 +124,14 @@ export const api = {
       body: JSON.stringify({ title }),
     }),
 
-  getChatHistory: () => request("/api/chat/history"),
+  getChatHistory: (archived = false) => request(`/api/chat/history?archived=${archived}`),
 
   deleteChat: (chatId) => request(`/api/chat/${chatId}`, { method: "DELETE" }),
+
+  // ---- Arsip chat (SRS poin 4: "menghapus atau mengarsipkan percakapan") ----
+  archiveChat: (chatId) => request(`/api/chat/${chatId}/archive`, { method: "PATCH" }),
+
+  unarchiveChat: (chatId) => request(`/api/chat/${chatId}/unarchive`, { method: "PATCH" }),
 
   renameChat: (chatId, title) =>
     request(`/api/chat/${chatId}/rename`, {
@@ -257,6 +262,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ roles }),
     }),
+
+  // ---- SRS poin 4.c-d: rate limit & API limiter dikonfigurasi IT Admin ----
+  updateRateLimit: (maxMessages, windowSeconds) =>
+    request("/api/admin/system-settings/rate-limit", {
+      method: "POST",
+      body: JSON.stringify({ max_messages: maxMessages, window_seconds: windowSeconds }),
+    }),
+
+  // ---- SRS poin 6: konfigurasi retensi data historis ----
+  updateRetention: (retentionDays) =>
+    request("/api/admin/system-settings/retention", {
+      method: "POST",
+      body: JSON.stringify({ retention_days: retentionDays }),
+    }),
+
+  applyRetention: () =>
+    request("/api/admin/system-settings/retention/apply", { method: "POST" }),
 
   // ---- FAQ Helpdesk (dibatasi Role.IT_ADMIN — sumber RAG SRS poin 10.b) ----
   listFaqs: () => request("/api/faq"),

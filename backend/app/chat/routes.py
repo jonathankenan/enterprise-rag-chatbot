@@ -1,5 +1,6 @@
 """Titik integrasi: autentikasi/guardrail/audit log/database + retrieval RAG/LLM switching (F1-05)."""
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -61,9 +62,42 @@ def create_chat(payload: ChatCreate, db: Session = Depends(get_db), user: User =
 
 
 @router.get("/history", response_model=list[ChatResponse])
-def get_chat_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Ambil daftar percakapan milik user yang sedang login."""
-    return db.query(Chat).filter(Chat.user_id == user.id).order_by(Chat.created_at.desc()).all()
+def get_chat_history(archived: bool = False, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Ambil daftar percakapan milik user yang sedang login — default cuma yang aktif, archived=true buat lihat arsip (SRS poin 4)."""
+    return (
+        db.query(Chat)
+        .filter(Chat.user_id == user.id, Chat.archived.is_(archived))
+        .order_by(Chat.created_at.desc())
+        .all()
+    )
+
+
+@router.patch("/{chat_id}/archive", response_model=ChatResponse)
+def archive_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Arsipkan percakapan — alternatif reversibel dari hapus permanen (SRS poin 4: 'menghapus atau mengarsipkan')."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+    chat.archived = True
+    chat.archived_at = datetime.utcnow()
+    db.commit()
+    db.refresh(chat)
+    log_guardrail_event(db, user.id, EventType.CHAT_ARCHIVED, detail=f"chat_id={chat.id}, title={chat.title}")
+    return chat
+
+
+@router.patch("/{chat_id}/unarchive", response_model=ChatResponse)
+def unarchive_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Pulihkan percakapan dari arsip."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+    chat.archived = False
+    chat.archived_at = None
+    db.commit()
+    db.refresh(chat)
+    log_guardrail_event(db, user.id, EventType.CHAT_UNARCHIVED, detail=f"chat_id={chat.id}, title={chat.title}")
+    return chat
 
 
 @router.get("/{chat_id}/messages", response_model=list[MessageResponse])

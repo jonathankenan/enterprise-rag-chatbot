@@ -1,14 +1,25 @@
 """Endpoint manajemen user (ganti role/divisi) — sebelumnya cuma bisa lewat SQL manual. Dibatasi Role.IT_ADMIN."""
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, SystemSettings
-from app.schemas import AdminUserResponse, UserRoleUpdateRequest, UserDivisiUpdateRequest, SystemSettingsResponse, UpdateExportRolesRequest
+from app.models import Role, User, SystemSettings, Chat
+from app.schemas import (
+    AdminUserResponse, UserRoleUpdateRequest, UserDivisiUpdateRequest, SystemSettingsResponse,
+    UpdateExportRolesRequest, UpdateRateLimitRequest, UpdateRetentionRequest, RetentionApplyResponse,
+)
 from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _assert_global_admin(admin: User):
+    """SystemSettings itu tabel singleton (efeknya lintas divisi), jadi setelan sistem dikunci ke admin global — kecuali force-stop, lihat catatan di toggle_commercial_llm()."""
+    if get_divisi_scope(admin) is not None:
+        raise HTTPException(status_code=403, detail="Cuma admin global yang bisa mengubah setelan sistem")
 
 
 def _get_or_create_settings(db: Session) -> SystemSettings:
@@ -26,6 +37,9 @@ def _settings_response(settings_row: SystemSettings) -> SystemSettingsResponse:
     return SystemSettingsResponse(
         commercial_llm_force_stopped=settings_row.commercial_llm_force_stopped,
         export_allowed_roles=settings_row.get_export_allowed_roles(),
+        chat_rate_limit_max_messages=settings_row.chat_rate_limit_max_messages,
+        chat_rate_limit_window_seconds=settings_row.chat_rate_limit_window_seconds,
+        chat_retention_days=settings_row.chat_retention_days,
         updated_by=settings_row.updated_by,
         updated_at=settings_row.updated_at,
     )
@@ -112,6 +126,11 @@ def get_system_settings(db: Session = Depends(get_db), user: User = Depends(requ
 @router.post("/system-settings/toggle-commercial-llm", response_model=SystemSettingsResponse)
 def toggle_commercial_llm(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
     """Toggle force-stop LLM Commercial — SRS hal. 10 Rules poin 2, satu tombol yang berubah fungsi tergantung status."""
+    # SENGAJA TIDAK dikunci ke admin global (beda dari setelan sistem lain di file ini): ini emergency
+    # kill switch, arahnya fail-safe (semua dipaksa ke on-prem), reversibel, dan teraudit CRITICAL —
+    # risiko "tidak ada yang bisa menekan saat insiden" lebih besar daripada risiko salah tekan.
+    # Efeknya tetap GLOBAL walau ditekan admin divisi: ancaman "jangan kirim apa pun ke LLM
+    # commercial" tidak selesai kalau cuma satu divisi yang dihentikan.
     settings_row = _get_or_create_settings(db)
     settings_row.commercial_llm_force_stopped = not settings_row.commercial_llm_force_stopped
     settings_row.updated_by = admin.id
@@ -134,6 +153,7 @@ def update_export_roles(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
+    _assert_global_admin(admin)  # kontrol keluarnya data dari sistem, sekelas kebijakan retensi
     invalid = [r for r in payload.roles if r not in Role.ALL]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Role tidak dikenal: {', '.join(invalid)}")
@@ -153,3 +173,79 @@ def update_export_roles(
         metadata={"old_roles": old_roles, "new_roles": settings_row.export_allowed_roles},
     )
     return _settings_response(settings_row)
+
+
+# ---------- SRS poin 4.c-d: rate limit & API limiter dikonfigurasi IT Admin (dulu cuma lewat .env) ----------
+
+@router.post("/system-settings/rate-limit", response_model=SystemSettingsResponse)
+def update_rate_limit(
+    payload: UpdateRateLimitRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    _assert_global_admin(admin)  # kapasitas server itu sumber daya BERSAMA — kalau tiap divisi bisa naikkan jatahnya sendiri, proteksinya tidak ada artinya
+    settings_row = _get_or_create_settings(db)
+    old_values = (settings_row.chat_rate_limit_max_messages, settings_row.chat_rate_limit_window_seconds)
+    settings_row.chat_rate_limit_max_messages = payload.max_messages
+    settings_row.chat_rate_limit_window_seconds = payload.window_seconds
+    settings_row.updated_by = admin.id
+    db.commit()
+    db.refresh(settings_row)
+
+    log_guardrail_event(
+        db, admin.id, EventType.RATE_LIMIT_CONFIG_CHANGED,
+        detail=f"Rate limit chat diubah oleh {admin.email}",
+        metadata={
+            "old_max_messages": old_values[0], "old_window_seconds": old_values[1],
+            "new_max_messages": payload.max_messages, "new_window_seconds": payload.window_seconds,
+        },
+    )
+    return _settings_response(settings_row)
+
+
+# ---------- SRS poin 6: konfigurasi retensi data historis ----------
+
+@router.post("/system-settings/retention", response_model=SystemSettingsResponse)
+def update_retention(
+    payload: UpdateRetentionRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    _assert_global_admin(admin)  # retensi = kewajiban regulasi (POJK/kearsipan), harus seragam se-perusahaan, bukan preferensi tiap divisi
+    settings_row = _get_or_create_settings(db)
+    old_value = settings_row.chat_retention_days
+    settings_row.chat_retention_days = payload.retention_days
+    settings_row.updated_by = admin.id
+    db.commit()
+    db.refresh(settings_row)
+
+    log_guardrail_event(
+        db, admin.id, EventType.RETENTION_POLICY_CHANGED,
+        detail=f"Kebijakan retensi chat diubah oleh {admin.email}",
+        metadata={"old_retention_days": old_value, "new_retention_days": payload.retention_days},
+    )
+    return _settings_response(settings_row)
+
+
+@router.post("/system-settings/retention/apply", response_model=RetentionApplyResponse)
+def apply_retention(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
+    """Terapkan kebijakan retensi SEKARANG — arsipkan (bukan hapus permanen) chat aktif yang lebih tua dari chat_retention_days."""
+    _assert_global_admin(admin)  # aksi massal lintas divisi (menyentuh chat SEMUA user), bukan cuma divisi si admin
+    settings_row = _get_or_create_settings(db)
+    if settings_row.chat_retention_days is None:
+        raise HTTPException(status_code=400, detail="Kebijakan retensi belum diatur — set jumlah hari terlebih dahulu")
+
+    cutoff = datetime.utcnow() - timedelta(days=settings_row.chat_retention_days)
+    stale_chats = db.query(Chat).filter(Chat.archived.is_(False), Chat.created_at < cutoff).all()
+    now = datetime.utcnow()
+    for chat in stale_chats:
+        chat.archived = True
+        chat.archived_at = now
+    db.commit()
+
+    log_guardrail_event(
+        db, admin.id, EventType.RETENTION_POLICY_APPLIED,
+        detail=f"Kebijakan retensi diterapkan oleh {admin.email}",
+        metadata={"retention_days": settings_row.chat_retention_days, "archived_count": len(stale_chats)},
+    )
+    return RetentionApplyResponse(archived_count=len(stale_chats))

@@ -28,6 +28,12 @@ export default function AdminUsersPage() {
   const [togglingLlm, setTogglingLlm] = useState(false);
   const [exportRolesDraft, setExportRolesDraft] = useState([]);
   const [savingExportRoles, setSavingExportRoles] = useState(false);
+  const [rateLimitDraft, setRateLimitDraft] = useState({ max_messages: 30, window_seconds: 60 });
+  const [savingRateLimit, setSavingRateLimit] = useState(false);
+  const [retentionDraft, setRetentionDraft] = useState("");
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [applyingRetention, setApplyingRetention] = useState(false);
+  const [retentionResult, setRetentionResult] = useState(null);
 
   useEffect(() => {
     if (!api.isLoggedIn()) {
@@ -65,6 +71,11 @@ export default function AdminUsersPage() {
       const result = await api.getSystemSettings();
       setSystemSettings(result);
       setExportRolesDraft(result.export_allowed_roles);
+      setRateLimitDraft({
+        max_messages: result.chat_rate_limit_max_messages,
+        window_seconds: result.chat_rate_limit_window_seconds,
+      });
+      setRetentionDraft(result.chat_retention_days ?? "");
     } catch (err) {
       setError(err.message || "Gagal memuat pengaturan sistem");
     }
@@ -136,6 +147,50 @@ export default function AdminUsersPage() {
     }
   }
 
+  async function handleSaveRateLimit() {
+    setSavingRateLimit(true);
+    setError("");
+    try {
+      const result = await api.updateRateLimit(
+        Number(rateLimitDraft.max_messages),
+        Number(rateLimitDraft.window_seconds)
+      );
+      setSystemSettings(result);
+    } catch (err) {
+      setError(err.message || "Gagal menyimpan rate limit");
+    } finally {
+      setSavingRateLimit(false);
+    }
+  }
+
+  async function handleSaveRetention() {
+    setSavingRetention(true);
+    setError("");
+    try {
+      const days = retentionDraft === "" ? null : Number(retentionDraft);
+      const result = await api.updateRetention(days);
+      setSystemSettings(result);
+    } catch (err) {
+      setError(err.message || "Gagal menyimpan kebijakan retensi");
+    } finally {
+      setSavingRetention(false);
+    }
+  }
+
+  async function handleApplyRetention() {
+    setApplyingRetention(true);
+    setError("");
+    setRetentionResult(null);
+    try {
+      const result = await api.applyRetention();
+      setRetentionResult(result.archived_count);
+    } catch (err) {
+      setError(err.message || "Gagal menerapkan kebijakan retensi");
+    } finally {
+      setApplyingRetention(false);
+    }
+  }
+
   if (checkingSession) return <div style={{ padding: 40 }}>Memuat...</div>;
 
   if (!hasAccess) {
@@ -182,6 +237,9 @@ export default function AdminUsersPage() {
                 ? "🔴 AKTIF — semua chat dipaksa ke on-prem, apa pun provider yang dipilih user (Groq/Gemini/Mistral/Cloudflare dimatikan sementara)."
                 : "🟢 Tidak aktif — user bebas pilih provider commercial seperti biasa."}
             </p>
+            <p style={{ margin: "6px 0 0", fontSize: 12, color: "#b26a00" }}>
+              ⚠️ Tombol darurat: berlaku ke <b>SELURUH divisi</b>, bukan cuma divisi Anda.
+            </p>
           </div>
           <button
             onClick={handleToggleCommercialLlm}
@@ -197,8 +255,11 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {/* F2-08 (spesifikasi Tingkat 2): role mana boleh export chat ke PDF */}
-      {systemSettings && (
+      {/* F2-08 (spesifikasi Tingkat 2): role mana boleh export chat ke PDF.
+          Mulai sini semua setelan dikunci admin GLOBAL (backend juga menolak 403) —
+          efeknya lintas divisi, jadi bukan wewenang admin divisi. Force-stop di atas
+          SENGAJA dikecualikan: emergency kill switch, lihat komentar di admin/routes.py. */}
+      {systemSettings && isGlobalAdmin && (
         <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
           <b>Role yang Boleh Export PDF</b>
           <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
@@ -225,6 +286,97 @@ export default function AdminUsersPage() {
           >
             {savingExportRoles ? "Menyimpan..." : "Simpan"}
           </button>
+        </div>
+      )}
+
+      {/* SRS poin 4.c-d: rate limiting & API limiter dikonfigurasi IT Admin (dulu cuma .env + restart) */}
+      {systemSettings && isGlobalAdmin && (
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+          <b>Rate Limit Chat</b>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+            Batas jumlah pesan per user dalam satu jendela waktu. Melebihi batas ini akan ditolak (429) sementara.
+          </p>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
+            <label style={{ fontSize: 13 }}>
+              Maks. pesan
+              <br />
+              <input
+                type="number"
+                min={1}
+                value={rateLimitDraft.max_messages}
+                onChange={(e) => setRateLimitDraft((prev) => ({ ...prev, max_messages: e.target.value }))}
+                style={{ padding: 6, width: 100, marginTop: 4 }}
+              />
+            </label>
+            <label style={{ fontSize: 13 }}>
+              per (detik)
+              <br />
+              <input
+                type="number"
+                min={1}
+                value={rateLimitDraft.window_seconds}
+                onChange={(e) => setRateLimitDraft((prev) => ({ ...prev, window_seconds: e.target.value }))}
+                style={{ padding: 6, width: 100, marginTop: 4 }}
+              />
+            </label>
+            <button
+              onClick={handleSaveRateLimit}
+              disabled={savingRateLimit}
+              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRateLimit ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+            >
+              {savingRateLimit ? "Menyimpan..." : "Simpan"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* SRS poin 6: konfigurasi retensi data historis */}
+      {systemSettings && isGlobalAdmin && (
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+          <b>Retensi Data Historis</b>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+            Chat yang lebih tua dari jumlah hari ini akan diarsipkan (bukan dihapus permanen) saat kebijakan diterapkan.
+            Kosongkan untuk tanpa batas (retensi nonaktif).
+          </p>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
+            <label style={{ fontSize: 13 }}>
+              Retensi (hari)
+              <br />
+              <input
+                type="number"
+                min={1}
+                placeholder="tanpa batas"
+                value={retentionDraft}
+                onChange={(e) => setRetentionDraft(e.target.value)}
+                style={{ padding: 6, width: 120, marginTop: 4 }}
+              />
+            </label>
+            <button
+              onClick={handleSaveRetention}
+              disabled={savingRetention}
+              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRetention ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+            >
+              {savingRetention ? "Menyimpan..." : "Simpan Kebijakan"}
+            </button>
+            <button
+              onClick={handleApplyRetention}
+              disabled={applyingRetention || !systemSettings.chat_retention_days}
+              title={!systemSettings.chat_retention_days ? "Simpan kebijakan retensi (isi jumlah hari) terlebih dahulu" : ""}
+              style={{
+                padding: "8px 16px", border: "none", borderRadius: 4,
+                cursor: applyingRetention || !systemSettings.chat_retention_days ? "not-allowed" : "pointer",
+                background: "#555", color: "white", fontWeight: "bold",
+                opacity: !systemSettings.chat_retention_days ? 0.5 : 1,
+              }}
+            >
+              {applyingRetention ? "Menerapkan..." : "Terapkan Sekarang"}
+            </button>
+            {retentionResult !== null && (
+              <span style={{ fontSize: 13, color: "#2e7d32" }}>
+                ✓ {retentionResult} percakapan diarsipkan
+              </span>
+            )}
+          </div>
         </div>
       )}
 
