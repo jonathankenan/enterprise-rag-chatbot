@@ -14,6 +14,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../../../lib/api";
+import MarkdownMessage from "../../../../components/MarkdownMessage";
 
 export default function TicketChatPage({ params }) {
   const { id: ticketId } = params;
@@ -136,7 +137,7 @@ export default function TicketChatPage({ params }) {
           {ticket.messages.map((m) => (
             <div key={m.id} style={{ marginBottom: 10, textAlign: m.sender === "user" ? "right" : "left" }}>
               <div style={{ display: "inline-block", padding: "8px 12px", borderRadius: 8, background: m.sender === "user" ? "#DCF0FF" : "#F1F1F1", maxWidth: "80%", textAlign: "left" }}>
-                {m.content}
+                {m.sender === "user" ? m.content : <MarkdownMessage>{m.content}</MarkdownMessage>}
               </div>
             </div>
           ))}

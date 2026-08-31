@@ -5,6 +5,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
+import MarkdownMessage from "../../components/MarkdownMessage";
 
 export default function ChatPage() {
   const router = useRouter();
@@ -600,7 +601,13 @@ export default function ChatPage() {
                   textAlign: "left"
                 }}
               >
-                {m.content}
+                {/* Markdown cuma untuk jawaban ASISTEN. Ketikan user
+                    ditampilkan apa adanya -- orang yang menempelkan data
+                    berpipa atau berbintang harus melihat persis yang dia
+                    ketik, bukan berubah bentuk jadi tabel. */}
+                {m.sender === "user"
+                  ? m.content
+                  : <MarkdownMessage>{m.content}</MarkdownMessage>}
               </div>
               {m.llm_used && (
                 <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
