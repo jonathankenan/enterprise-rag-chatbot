@@ -299,6 +299,10 @@ async def send_message(
     # Diisi kalau query menyebut divisi yang BUKAN divisi user (dan bukan
     # Company Wide) — lihat penjagaan divisi di bawah.
     divisi_asing: list[str] | None = None
+    # True kalau pertanyaannya menyebut identifier item korpus (SOP-02,
+    # FR-01, dst.). Pertanyaan tentang item yang TERKATALOG tidak pernah
+    # boleh dijawab dari pengetahuan umum — lihat build_prompt().
+    answer_must_be_grounded = False
 
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
@@ -377,6 +381,13 @@ async def send_message(
             if not divisi_asing:
                 query_ids = extract_query_identifiers(search_query)
                 if query_ids:
+                    # Pertanyaan menyebut item terkatalog -> jawabannya WAJIB
+                    # bersumber dari konteks. Tanpa ini instruksi prompt yang
+                    # aktif justru menyuruh model mengisi dari pengetahuan
+                    # umum, dan satu kalimat SOP-02 yang asli dikembangkan
+                    # jadi SOP karangan lengkap. Lihat build_prompt().
+                    answer_must_be_grounded = True
+
                     id_chunks = [c for c in context_chunks if c.get("id_match")]
                     if not id_chunks:
                         # Tidak satu pun chunk menyebut identifier ini. Bukan
@@ -479,6 +490,7 @@ async def send_message(
                 session_has_document=session_has_document,
                 retrieval_confidence=retrieval_confidence,
                 identifier_in_example=identifier_in_example,
+                answer_must_be_grounded=answer_must_be_grounded,
             )
         except CommercialLLMError as e:
             raise HTTPException(status_code=502, detail=str(e))
