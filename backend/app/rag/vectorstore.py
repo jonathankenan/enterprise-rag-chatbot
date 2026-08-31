@@ -125,6 +125,20 @@ def _table_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+def table_header_of(text: str) -> str | None:
+    """
+    Baris header tabel markdown di chunk ini, atau None kalau bukan chunk
+    tabel. Dipakai sebagai IDENTITAS tabel: semua chunk baris yang berasal
+    dari tabel yang sama membawa baris header yang sama persis.
+    """
+    lines = text.split("\n")
+    for i in range(len(lines) - 1):
+        if (_TABLE_ROW_RE.match(lines[i]) and not _TABLE_SEP_RE.match(lines[i])
+                and _TABLE_SEP_RE.match(lines[i + 1])):
+            return lines[i].strip()
+    return None
+
+
 def count_table_body_rows(text: str) -> int:
     """
     Berapa baris ISI tabel markdown yang dimuat sebuah chunk (header dan garis
@@ -514,6 +528,48 @@ def _resolve_weights(weight_hint: str | None, has_bm25: bool) -> list[float]:
     return scaled + [_BM25_SHARE]
 
 
+# Berapa baris dari satu tabel harus muncul di hasil sebelum sisanya ikut
+# ditarik. Satu baris saja BUKAN sinyal tabelnya relevan -- itu justru pola
+# pertanyaan presisi, dan menariknya jadi seluruh tabel malah mengembalikan
+# baris tetangga yang susah payah dibuang.
+TABLE_EXPANSION_MIN_HITS = 2
+# Pagar supaya tabel raksasa tidak menelan seluruh jendela konteks (dipotong
+# di 15.000 karakter oleh build_prompt).
+TABLE_EXPANSION_MAX_ROWS = 30
+
+
+def _expand_table_rows(docs: list, chat_id: str, collection_name: str) -> list:
+    """Lengkapi baris tabel yang sudah terwakili di hasil. Lihat pemanggilnya."""
+    from collections import defaultdict
+
+    hits: dict[str, int] = defaultdict(int)
+    for d in docs:
+        if count_table_body_rows(d.page_content) == 1:
+            header = table_header_of(d.page_content)
+            if header:
+                hits[header] += 1
+    wanted = {h for h, n in hits.items() if n >= TABLE_EXPANSION_MIN_HITS}
+    if not wanted:
+        return docs
+
+    collection = get_collection(collection_name)
+    stored = collection.get(where={"chat_id": chat_id}, include=["documents", "metadatas"])
+    seen = {d.page_content for d in docs}
+    extra = []
+    for text, meta in zip(stored.get("documents") or [], stored.get("metadatas") or []):
+        if text in seen or count_table_body_rows(text) != 1:
+            continue
+        header = table_header_of(text)
+        if header not in wanted or hits[header] >= TABLE_EXPANSION_MAX_ROWS:
+            continue
+        hits[header] += 1
+        # Sengaja TANPA "_distance": baris ini tidak lolos pencarian, dia
+        # ditarik karena tabelnya relevan. Membubuhkan skor palsu akan
+        # mencemari confidence dan pemilihan citation.
+        extra.append(LCDocument(page_content=text, metadata=dict(meta or {})))
+    return docs + extra
+
+
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
     user_divisi: str | None = None, weight_hint: str | None = None,
@@ -534,6 +590,34 @@ def retrieve_context(
     docs = ensemble.invoke(search_query)
 
     docs = docs[:top_k]
+
+    # ── 2026-08-31: lengkapi baris tabel untuk pertanyaan sintesis ──────────
+    # Ditanya "functional requirement", jawaban cuma memuat 5 dari 12 FR dan
+    # menyajikannya seolah lengkap. Chunk tabel FR utuh ADA di indeks (12
+    # baris, 2913 karakter) tapi tidak masuk 20 besar sama sekali.
+    #
+    # Penyebabnya bukan peringkat, melainkan batas model embedding:
+    # all-MiniLM-L6-v2 punya max_seq_length 256 token (~1.024 karakter). Chunk
+    # 2.913 karakter DIPOTONG -- dua pertiga isinya tidak pernah ikut
+    # membentuk vektornya, dan sisanya jadi rata-rata 12 topik sehingga tumpul
+    # untuk kueri pendek. Sementara 12 chunk satu-baris masing-masing pendek,
+    # fokus, dan semuanya memuat header yang sama, jadi mereka menyapu bersih
+    # peringkat atas. Menaikkan top_k TIDAK menolong: chunk utuhnya tidak
+    # pernah masuk peringkat berapa pun.
+    #
+    # Jadi kelengkapan tidak bisa digantungkan pada chunk raksasa. Yang dipakai
+    # adalah sinyal yang sudah ada: kalau beberapa baris dari tabel yang SAMA
+    # ikut terambil, tabel itu jelas relevan -- sisanya tinggal dilengkapi
+    # secara deterministik.
+    #
+    # Aturannya jadi simetris dengan penjagaan identifier di chat/routes.py:
+    #   kueri menyebut identifier  -> SATU baris   (yang paling spesifik)
+    #   kueri sintesis             -> SEMUA baris  (yang paling lengkap)
+    #
+    # Batasan yang diketahui: cuma melengkapi dari dokumen chat ini
+    # (kb_general + chat_id). Tabel di KB divisi belum ikut.
+    if not extract_query_identifiers(search_query):
+        docs = _expand_table_rows(docs, chat_id, collection_name)
 
     # Distance cuma ada di dokumen leg vector (chat/FAQ/KB divisi) -- BM25 tidak punya angka yang sebanding
     distance_by_index = {i: d.metadata["_distance"] for i, d in enumerate(docs) if "_distance" in d.metadata}

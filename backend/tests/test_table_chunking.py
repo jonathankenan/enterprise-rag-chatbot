@@ -197,3 +197,98 @@ def test_teks_kosong_aman():
     assert chunk_text("") == []
     assert chunk_text("\n\n\n") == []
     assert count_table_body_rows("") == 0
+
+
+# --------------------------------------------------------------------------
+# Melengkapi baris tabel untuk pertanyaan sintesis
+#
+# Chunk tabel utuh TIDAK bisa diandalkan untuk tabel besar: all-MiniLM-L6-v2
+# punya max_seq_length 256 token (~1.024 char), jadi chunk tabel FR yang 2.913
+# char dipotong dan tidak pernah masuk peringkat berapa pun. Kelengkapan
+# ditarik dari sinyal lain: kalau beberapa baris tabel yang sama ikut terambil,
+# tabel itu relevan.
+# --------------------------------------------------------------------------
+import app.rag.vectorstore as vs
+from app.rag.vectorstore import table_header_of, TABLE_EXPANSION_MIN_HITS
+
+
+class _FakeCollection:
+    """Berdiri di tempat Chroma: cuma perlu .get() yang mengembalikan chunk."""
+    def __init__(self, docs):
+        self._docs = docs
+
+    def get(self, where=None, include=None):
+        return {"documents": list(self._docs),
+                "metadatas": [{"chat_id": "c1", "page": 7} for _ in self._docs]}
+
+
+class _Doc:
+    def __init__(self, text):
+        self.page_content = text
+        self.metadata = {}
+
+
+def _row_chunks(n=6):
+    header = "|Req<br>ID|Category|Description|Priority|"
+    sep = "|---|---|---|---|"
+    return [f"{header}\n{sep}\n|**FR-{i:02d}**|Kategori|Deskripsi|**Must**|" for i in range(1, n + 1)]
+
+
+def test_header_tabel_jadi_identitas():
+    baris = _row_chunks(2)
+    assert table_header_of(baris[0]) == table_header_of(baris[1])
+    assert table_header_of("paragraf biasa") is None
+
+
+def test_baris_lain_ditarik_saat_beberapa_baris_terambil(monkeypatch):
+    semua = _row_chunks(6)
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    diambil = [_Doc(semua[0]), _Doc(semua[1])]          # 2 baris = di atas ambang
+    hasil = vs._expand_table_rows(diambil, "c1", "kb_general")
+    assert len(hasil) == 6, "seluruh baris tabel harus ikut terbawa"
+
+
+def test_satu_baris_saja_tidak_memicu(monkeypatch):
+    """
+    Satu baris bukan sinyal tabelnya relevan. Diukur pada eval set: ambang 1
+    menggelembungkan konteks 38%, ambang 2 cuma 4%.
+    """
+    assert TABLE_EXPANSION_MIN_HITS >= 2
+    semua = _row_chunks(6)
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    hasil = vs._expand_table_rows([_Doc(semua[0])], "c1", "kb_general")
+    assert len(hasil) == 1
+
+
+def test_tidak_menduplikasi_yang_sudah_ada(monkeypatch):
+    semua = _row_chunks(3)
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    hasil = vs._expand_table_rows([_Doc(t) for t in semua], "c1", "kb_general")
+    assert len(hasil) == 3
+    assert len({d.page_content for d in hasil}) == 3
+
+
+def test_prosa_tidak_ikut_tertarik(monkeypatch):
+    semua = _row_chunks(4) + ["Paragraf biasa yang kebetulan tersimpan."]
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    hasil = vs._expand_table_rows([_Doc(semua[0]), _Doc(semua[1])], "c1", "kb_general")
+    assert all("Paragraf biasa" not in d.page_content for d in hasil)
+
+
+def test_batas_atas_menjaga_tabel_raksasa(monkeypatch):
+    semua = _row_chunks(vs.TABLE_EXPANSION_MAX_ROWS + 20)
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    hasil = vs._expand_table_rows([_Doc(semua[0]), _Doc(semua[1])], "c1", "kb_general")
+    assert len(hasil) <= vs.TABLE_EXPANSION_MAX_ROWS
+
+
+def test_baris_tarikan_tidak_membawa_skor_palsu(monkeypatch):
+    """
+    Baris ini tidak lolos pencarian -- dia ditarik karena tabelnya relevan.
+    Membubuhkan _distance akan mencemari confidence dan pemilihan citation.
+    """
+    semua = _row_chunks(4)
+    monkeypatch.setattr(vs, "get_collection", lambda name: _FakeCollection(semua))
+    hasil = vs._expand_table_rows([_Doc(semua[0]), _Doc(semua[1])], "c1", "kb_general")
+    for d in hasil[2:]:
+        assert "_distance" not in d.metadata

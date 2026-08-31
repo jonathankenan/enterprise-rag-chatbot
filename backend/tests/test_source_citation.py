@@ -4,10 +4,10 @@ Tests for SRS FCR-003 poin 12.a — source citation.
 Run from the repo root:      python backend/tests/test_source_citation.py
 (or with pytest:             pytest backend/tests/test_source_citation.py)
 
-No Postgres, no Ollama, no API keys, no Chroma required. The two units under
-test are pure functions, so we load them straight out of the source files by
-AST and exec them in a clean namespace — what runs here is verbatim the code
-that ships, not a copy that can drift.
+No Postgres, no Ollama, no API keys, and no Chroma data. The two units under
+test are pure functions: the tail of retrieve_context() is sliced out by AST
+and exec'd over a namespace seeded from the real module, so what runs here is
+verbatim the code that ships, not a copy that can drift.
 
   * _build_source_citations()  — backend/app/chat/routes.py
   * the top-match / confidence tail of retrieve_context()
@@ -56,28 +56,28 @@ _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
 _tail = "\n".join(l[4:] if l.startswith("    ") else l for l in _tail.split("\n"))
 _helper = _segment(VECTOR_SRC, "_distance_to_similarity_percent")
-# The tail gained a lexical gate on 2026-08-26 (_has_query_id/_is_toc), so it
-# now also closes over `re`, the tokenizer, the identifier regex and the two
-# identifier helpers. Loaded the same way as everything else here — from the
-# shipping source, not a copy.
-_lexical = "\n".join([
-    _segment(VECTOR_SRC, "custom_bm25_tokenizer"),
-    _assignment(VECTOR_SRC, "_IDENTIFIER_RE"),
-    _segment(VECTOR_SRC, "extract_query_identifiers"),
-    _segment(VECTOR_SRC, "text_mentions_identifier"),
-    # 2026-08-26: chunk juga ditandai id_in_example, jadi tail-nya sekarang
-    # ikut menutup identifier_only_in_example beserta pola wilayah contohnya.
-    _assignment(VECTOR_SRC, "_FENCED_RE"),
-    _assignment(VECTOR_SRC, "_INLINE_CODE_RE"),
-    _assignment(VECTOR_SRC, "_JSON_PAIR_RE"),
-    _segment(VECTOR_SRC, "_example_spans"),
-    _segment(VECTOR_SRC, "identifier_only_in_example"),
-    # 2026-08-31: chunk juga ditandai table_body_rows (tabel diindeks utuh DAN
-    # per baris, lihat chunk_text), jadi tail-nya ikut menutup penghitungnya.
-    _assignment(VECTOR_SRC, "_TABLE_ROW_RE"),
-    _assignment(VECTOR_SRC, "_TABLE_SEP_RE"),
-    _segment(VECTOR_SRC, "count_table_body_rows"),
-])
+# The tail closes over several module-level helpers (the lexical identifier
+# gate, the example detector, the table-row counter, the synthesis expansion).
+# Listing them by hand broke these tests four separate times: every new helper
+# `retrieve_context` touched had to be registered here or ~19 tests failed with
+# a bare NameError, which reads like broken logic rather than a stale list.
+#
+# So the namespace is seeded from the REAL module instead. Same property the
+# hand-written list was after -- what runs is the shipping code, not a copy --
+# but the dependency list now maintains itself.
+#
+# Importing app.rag.vectorstore is safe here: it touches no database and no
+# network at import time. It does load chromadb/langchain, which is why this
+# file no longer claims to need nothing installed.
+import app.rag.vectorstore as _vs
+
+
+# Chroma is never reached: _expand_table_rows() is the tail's only caller of
+# get_collection(), and an empty store makes it a no-op. These tests are about
+# citation selection; expansion has its own tests in test_table_chunking.py.
+class _EmptyCollection:
+    def get(self, *a, **k):
+        return {"documents": [], "metadatas": []}
 
 
 def _config_default(name: str):
@@ -102,9 +102,13 @@ def select(docs, top_k=10, search_query=""):
     its own, exactly as they did before the gate existed. Pass a real query to
     test the gate itself.
     """
-    ns = {"docs": list(docs), "top_k": top_k, "settings": _Settings,
-          "search_query": search_query, "re": __import__("re")}
-    exec(_lexical, ns)
+    ns = dict(vars(_vs))
+    # chat_id/collection_name adalah PARAMETER retrieve_context, bukan helper
+    # modul -- tail memakainya sejak ekspansi baris tabel ditambahkan.
+    ns.update({"docs": list(docs), "top_k": top_k, "settings": _Settings,
+               "chat_id": "test-chat", "collection_name": "kb_general",
+               "search_query": search_query,
+               "get_collection": lambda *a, **k: _EmptyCollection()})
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
     return ns["__r__"]
@@ -456,7 +460,7 @@ def test_query_without_identifier_leaves_the_gate_inert():
 
 # ------------------------------------ identifier extraction (added 2026-08-26)
 _lex_ns: dict = {"re": __import__("re")}
-exec(_lexical, _lex_ns)
+_lex_ns.update(vars(_vs))
 extract_ids = _lex_ns["extract_query_identifiers"]
 
 
