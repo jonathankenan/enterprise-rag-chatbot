@@ -5,9 +5,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
-from app.models import Role, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, TicketStatus
+from app.models import Role, Chat, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, TicketStatus
 from app.schemas import HelpdeskMessageResponse
 from app.auth.utils import resolve_user_from_token
+from app.helpdesk.routes import serialize_helpdesk_message
 
 router = APIRouter()
 
@@ -52,7 +53,10 @@ async def ticket_chat(websocket: WebSocket, ticket_id: str, token: str = Query(.
         if not ticket:
             await websocket.close(code=4404)
             return
-        if ticket.user_id != user.id and user.role != Role.IT_ADMIN:
+        # Aturan akses SAMA dengan REST (_get_ticket_or_403): admin divisi lain
+        # tidak boleh ikut nimbrung di tiket yang bukan tanggung jawabnya.
+        is_handler = user.role == Role.IT_ADMIN and user.divisi == ticket.target_divisi
+        if ticket.user_id != user.id and not is_handler:
             await websocket.close(code=4403)
             return
 
@@ -71,9 +75,18 @@ async def ticket_chat(websocket: WebSocket, ticket_id: str, token: str = Query(.
                     await websocket.send_json({"error": "Tiket ini sudah ditutup"})
                     continue
 
+                # Lampiran percakapan cuma sah kalau chat itu MILIK pengirim —
+                # kalau tidak, lampiran jadi jalan pintas membaca chat orang lain.
+                attached_id = data.get("attached_chat_id") or None
+                if attached_id:
+                    owns = db.query(Chat).filter(Chat.id == attached_id, Chat.user_id == user.id).first()
+                    if not owns:
+                        await websocket.send_json({"error": "Percakapan yang dilampirkan tidak ditemukan"})
+                        continue
+
                 msg = HelpdeskMessage(
                     ticket_id=ticket_id, sender_role=sender_role,
-                    sender_id=user.id, content=content,
+                    sender_id=user.id, content=content, attached_chat_id=attached_id,
                 )
                 db.add(msg)
                 db.commit()
@@ -81,7 +94,7 @@ async def ticket_chat(websocket: WebSocket, ticket_id: str, token: str = Query(.
 
                 await manager.broadcast(
                     ticket_id,
-                    HelpdeskMessageResponse.model_validate(msg).model_dump(mode="json"),
+                    serialize_helpdesk_message(msg, db).model_dump(mode="json"),
                 )
         except WebSocketDisconnect:
             pass

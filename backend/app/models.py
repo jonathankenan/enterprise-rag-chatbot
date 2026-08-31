@@ -50,6 +50,17 @@ class Role:
 
     AUDIT_VIEWERS = (IT_ADMIN, COMPLIANCE, AUDITOR)  # role yang boleh baca audit log guardrail
 
+    # Role yang boleh DIPILIH SENDIRI saat daftar: semua KECUALI IT_ADMIN.
+    # IT_ADMIN tetap dikecualikan karena dialah yang menetapkan role orang lain
+    # dan memegang setelan sistem — kalau bisa diklaim sendiri lewat form
+    # publik, seluruh kendali akses jadi tidak ada artinya.
+    # Ditulis eksplisit, bukan comprehension: di dalam badan class, generator
+    # expression tidak bisa membaca nama sekelas (IT_ADMIN) -> NameError.
+    SELF_REGISTERABLE = (
+        DESIGNER, MLOPS, CONSUMER_INTERNAL, CONSUMER_EIPO,
+        BUSINESS_USER_DESIGNER, COMPLIANCE, AUDITOR,
+    )
+
 
 class Divisi:
     """9 divisi sesuai SRS (hal. 8-9, 64-70), terpisah dari Role — dasar Multi-Tenant KB (SRS hal. 14 Rules poin 1)."""
@@ -148,14 +159,20 @@ class TicketStatus:
 
 
 class HelpdeskTicket(Base):
-    """Tiket eskalasi ke human helpdesk (SRS poin 7) — chat_id saja, tanpa snapshot riwayat (ambil langsung dari tabel Message biar tidak basi/duplikat)."""
+    """Tiket eskalasi ke human helpdesk (SRS poin 7). Tiket BUKAN milik satu percakapan: chat_id nullable, dan konteks percakapan dilampirkan per-pesan lewat HelpdeskMessage.attached_chat_id."""
     __tablename__ = "helpdesk_tickets"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    chat_id = Column(UUID(as_uuid=False), ForeignKey("chats.id"), nullable=False)
+    chat_id = Column(UUID(as_uuid=False), ForeignKey("chats.id"), nullable=True)  # cuma terisi lewat jalur eskalasi confidence rendah
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False)
     message_id = Column(UUID(as_uuid=False), ForeignKey("messages.id"), nullable=True)  # jawaban AI yang memicu eskalasi
     confidence_score = Column(Integer, nullable=True)
+    # Siapa yang menangani tiket ini. Disimpan (bukan diturunkan dari divisi
+    # pembuat saat query) supaya tiket lama tidak berpindah tangan kalau
+    # divisi pembuatnya diubah admin di kemudian hari.
+    #   "PTI" -> ditangani IT Admin divisi PTI
+    #   None  -> ditangani IT Admin GLOBAL (dipakai saat pembuatnya admin divisi)
+    target_divisi = Column(String, nullable=True)
     status = Column(String, default=TicketStatus.OPEN)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -176,6 +193,7 @@ class HelpdeskMessage(Base):
     sender_role = Column(String, nullable=False)  # HelpdeskSender.USER | ADMIN
     sender_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)  # nullable buat kemungkinan pesan sistem nanti
     content = Column(EncryptedText, nullable=False)
+    attached_chat_id = Column(UUID(as_uuid=False), ForeignKey("chats.id"), nullable=True)  # percakapan AI yang dilampirkan user ke pesan ini
     created_at = Column(DateTime, default=datetime.utcnow)
 
     sender = relationship("User")

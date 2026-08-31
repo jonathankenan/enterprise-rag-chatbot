@@ -48,6 +48,10 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
         email=payload.email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
+        # Tanpa pilihan -> default kolom (consumer_internal). Nilai yang masuk
+        # sini sudah lolos whitelist Role.SELF_REGISTERABLE & Divisi.ALL di schema.
+        **({"role": payload.role} if payload.role else {}),
+        divisi=payload.divisi,
     )
     db.add(user)
     db.commit()

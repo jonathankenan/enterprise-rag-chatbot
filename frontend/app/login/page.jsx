@@ -3,6 +3,8 @@ import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../lib/api";
+import { AuthShell, AuthTitle, AuthField, AuthPasswordField, AuthSubmit } from "../components/AuthLayout";
+import { IconMail, IconLock } from "../components/Icons";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -19,6 +21,7 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [azureLoading, setAzureLoading] = useState(false);
+  const [showResetHint, setShowResetHint] = useState(false);
 
   // SRS hal. 64: "User dapat login menggunakan credential Azure AD
   // (primary) atau user internal platform (alternative)" — tombol ini
@@ -84,45 +87,63 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ maxWidth: 360, margin: "80px auto", padding: 24 }}>
-      <h1>Masuk</h1>
+    <AuthShell>
+      <AuthTitle sub={<>Baru di Website IDX? <Link href="/register">Daftar disini</Link></>}>
+        Masuk ke akun Anda
+      </AuthTitle>
+
       {sessionExpired && (
-        <p style={{ background: "#fff3cd", border: "1px solid #ffe69c", padding: 10, borderRadius: 4, fontSize: 13, color: "#664d03", marginBottom: 12 }}>
+        <p style={{ background: "var(--idx-warning-tint)", border: "1px solid var(--idx-warning-border)", padding: 10, borderRadius: 6, fontSize: 13, color: "var(--idx-warning)", marginBottom: 14 }}>
           Sesi Anda berakhir (tidak ada aktivitas selama 15 menit atau token kadaluarsa). Silakan login kembali.
         </p>
       )}
       {justRegistered && (
-        <p style={{ color: "green", marginBottom: 12 }}>
+        <p style={{ color: "var(--idx-success)", marginBottom: 14, fontSize: 13.5 }}>
           Akun berhasil dibuat, silakan masuk.
         </p>
       )}
+
       <form onSubmit={handleLogin}>
-        <input
+        <AuthField
+          icon={<IconMail />}
           type="email"
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required
-          style={{ width: "100%", padding: 8, marginBottom: 12 }}
         />
-        <input
-          type="password"
+        <AuthPasswordField
+          icon={<IconLock />}
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           required
-          style={{ width: "100%", padding: 8, marginBottom: 12 }}
         />
-        {error && <p style={{ color: "red" }}>{error}</p>}
-        <button type="submit" disabled={loading} style={{ width: "100%", padding: 10 }}>
-          {loading ? "Memproses..." : "Masuk"}
-        </button>
+        {error && <p style={{ color: "var(--idx-danger)", fontSize: 13 }}>{error}</p>}
+        <AuthSubmit disabled={loading}>{loading ? "Memproses..." : "Masuk"}</AuthSubmit>
       </form>
 
-      <div style={{ display: "flex", alignItems: "center", margin: "16px 0", color: "#999", fontSize: 12 }}>
-        <div style={{ flex: 1, borderTop: "1px solid #ddd" }} />
-        <span style={{ padding: "0 8px" }}>atau</span>
-        <div style={{ flex: 1, borderTop: "1px solid #ddd" }} />
+      <div style={{ textAlign: "right", marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={() => setShowResetHint((v) => !v)}
+          style={{ background: "transparent", border: "none", padding: 0, color: "var(--idx-red)", fontSize: 14, cursor: "pointer" }}
+        >
+          Lupa Kata Sandi?
+        </button>
+      </div>
+      {/* Belum ada alur reset mandiri di backend — diarahkan ke IT Admin,
+          bukan tombol yang tidak melakukan apa-apa. */}
+      {showResetHint && (
+        <p style={{ marginTop: 8, fontSize: 12.5, color: "var(--idx-text-muted)", background: "var(--idx-surface-alt)", padding: 10, borderRadius: 6 }}>
+          Reset password dilakukan oleh IT Admin. Hubungi IT Admin divisi Anda untuk mengatur ulang kata sandi.
+        </p>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", margin: "20px 0 14px", color: "var(--idx-text-subtle)", fontSize: 12 }}>
+        <div style={{ flex: 1, borderTop: "1px solid var(--idx-border)" }} />
+        <span style={{ padding: "0 10px" }}>atau</span>
+        <div style={{ flex: 1, borderTop: "1px solid var(--idx-border)" }} />
       </div>
 
       <button
@@ -130,18 +151,14 @@ export default function LoginPage() {
         onClick={handleAzureLogin}
         disabled={azureLoading}
         style={{
-          width: "100%", padding: 10, background: "#2f2f2f", color: "white",
-          border: "none", borderRadius: 4, cursor: azureLoading ? "wait" : "pointer",
-          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          width: "100%", padding: "13px 0", background: "var(--idx-text)", color: "var(--idx-bg)",
+          border: "none", borderRadius: 8, cursor: azureLoading ? "wait" : "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14, fontWeight: 600,
         }}
       >
-        <span style={{ fontWeight: "bold" }}>⊞</span>
+        <span style={{ fontWeight: "bold", fontSize: 15 }}>⊞</span>
         {azureLoading ? "Mengalihkan ke Microsoft..." : "Login dengan Microsoft"}
       </button>
-
-      <p style={{ marginTop: 16, fontSize: 14 }}>
-        Belum punya akun? <Link href="/register">Daftar di sini</Link>
-      </p>
-    </div>
+    </AuthShell>
   );
 }

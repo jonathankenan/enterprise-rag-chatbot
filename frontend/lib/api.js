@@ -62,10 +62,10 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  register: (email, password, full_name) =>
+  register: (email, password, full_name, role = null, divisi = null) =>
     request("/api/auth/register", {
       method: "POST",
-      body: JSON.stringify({ email, password, full_name }),
+      body: JSON.stringify({ email, password, full_name, role, divisi }),
     }),
 
   login: (email, password) =>
@@ -218,19 +218,35 @@ export const api = {
   listTickets: (statusFilter) =>
     request(`/api/helpdesk/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
 
-  // messageId opsional — kosong berarti eskalasi MANUAL (tombol "Hubungi
-  // Admin" yang selalu terlihat), terisi berarti dari banner tawaran
-  // confidence rendah (perilaku lama).
-  createTicket: (chatId, messageId = null) =>
+  // Tiket lahir saat pesan PERTAMA dikirim (bukan saat halaman dibuka), supaya
+  // membuka "Hubungi Admin" tanpa jadi bertanya tidak membanjiri antrean admin.
+  createTicketWithMessage: (content, attachedChatId = null) =>
+    request("/api/helpdesk/tickets", {
+      method: "POST",
+      body: JSON.stringify({ content, attached_chat_id: attachedChatId }),
+    }),
+
+  // Jalur banner confidence rendah — tetap terikat ke jawaban AI yang memicu.
+  escalateMessage: (chatId, messageId) =>
     request("/api/helpdesk/tickets", {
       method: "POST",
       body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
     }),
 
+  // Tiket terbuka yang DIBUAT user ini — beda dari listTickets() yang untuk
+  // IT Admin berisi antrean divisinya, bukan percakapannya sendiri.
+  getMyOpenTicket: () => request("/api/helpdesk/my-open-ticket"),
+
   getTicket: (ticketId) => request(`/api/helpdesk/tickets/${ticketId}`),
+
+  getAttachedChat: (ticketId, chatId) =>
+    request(`/api/helpdesk/tickets/${ticketId}/attached-chat/${chatId}`),
 
   closeTicket: (ticketId) =>
     request(`/api/helpdesk/tickets/${ticketId}/close`, { method: "POST" }),
+
+  deleteTicket: (ticketId) =>
+    request(`/api/helpdesk/tickets/${ticketId}`, { method: "DELETE" }),
 
   // WebSocket tidak lewat request() (bukan HTTP fetch biasa) — helper ini
   // cuma menyusun URL-nya (ws:// bukan http://) + token lewat query param,
@@ -336,4 +352,4 @@ export const api = {
   },
 
   deleteKbDocument: (docId) => request(`/api/kb/documents/${docId}`, { method: "DELETE" }),
-};
+};

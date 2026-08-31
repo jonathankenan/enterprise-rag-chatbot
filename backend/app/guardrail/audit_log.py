@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.models import AuditLog
+from app.models import AuditLog, User
 
 
 class EventType:
@@ -30,6 +30,7 @@ class EventType:
 
     HELPDESK_ESCALATED = "helpdesk_escalated"    # FCR-003 poin 7
     HELPDESK_TICKET_CLOSED = "helpdesk_ticket_closed"
+    HELPDESK_TICKET_DELETED = "helpdesk_ticket_deleted"
     USER_ROLE_CHANGED = "user_role_changed"
     COMMERCIAL_LLM_TOGGLED = "commercial_llm_toggled"
     EXPORT_ROLES_CHANGED = "export_roles_changed"  # F2-08
@@ -69,6 +70,7 @@ _SEVERITY_MAP = {
     EventType.PASSWORD_CHANGED: Severity.LOW,
     EventType.HELPDESK_ESCALATED: Severity.MEDIUM,
     EventType.HELPDESK_TICKET_CLOSED: Severity.LOW,
+    EventType.HELPDESK_TICKET_DELETED: Severity.MEDIUM,  # destruktif & menghilangkan jejak percakapan
     EventType.USER_ROLE_CHANGED: Severity.HIGH,
     EventType.COMMERCIAL_LLM_TOGGLED: Severity.CRITICAL,  # mempengaruhi semua user sekaligus
     EventType.EXPORT_ROLES_CHANGED: Severity.MEDIUM,
@@ -127,11 +129,26 @@ def get_events_by_user(db: Session, user_id: str, limit: int = 50) -> list[Audit
     )
 
 
-def count_events_by_type(db: Session, since_hours: int = 24) -> dict[str, int]:
+def scope_to_divisi(query, divisi: str | None):
+    """
+    Batasi query AuditLog ke kejadian yang dilakukan orang di satu divisi.
+    divisi=None berarti tanpa batas (admin global melihat semuanya).
+
+    Baris dengan user_id NULL (mis. login gagal dari email yang tidak
+    terdaftar) sengaja IKUT TERSARING KELUAR untuk admin divisi: pelakunya
+    tidak bisa dipastikan milik divisi mana, jadi menampilkannya sama saja
+    dengan membocorkan kejadian di luar wewenangnya.
+    """
+    if divisi is None:
+        return query
+    return query.join(User, AuditLog.user_id == User.id).filter(User.divisi == divisi)
+
+
+def count_events_by_type(db: Session, since_hours: int = 24, divisi: str | None = None) -> dict[str, int]:
     """Hitung jumlah kejadian per tipe dalam N jam terakhir — untuk dashboard ringkasan/tren."""
     since = datetime.utcnow() - timedelta(hours=since_hours)
     results = (
-        db.query(AuditLog.event_type, func.count(AuditLog.id))
+        scope_to_divisi(db.query(AuditLog.event_type, func.count(AuditLog.id)), divisi)
         .filter(AuditLog.created_at >= since)
         .group_by(AuditLog.event_type)
         .all()
@@ -171,9 +188,10 @@ def search_events(
     sort_order: str = "desc",
     limit: int = 100,
     offset: int = 0,
+    divisi: str | None = None,
 ) -> list[AuditLog]:
     """Pencarian audit log serba-guna (SRS ISR-004.d) — search_text dijalankan di level aplikasi pasca-dekripsi karena `detail` terenkripsi, SQL ILIKE tidak bisa dipakai."""
-    query = db.query(AuditLog)
+    query = scope_to_divisi(db.query(AuditLog), divisi)
     if event_type:
         query = query.filter(AuditLog.event_type == event_type)
     if severity:

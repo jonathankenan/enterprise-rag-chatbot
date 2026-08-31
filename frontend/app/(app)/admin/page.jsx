@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "../../lib/api";
+import { api } from "../../../lib/api";
 
 // Samakan dengan Role.ALL di backend/app/models.py
 const ALL_ROLES = [
@@ -197,7 +197,7 @@ export default function AdminUsersPage() {
     return (
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
         <h1>Akses Ditolak</h1>
-        <p style={{ color: "#666" }}>Halaman ini hanya untuk role IT Admin.</p>
+        <p style={{ color: "var(--idx-text-muted)" }}>Halaman ini hanya untuk role IT Admin.</p>
         <Link href="/chat">Kembali ke Chat</Link>
       </div>
     );
@@ -205,40 +205,34 @@ export default function AdminUsersPage() {
 
   return (
     <div style={{ padding: "20px 40px", maxWidth: 1000, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h1 style={{ margin: 0 }}>Manajemen User</h1>
-        <div>
-          <Link href="/admin/kb">Knowledge Base Divisi</Link>
-          {" · "}
-          <Link href="/helpdesk">Helpdesk</Link>
-          {" · "}
-          <Link href="/chat">← Kembali ke Chat</Link>
-        </div>
-      </div>
+      {/* Navigasi (termasuk Tiket Helpdesk) ada di dropdown "Kelola User" pada sidebar kiri. */}
+      <h1 className="page-title" style={{ margin: 0 }}>Manajemen User</h1>
 
-      <p style={{ margin: "-12px 0 16px", fontSize: 13, color: "#666" }}>
-        Anda: {isGlobalAdmin ? <b>IT Admin Global</b> : <>IT Admin Divisi <b>{currentUser.divisi}</b> (cuma kelola user &amp; KB divisi ini)</>}
+      <p style={{ margin: "14px 0 18px", fontSize: 13, color: "var(--idx-text-muted)", maxWidth: 760 }}>
+        Atur role dan divisi setiap pengguna lewat dropdown di tabel bawah — perubahan langsung
+        tersimpan. Panel di bawah ini mengatur kebijakan yang berlaku untuk seluruh pengguna.
+        {!isGlobalAdmin && <> Sebagai admin divisi <b>{currentUser.divisi}</b>, Anda hanya melihat dan mengelola pengguna di divisi tersebut.</>}
       </p>
 
-      {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
+      {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
       {/* SRS FCR-003 Rules poin 2: button force-stop LLM Commercial */}
       {systemSettings && (
         <div style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
           padding: 16, marginBottom: 20, borderRadius: 8,
-          background: systemSettings.commercial_llm_force_stopped ? "#f8d7da" : "#f9f9f9",
-          border: `1px solid ${systemSettings.commercial_llm_force_stopped ? "#f5c2c7" : "#ddd"}`,
+          background: systemSettings.commercial_llm_force_stopped ? "var(--idx-danger-tint)" : "var(--idx-surface)",
+          border: `1px solid ${systemSettings.commercial_llm_force_stopped ? "var(--idx-danger-border)" : "var(--idx-border)"}`,
         }}>
           <div>
             <b>Force-Stop LLM Commercial</b>
-            <p style={{ margin: "4px 0 0", fontSize: 13, color: "#666" }}>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--idx-text-muted)" }}>
               {systemSettings.commercial_llm_force_stopped
-                ? "🔴 AKTIF — semua chat dipaksa ke on-prem, apa pun provider yang dipilih user (Groq/Gemini/Mistral/Cloudflare dimatikan sementara)."
-                : "🟢 Tidak aktif — user bebas pilih provider commercial seperti biasa."}
+                ? "AKTIF — semua chat dipaksa ke on-prem, apa pun provider yang dipilih user (Groq/Gemini/Mistral/Cloudflare dimatikan sementara)."
+                : "Tidak aktif — user bebas pilih provider commercial seperti biasa."}
             </p>
-            <p style={{ margin: "6px 0 0", fontSize: 12, color: "#b26a00" }}>
-              ⚠️ Tombol darurat: berlaku ke <b>SELURUH divisi</b>, bukan cuma divisi Anda.
+            <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--idx-warning)" }}>
+              Tombol darurat: berlaku ke <b>SELURUH divisi</b>, bukan cuma divisi Anda.
             </p>
           </div>
           <button
@@ -246,11 +240,13 @@ export default function AdminUsersPage() {
             disabled={togglingLlm}
             style={{
               padding: "10px 20px", border: "none", borderRadius: 4, cursor: togglingLlm ? "wait" : "pointer",
-              background: systemSettings.commercial_llm_force_stopped ? "#28a745" : "#d32f2f",
-              color: "white", fontWeight: "bold",
+              // Merah brand yang sama dengan tombol aksi lain — bukan --idx-danger,
+              // supaya tidak ada dua nuansa merah berbeda di satu halaman.
+              background: systemSettings.commercial_llm_force_stopped ? "var(--idx-success)" : "var(--idx-red)",
+              color: "var(--idx-bg)", fontWeight: "bold",
             }}
           >
-            {togglingLlm ? "Memproses..." : systemSettings.commercial_llm_force_stopped ? "Nyalakan Kembali" : "⛔ Force Stop"}
+            {togglingLlm ? "Memproses..." : systemSettings.commercial_llm_force_stopped ? "Nyalakan Kembali" : "Force Stop"}
           </button>
         </div>
       )}
@@ -260,9 +256,9 @@ export default function AdminUsersPage() {
           efeknya lintas divisi, jadi bukan wewenang admin divisi. Force-stop di atas
           SENGAJA dikecualikan: emergency kill switch, lihat komentar di admin/routes.py. */}
       {systemSettings && isGlobalAdmin && (
-        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "var(--idx-surface)", border: "1px solid var(--idx-border)" }}>
           <b>Role yang Boleh Export PDF</b>
-          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "var(--idx-text-muted)" }}>
             User dengan role di luar daftar ini akan ditolak (403) saat mencoba export percakapan ke PDF.
             IT Admin selalu ikut otomatis supaya tidak terkunci dari fitur ini.
           </p>
@@ -282,7 +278,7 @@ export default function AdminUsersPage() {
           <button
             onClick={handleSaveExportRoles}
             disabled={savingExportRoles}
-            style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingExportRoles ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+            style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingExportRoles ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
           >
             {savingExportRoles ? "Menyimpan..." : "Simpan"}
           </button>
@@ -291,9 +287,9 @@ export default function AdminUsersPage() {
 
       {/* SRS poin 4.c-d: rate limiting & API limiter dikonfigurasi IT Admin (dulu cuma .env + restart) */}
       {systemSettings && isGlobalAdmin && (
-        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "var(--idx-surface)", border: "1px solid var(--idx-border)" }}>
           <b>Rate Limit Chat</b>
-          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "var(--idx-text-muted)" }}>
             Batas jumlah pesan per user dalam satu jendela waktu. Melebihi batas ini akan ditolak (429) sementara.
           </p>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
@@ -322,7 +318,7 @@ export default function AdminUsersPage() {
             <button
               onClick={handleSaveRateLimit}
               disabled={savingRateLimit}
-              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRateLimit ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRateLimit ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
             >
               {savingRateLimit ? "Menyimpan..." : "Simpan"}
             </button>
@@ -332,9 +328,9 @@ export default function AdminUsersPage() {
 
       {/* SRS poin 6: konfigurasi retensi data historis */}
       {systemSettings && isGlobalAdmin && (
-        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "#f9f9f9", border: "1px solid #ddd" }}>
+        <div style={{ padding: 16, marginBottom: 20, borderRadius: 8, background: "var(--idx-surface)", border: "1px solid var(--idx-border)" }}>
           <b>Retensi Data Historis</b>
-          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "#666" }}>
+          <p style={{ margin: "4px 0 12px", fontSize: 13, color: "var(--idx-text-muted)" }}>
             Chat yang lebih tua dari jumlah hari ini akan diarsipkan (bukan dihapus permanen) saat kebijakan diterapkan.
             Kosongkan untuk tanpa batas (retensi nonaktif).
           </p>
@@ -354,7 +350,7 @@ export default function AdminUsersPage() {
             <button
               onClick={handleSaveRetention}
               disabled={savingRetention}
-              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRetention ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRetention ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
             >
               {savingRetention ? "Menyimpan..." : "Simpan Kebijakan"}
             </button>
@@ -365,25 +361,25 @@ export default function AdminUsersPage() {
               style={{
                 padding: "8px 16px", border: "none", borderRadius: 4,
                 cursor: applyingRetention || !systemSettings.chat_retention_days ? "not-allowed" : "pointer",
-                background: "#555", color: "white", fontWeight: "bold",
+                background: "var(--idx-text-body)", color: "var(--idx-bg)", fontWeight: "bold",
                 opacity: !systemSettings.chat_retention_days ? 0.5 : 1,
               }}
             >
               {applyingRetention ? "Menerapkan..." : "Terapkan Sekarang"}
             </button>
             {retentionResult !== null && (
-              <span style={{ fontSize: 13, color: "#2e7d32" }}>
-                ✓ {retentionResult} percakapan diarsipkan
+              <span style={{ fontSize: 13, color: "var(--idx-success)" }}>
+                {retentionResult} percakapan diarsipkan
               </span>
             )}
           </div>
         </div>
       )}
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
-            <tr style={{ background: "#f1f1f1", textAlign: "left" }}>
+            <tr style={{ background: "var(--idx-surface-alt)", textAlign: "left" }}>
               <th style={{ padding: 10 }}>Email</th>
               <th style={{ padding: 10 }}>Nama</th>
               <th style={{ padding: 10 }}>Terdaftar</th>
@@ -393,7 +389,7 @@ export default function AdminUsersPage() {
           </thead>
           <tbody>
             {users.map((u) => (
-              <tr key={u.id} style={{ borderTop: "1px solid #eee" }}>
+              <tr key={u.id} style={{ borderTop: "1px solid var(--idx-border-light)" }}>
                 <td style={{ padding: 10 }}>{u.email}</td>
                 <td style={{ padding: 10 }}>{u.full_name || "-"}</td>
                 <td style={{ padding: 10 }}>{new Date(u.created_at.endsWith("Z") ? u.created_at : u.created_at + "Z").toLocaleDateString()}</td>

@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "../../../lib/api";
+import { api } from "../../../../lib/api";
 
 export default function HelpdeskPage() {
   const router = useRouter();
@@ -60,7 +60,7 @@ export default function HelpdeskPage() {
     return (
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
         <h1>Akses Ditolak</h1>
-        <p style={{ color: "#666" }}>
+        <p style={{ color: "var(--idx-text-muted)" }}>
           Halaman ini hanya untuk role IT Admin. Akun Anda ({currentUser?.email}) punya role <b>{currentUser?.role}</b>.
         </p>
         <Link href="/chat">Kembali ke Chat</Link>
@@ -70,12 +70,16 @@ export default function HelpdeskPage() {
 
   return (
     <div style={{ padding: "20px 40px", maxWidth: 1000, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h1 style={{ margin: 0 }}>Tiket Helpdesk</h1>
-        <Link href="/helpdesk">← Kembali ke Helpdesk</Link>
+      {/* Bukan flex row: judul dan penjelasannya harus bertumpuk ke bawah. */}
+      <div style={{ marginBottom: 20 }}>
+        <h1 className="page-title" style={{ margin: 0 }}>Tiket Helpdesk</h1>
+        <p style={{ margin: "10px 0 0", fontSize: 13, color: "var(--idx-text-muted)", maxWidth: 760 }}>
+          Antrean pertanyaan yang dikirim pengguna lewat menu <b>Hubungi Admin</b>. Klik salah satu
+          tiket untuk membalas secara langsung; tutup tiket bila persoalannya sudah selesai.
+        </p>
       </div>
 
-      {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
+      {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
       <div style={{ marginBottom: 16 }}>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ padding: 8 }}>
@@ -85,10 +89,10 @@ export default function HelpdeskPage() {
         </select>
       </div>
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
-            <tr style={{ background: "#f1f1f1", textAlign: "left" }}>
+            <tr style={{ background: "var(--idx-surface-alt)", textAlign: "left" }}>
               <th style={{ padding: 10 }}>Waktu</th>
               <th style={{ padding: 10 }}>User</th>
               <th style={{ padding: 10 }}>Confidence</th>
@@ -98,10 +102,10 @@ export default function HelpdeskPage() {
           </thead>
           <tbody>
             {tickets.map((t) => (
-              <tr key={t.id} style={{ borderTop: "1px solid #eee" }}>
+              <tr key={t.id} style={{ borderTop: "1px solid var(--idx-border-light)" }}>
                 <td style={{ padding: 10 }}>{new Date(t.created_at.endsWith("Z") ? t.created_at : t.created_at + "Z").toLocaleString()}</td>
                 <td style={{ padding: 10 }}>{t.user_email}</td>
-                <td style={{ padding: 10, color: "#d32f2f", fontWeight: "bold" }}>{t.confidence_score}%</td>
+                <td style={{ padding: 10, color: "var(--idx-danger)", fontWeight: "bold" }}>{t.confidence_score}%</td>
                 <td style={{ padding: 10 }}>{t.status}</td>
                 <td style={{ padding: 10 }}>
                   <Link href={`/helpdesk/tickets/${t.id}`} style={{ padding: "4px 10px" }}>Buka →</Link>
@@ -109,7 +113,7 @@ export default function HelpdeskPage() {
               </tr>
             ))}
             {tickets.length === 0 && !loading && (
-              <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: "#888" }}>Tidak ada tiket.</td></tr>
+              <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: "var(--idx-text-subtle)" }}>Tidak ada tiket.</td></tr>
             )}
           </tbody>
         </table>
