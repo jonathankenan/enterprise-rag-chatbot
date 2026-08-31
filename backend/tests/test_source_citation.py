@@ -465,9 +465,15 @@ extract_ids = _lex_ns["extract_query_identifiers"]
 
 
 def test_identifier_recognises_requirement_style_ids():
+    # 2026-08-31: identifiers come out CANONICAL (leading zeros stripped from
+    # each hyphenated digit group) -- "NFR-PERF-03" extracts as "nfr-perf-3",
+    # not "nfr-perf-03". See _canonical_identifier: a document writing
+    # "SOP-02" was unreachable by a query typed as "SOP-2", a more natural
+    # spelling than the padded form, so the two must compare equal. "2026" in
+    # DOC-FEE-2026 is untouched -- only touched when the leading digit is '0'.
     assert extract_ids("Requirement FR-14 specifics") == {"fr-14"}
-    assert extract_ids("Priority of NFR-PERF-03") == {"nfr-perf-03"}
-    assert extract_ids("mitigation for RSK-02") == {"rsk-02"}
+    assert extract_ids("Priority of NFR-PERF-03") == {"nfr-perf-3"}
+    assert extract_ids("mitigation for RSK-02") == {"rsk-2"}
     assert extract_ids("update frequency of DOC-FEE-2026") == {"doc-fee-2026"}
 
 

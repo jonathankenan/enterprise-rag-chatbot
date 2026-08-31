@@ -446,15 +446,50 @@ def custom_bm25_tokenizer(text: str) -> list[str]:
 _IDENTIFIER_RE = re.compile(r"[a-z]{2,}(?:-[a-z]+)*-\d+(?:\.\d+)*")
 
 
+def _canonical_identifier(ident: str) -> str:
+    """
+    Padatkan nol di depan tiap kelompok angka setelah tanda hubung, supaya
+    "sop-2" dan "sop-02" dianggap identifier yang SAMA.
+
+    2026-08-31: dokumen menulis "SOP-02" (dipadatkan dua digit). Ditanya
+    "apa isi SOP 2" (tanpa tanda hubung -- bukan identifier sama sekali di
+    mata _IDENTIFIER_RE) retrieval semantik biasa kebetulan berhasil. Ditanya
+    persis "SOP-2" (tanda hubung, TIDAK dipadatkan) -- bentuk yang justru
+    lebih wajar diketik orang -- saringan identifier mencocokkan STRING
+    PERSIS, "sop-2" != "sop-02", tidak ada chunk yang cocok, dan pertanyaan
+    tentang item yang sebetulnya ADA malah ditolak sebagai "tidak ditemukan".
+
+    "-2026" (tahun di DOC-FEE-2026) sengaja TIDAK tersentuh: nol di depan
+    cuma dibuang kalau digit pertamanya memang '0'.
+    """
+    return re.sub(r"-0+(\d)", r"-\1", ident)
+
+
 def extract_query_identifiers(text: str) -> set[str]:
-    """Identifier item yang disebut sebuah query, sudah lowercase."""
-    return {t for t in custom_bm25_tokenizer(text) if _IDENTIFIER_RE.fullmatch(t)}
+    """Identifier item yang disebut sebuah query, sudah lowercase & kanonis."""
+    return {_canonical_identifier(t) for t in custom_bm25_tokenizer(text) if _IDENTIFIER_RE.fullmatch(t)}
 
 
 def text_mentions_identifier(text: str, identifiers: set[str]) -> bool:
     if not identifiers:
         return True
-    return bool(identifiers & set(custom_bm25_tokenizer(text)))
+    doc_tokens = {_canonical_identifier(t) for t in custom_bm25_tokenizer(text)}
+    return bool(identifiers & doc_tokens)
+
+
+def _identifier_search_pattern(ident: str) -> re.Pattern:
+    """
+    Regex yang mencocokkan identifier KANONIS ini di teks apa pun, berapa
+    pun nol di depan angkanya dipadatkan penulis dokumen -- arah sebaliknya
+    dari _canonical_identifier: ident "sop-2" (kanonis) tetap harus ketemu
+    "SOP-02" di teks asli. Dipakai identifier_only_in_example(), yang
+    mencari POSISI kemunculan di teks mentah (bukan membandingkan token),
+    jadi tidak bisa memakai _canonical_identifier di sisi teks seperti
+    text_mentions_identifier.
+    """
+    parts = re.split(r"(\d+)", ident)
+    pat = "".join(rf"0*{re.escape(p)}" if p.isdigit() else re.escape(p) for p in parts)
+    return re.compile(rf"\b{pat}\b", re.I)
 
 
 # Kode divisi yang disebut BERDAMPINGAN dengan kata penunjuk divisi.
@@ -551,7 +586,7 @@ def identifier_only_in_example(text: str, identifiers: set[str]) -> bool:
     lowered = text.lower()
     ketemu = False
     for ident in identifiers:
-        for m in re.finditer(re.escape(ident), lowered):
+        for m in _identifier_search_pattern(ident).finditer(lowered):
             ketemu = True
             if not any(a <= m.start() < b for a, b in spans):
                 return False   # ada kemunculan di luar contoh
