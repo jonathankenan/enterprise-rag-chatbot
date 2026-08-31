@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User, SystemSettings, Role
+from app.models import Chat, Message, SenderType, User, SystemSettings, Role, Divisi
 from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
@@ -296,6 +296,9 @@ async def send_message(
     # Diisi kalau identifier yang ditanya ADA di korpus, tapi setiap
     # kemunculannya cuma di dalam cuplikan contoh — lihat penjagaan di bawah.
     identifier_in_example: list[str] | None = None
+    # Diisi kalau query menyebut divisi yang BUKAN divisi user (dan bukan
+    # Company Wide) — lihat penjagaan divisi di bawah.
+    divisi_asing: list[str] | None = None
 
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
@@ -328,6 +331,27 @@ async def send_message(
             )
             session_has_document = has_session_document(chat_id=chat.id)
 
+            # ── 2026-08-31: penjagaan divisi asing, DETERMINISTIK ────────────
+            # Filter divisi di KbDivisiRetriever sudah benar -- dokumen SDI
+            # tidak pernah sampai ke prompt kalau penanya PTI. Tapi baris
+            # tabel yang lolos filter tidak menyebut nama divisinya sendiri
+            # ("Batas persetujuan anggaran Kepala Divisi | Rp250.000.000",
+            # tanpa kata "PTI" di mana pun), dan build_prompt() cuma
+            # mengirim teks chunk, tidak pernah filename/divisi.
+            #
+            # Akibatnya: ditanya "berapa batas anggaran divisi SDI" oleh user
+            # PTI, satu-satunya angka di konteks (milik PTI, karena SDI
+            # memang tidak pernah terambil) ditempelkan ke nama SDI. BUKAN
+            # kebocoran data -- isi SDI yang sebenarnya tidak pernah bocor --
+            # tapi pelabelan keliru yang meyakinkan dengan angka spesifik.
+            #
+            # Diperiksa DI SINI, sebelum penjagaan identifier: kalau divisi
+            # yang ditanya memang tidak bisa diakses, tidak ada gunanya
+            # memeriksa identifier di dalamnya sama sekali.
+            from app.rag.vectorstore import extract_query_divisi
+            divisi_disebut = extract_query_divisi(search_query, set(Divisi.ALL))
+            divisi_asing = sorted(divisi_disebut - {user.divisi} if user.divisi else divisi_disebut)
+
             # ── 2026-08-26: penjagaan identifier, DETERMINISTIK ──────────────
             # Dua kegagalan nyata yang tidak bisa ditutup instruksi prompt,
             # sudah dicoba dua kali (instruksi 6, lalu GROUNDING_RULE di ujung
@@ -347,58 +371,85 @@ async def send_message(
             # bahwa item yang ditanya benar-benar ada di konteks. Itu
             # pemeriksaan yang bisa dilakukan kode secara pasti, jadi tidak
             # perlu dititipkan ke model 7B.
-            query_ids = extract_query_identifiers(search_query)
-            if query_ids:
-                id_chunks = [c for c in context_chunks if c.get("id_match")]
-                if not id_chunks:
-                    # Tidak satu pun chunk menyebut identifier ini. Bukan
-                    # "retrieval-nya lemah" -- korpusnya memang tidak memuatnya.
-                    identifier_missing = sorted(i.upper() for i in query_ids)
-                else:
-                    # Kunci konteks ke chunk yang benar-benar membahas item
-                    # yang ditanya. Tabel tetangga tidak lagi ikut terkirim,
-                    # jadi tidak ada nilai field yang bisa disalin.
-                    #
-                    # Kasus sintesis multi-dokumen (FR-12) tidak dirugikan:
-                    # pertanyaan sintesis tidak menyebut identifier tunggal
-                    # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
-                    # kosong dan cabang ini tidak aktif sama sekali.
-                    # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
-                    # per baris. Karena query ini menyebut identifier, yang
-                    # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
-                    # membawa serta baris tetangga yang nilainya bisa disalin,
-                    # dan itu justru bug yang sedang ditutup.
-                    #
-                    # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
-                    # naratif tentang item yang sama tetap berguna.
-                    baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
-                    if baris:
-                        id_chunks = baris + [
-                            c for c in id_chunks if not c.get("table_body_rows")
-                        ]
+            # Identifier di dalam divisi tidak berarti apa pun kalau
+            # divisinya sendiri tidak bisa diakses -- lihat penjagaan di
+            # atas. Diperiksa cuma kalau divisi_asing kosong.
+            if not divisi_asing:
+                query_ids = extract_query_identifiers(search_query)
+                if query_ids:
+                    id_chunks = [c for c in context_chunks if c.get("id_match")]
+                    if not id_chunks:
+                        # Tidak satu pun chunk menyebut identifier ini. Bukan
+                        # "retrieval-nya lemah" -- korpusnya memang tidak memuatnya.
+                        identifier_missing = sorted(i.upper() for i in query_ids)
+                    else:
+                        # Kunci konteks ke chunk yang benar-benar membahas item
+                        # yang ditanya. Tabel tetangga tidak lagi ikut terkirim,
+                        # jadi tidak ada nilai field yang bisa disalin.
+                        #
+                        # Kasus sintesis multi-dokumen (FR-12) tidak dirugikan:
+                        # pertanyaan sintesis tidak menyebut identifier tunggal
+                        # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
+                        # kosong dan cabang ini tidak aktif sama sekali.
+                        # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
+                        # per baris. Karena query ini menyebut identifier, yang
+                        # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
+                        # membawa serta baris tetangga yang nilainya bisa disalin,
+                        # dan itu justru bug yang sedang ditutup.
+                        #
+                        # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
+                        # naratif tentang item yang sama tetap berguna.
+                        baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
+                        if baris:
+                            id_chunks = baris + [
+                                c for c in id_chunks if not c.get("table_body_rows")
+                            ]
 
-                    context_chunks = id_chunks
+                        context_chunks = id_chunks
 
-                    # ── identifier yang cuma hidup di dalam contoh ──────────
-                    # Kegagalan ketiga, beda dari dua di atas. Ditanya
-                    # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
-                    # dokumen sungguhan, lengkap dengan "skor 0.892
-                    # menunjukkan kesamaan tinggi antara kueri Anda dan
-                    # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
-                    # tempelan di dalam CONTOH respons API (hal. 9), dan
-                    # 0.892 angka mati yang diketik penulis dokumen.
-                    #
-                    # Saringan id_match di atas tidak bisa menangkapnya:
-                    # dia menanyakan "apakah string ini muncul", dan memang
-                    # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
-                    #
-                    # Ini terjadi di Groq — model komersial yang jauh lebih
-                    # besar dari on-prem mana pun yang kita pakai — jadi
-                    # menaikkan ukuran model bukan jawabannya.
-                    if all(c.get("id_in_example") for c in id_chunks):
-                        identifier_in_example = sorted(i.upper() for i in query_ids)
+                        # ── identifier yang cuma hidup di dalam contoh ──────────
+                        # Kegagalan ketiga, beda dari dua di atas. Ditanya
+                        # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
+                        # dokumen sungguhan, lengkap dengan "skor 0.892
+                        # menunjukkan kesamaan tinggi antara kueri Anda dan
+                        # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
+                        # tempelan di dalam CONTOH respons API (hal. 9), dan
+                        # 0.892 angka mati yang diketik penulis dokumen.
+                        #
+                        # Saringan id_match di atas tidak bisa menangkapnya:
+                        # dia menanyakan "apakah string ini muncul", dan memang
+                        # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
+                        #
+                        # Ini terjadi di Groq — model komersial yang jauh lebih
+                        # besar dari on-prem mana pun yang kita pakai — jadi
+                        # menaikkan ukuran model bukan jawabannya.
+                        if all(c.get("id_in_example") for c in id_chunks):
+                            identifier_in_example = sorted(i.upper() for i in query_ids)
 
-    if identifier_missing:
+    if divisi_asing:
+        # Jawab tanpa memanggil LLM sama sekali, dan sebelum penjagaan
+        # identifier — kalau divisinya sendiri tidak bisa diakses, tidak ada
+        # gunanya memeriksa identifier di dalamnya. context_chunks dikosongkan
+        # meski isinya (kalau ada) semuanya milik divisi user sendiri —
+        # bukan itu yang ditanyakan, jadi mengutipnya cuma menyesatkan.
+        context_chunks = []
+        retrieval_confidence = None
+        daftar = ", ".join(divisi_asing)
+        milik = f"divisi {user.divisi} dan Company Wide" if user.divisi else "Company Wide"
+        result = LLMResult(
+            reply=(
+                f"Saya hanya bisa mengakses informasi {milik}. Divisi {daftar} "
+                "tidak dapat diakses dari akun ini, jadi saya tidak bisa menjawab "
+                "pertanyaan itu. Hubungi admin divisi terkait atau IT admin kalau "
+                "Anda memang berwenang melihatnya."
+            ),
+            llm_used="guardrail (divisi tidak dapat diakses)",
+            is_sensitive=False,
+            confidence_score=None,
+            pii_detected=bool(user_pii_entities),
+            pii_entities=user_pii_entities or [],
+        )
+    elif identifier_missing:
         # Jawab tanpa memanggil LLM sama sekali. Menyerahkan penolakan ini ke
         # model justru sudah terbukti gagal dua kali, dan tidak ada yang perlu
         # digenerasi: pertanyaannya menyebut item yang tidak ada di dokumen.

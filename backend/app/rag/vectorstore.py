@@ -457,6 +457,43 @@ def text_mentions_identifier(text: str, identifiers: set[str]) -> bool:
     return bool(identifiers & set(custom_bm25_tokenizer(text)))
 
 
+# Kode divisi yang disebut BERDAMPINGAN dengan kata penunjuk divisi.
+#
+# 2026-08-31: filter divisi di KbDivisiRetriever bekerja benar -- dokumen
+# divisi lain tidak pernah sampai ke prompt. Tapi baris tabel yang lolos
+# filter TIDAK menyebut nama divisinya sendiri (mis. "Batas persetujuan
+# anggaran Kepala Divisi | Rp250.000.000" -- tidak ada kata "PTI" di
+# situ), dan build_prompt() cuma mengirim c["text"], tidak pernah
+# filename/divisi. Ditanya "berapa batas anggaran divisi SDI" oleh user
+# PTI, satu-satunya angka di konteks (milik PTI) ditempelkan ke nama SDI --
+# bukan kebocoran data (SDI tidak pernah terambil), tapi pelabelan yang
+# keliru dan meyakinkan.
+#
+# Disyaratkan berdampingan dengan "divisi/division/bagian/unit", BUKAN
+# kemunculan token telanjang di mana pun: beberapa kode divisi bertabrakan
+# dengan kata umum -- WAS ("was" dalam bahasa Inggris), PPT (format berkas
+# PowerPoint), OTP (kode verifikasi 2FA). Token telanjang akan memblokir
+# kalimat wajar seperti "kirim file PPT" atau "masukkan kode OTP".
+#
+# Trade-off yang diterima sadar: mention divisi TANPA kata penunjuk
+# ("apa SLA SDI", tanpa kata "divisi") tidak tertangkap pola ini. Itu
+# celah nyata, tapi false-refusal jauh lebih murah daripada false-answer
+# di sini -- pola yang sama dipakai di seluruh penjagaan lain sesi ini.
+_DIVISI_CONTEXT_WORDS = r"(?:divisi|division|bagian|unit)"
+
+
+def extract_query_divisi(text: str, known_divisi: set[str]) -> set[str]:
+    """Kode divisi (huruf besar, mis. {"PTI", "SDI"}) yang query ini sebut
+    berdampingan dengan kata penunjuk divisi. known_divisi harus huruf besar."""
+    found = set()
+    for code in known_divisi:
+        esc = re.escape(code)
+        pat = rf"\b{_DIVISI_CONTEXT_WORDS}\s+{esc}\b|\b{esc}\s+{_DIVISI_CONTEXT_WORDS}\b"
+        if re.search(pat, text, re.I):
+            found.add(code.upper())
+    return found
+
+
 # Wilayah "contoh": blok kode berpagar, kode sebaris, dan pasangan
 # "kunci": "nilai" bergaya JSON.
 #
