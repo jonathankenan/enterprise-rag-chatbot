@@ -1,18 +1,5 @@
-"""
-[PENANGGUNG JAWAB: Anggota A & B]
-F1-05 (LLM Switching) + F2-04 (Guardrail Before/After LLM).
-
-Alur guardrail lengkap:
-1. BEFORE LLM:
-   a. Deteksi PII pada prompt user SEKALI SAJA -> hasilnya dipakai untuk
-      keputusan sensitif DAN untuk masking (tidak dihitung ulang)
-   b. MASK PII sebelum dikirim ke LLM mana pun
-   c. PII atau kata kunci sensitif -> paksa on-prem
-2. GENERATE: kirim prompt (sudah di-mask kalau ada PII) ke LLM sesuai pilihan
-3. AFTER LLM:
-   a. Cek kategori terlarang (saran hukum/medis/dst) -> ganti pesan penolakan
-   b. DEMASK jawaban -> kembalikan placeholder PII ke data asli untuk user
-"""
+"""LLM Switching (F1-05) + Guardrail Before/After LLM (F2-04): mask PII -> pilih & panggil LLM -> cek output -> demask."""
+import json
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -20,6 +7,7 @@ from app.llm.local_llm import call_local_llm
 from app.llm.commercial_llm import call_commercial_llm
 from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.output_filter import check_output_restricted, get_refusal_message
+from app.guardrail.intent_classifier import Intent, LAYER2_INTENTS
 
 COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
 
@@ -36,15 +24,7 @@ class LLMResult:
 
 
 def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
-    """
-    Prompt dianggap sensitif kalau salah satu dari dua kondisi terpenuhi:
-    1. Mengandung kata kunci sensitif (misal "rahasia", "internal")
-    2. Mengandung PII (NIK, NPWP, kartu kredit, dll)
-
-    pii_entities diterima sebagai PARAMETER (hasil dari detect_pii_entities()
-    yang sudah dihitung di route_and_generate), BUKAN dihitung ulang di sini,
-    supaya Presidio tidak dijalankan dua kali untuk teks yang sama.
-    """
+    """Sensitif kalau ada kata kunci sensitif ATAU PII — pii_entities diterima sebagai parameter, tidak dihitung ulang."""
     lowered = text.lower()
     has_keyword = any(keyword in lowered for keyword in settings.sensitive_keyword_list)
     has_pii = len(pii_entities) > 0
@@ -121,7 +101,6 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
     # RAG Prompt (Documents Present)
     if context_chunks:
         raw_context = "\n\n".join(f"- {c['text']}" for c in context_chunks)
-    # else: raw_context already set to "[NO RELEVANT CONTEXT FOUND]" above
     if len(raw_context) > 15000:
         raw_context = raw_context[:15000] + "\n...[CONTEXT TRUNCATED]"
     context_text = "PROVIDED CONTEXT:\n" + raw_context + "\n\n"
@@ -213,47 +192,73 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
     )
 
 
-async def get_standalone_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> str:
-    """
-    [DARI TEMAN ANDA] Kondensasikan riwayat chat + pertanyaan terbaru jadi satu
-    query pencarian mandiri. Membuang basa-basi percakapan (mis. "makasih",
-    "terus gimana") supaya hasil pencarian vector database lebih akurat.
-    """
+async def analyze_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> dict:
+    """1 panggilan LLM, 2 tugas: rephrase jadi search query + Intent Classification lapis 2 — tidak pernah raise, selalu fallback aman."""
+    fallback = {"standalone_query": user_message, "intent": Intent.QUESTION}
     if not chat_history:
-        return user_message
+        history_text = "(belum ada riwayat, ini pesan pertama di percakapan ini)\n"
+    else:
+        history_text = ""
+        for msg in chat_history:
+            sender = "User" if msg.sender.value == "user" else "Assistant"
+            history_text += f"{sender}: {msg.content}\n"
 
-    history_text = ""
-    for msg in chat_history:
-        sender = "User" if msg.sender.value == "user" else "Assistant"
-        history_text += f"{sender}: {msg.content}\n"
+    prompt = f"""Given the following conversation and a follow-up question, do TWO things and respond with ONLY a JSON object (no markdown, no explanation):
 
-    prompt = f"""
-Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone search query.
-RULES:
-1. Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
-2. Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
-3. IMPORTANT: You must translate the final standalone query into ENGLISH, regardless of the language the user is speaking. 
-4. If the user asks about multiple distinct entities or specific IDs (e.g., 'FR-04 and FR-05'), keep them together in a clean format like 'Requirement FR-04 and Requirement FR-05 specifics', keeping the IDs exactly as written.
-5. Respond ONLY with the standalone query, nothing else. No quotes, no explanations.
+1. "standalone_query": rephrase the follow-up question into a standalone ENGLISH search query.
+   RULES for standalone_query:
+   - Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
+   - Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
+   - Always translate to ENGLISH regardless of the input language.
+   - If asking about multiple distinct entities/IDs (e.g., 'FR-04 and FR-05'), keep them together, IDs exactly as written.
+   - If the follow-up is NOT a real question (e.g. it's just chitchat that slipped through), just clean it up minimally.
+
+2. "intent": classify the follow-up question into EXACTLY ONE of these categories:
+   - "document_query": asking about content of a document the user uploaded to THIS chat
+   - "faq_lookup": a general/procedural question likely answerable from company FAQ or policy knowledge base
+   - "summary_request": explicitly asking to summarize ALL of the uploaded document(s), not search for something specific
+   - "general_chat": needs a reply but isn't really an information-seeking question (opinion, casual remark, unclear intent)
+   - "question": doesn't clearly fit any category above
+
 Chat History:
 {history_text}
 Follow-up Input: {user_message}
-Standalone English Query:"""
 
+JSON:"""
+
+    raw = None
     if preferred_provider in COMMERCIAL_PROVIDERS:
         try:
-            query = await call_commercial_llm(prompt, provider=preferred_provider)
-            return query.strip()
+            raw = await call_commercial_llm(prompt, provider=preferred_provider)
         except Exception:
-            pass
+            raw = None
+    if raw is None:
+        try:
+            raw = await call_local_llm(prompt)
+        except Exception:
+            return fallback
+
+    return _parse_query_analysis(raw, fallback)
+
+
+def _parse_query_analysis(raw: str, fallback: dict) -> dict:
+    """Strip markdown fence kalau ada, validasi intent ke LAYER2_INTENTS, fallback aman kalau parsing gagal."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
 
     try:
-        query = await call_local_llm(prompt)
-        return query.strip()
-    except Exception:
-        pass
-
-    return user_message
+        parsed = json.loads(text)
+        query = str(parsed.get("standalone_query") or fallback["standalone_query"]).strip()
+        intent = parsed.get("intent")
+        if intent not in LAYER2_INTENTS:
+            intent = Intent.QUESTION
+        return {"standalone_query": query or fallback["standalone_query"], "intent": intent}
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return fallback
 
 
 async def route_and_generate(
@@ -266,37 +271,18 @@ async def route_and_generate(
     retrieval_confidence: int | None = None,
     identifier_in_example: list[str] | None = None,
 ) -> LLMResult:
-    """
-    Fungsi utama yang dipanggil oleh endpoint chat.
-    preferred_provider: "on-prem" | "groq" | "gemini" | "mistral" | "cloudflare"
-    pii_entities: kalau caller (chat/routes.py) sudah menjalankan
-      detect_pii_entities(user_message) sendiri (mis. untuk keperluan masking
-      sebelum simpan ke histori — lihat SRS 3.j), berikan hasilnya di sini
-      supaya Presidio TIDAK dijalankan ulang untuk teks yang sama. Kalau None,
-      dihitung sendiri seperti sebelumnya (backward compatible).
-    retrieval_confidence: skor 0-100 dari compute_retrieval_confidence()
-      (vectorstore.py), dihitung caller SEBELUM route_and_generate dipanggil
-      (butuh search_query & chat_id yang tidak tersedia di sini). Dulu
-      confidence_score ini diminta dari LLM sendiri lewat instruksi prompt
-      "[CONFIDENCE: X]" — diganti karena angka self-report LLM tidak
-      grounded/tidak konsisten antar-provider (lihat diskusi saat fitur ini
-      diubah). Sekarang murni pass-through: fungsi ini TIDAK menghitung
-      confidence apa pun sendiri, cuma meneruskan apa yang caller berikan.
-    """
-    # ---------- Deteksi PII SEKALI SAJA — hasilnya dipakai berulang di bawah ----------
+    """Fungsi utama endpoint chat — mask PII, pilih LLM (on-prem kalau sensitif), cek output terlarang, demask."""
     if pii_entities is None:
         pii_entities = detect_pii_entities(user_message)
     pii_detected = len(pii_entities) > 0
 
     is_sensitive = detect_sensitive(user_message, pii_entities)
 
-    # ---------- BEFORE LLM: mask PII sebelum masuk ke prompt (pakai entities yang sudah ada) ----------
     masked_message, pii_mapping = mask_pii(user_message, entities=pii_entities) if pii_detected else (user_message, {})
     final_prompt = build_prompt(masked_message, context_chunks, chat_history,
                                session_has_document=session_has_document,
                                identifier_in_example=identifier_in_example)
 
-    # ---------- Pilih & panggil LLM ----------
     if is_sensitive:
         reply = await call_local_llm(final_prompt)
         llm_used = "on-prem (data sensitif)"
@@ -310,21 +296,12 @@ async def route_and_generate(
         reply = await call_local_llm(final_prompt)
         llm_used = "on-prem (fallback)"
 
-    # ---------- AFTER LLM: cek kategori terlarang ----------
     blocked_category = check_output_restricted(reply)
     if blocked_category:
         reply = get_refusal_message(blocked_category)
         confidence_score = None
     else:
-        # Confidence sekarang murni dari retrieval_confidence (parameter),
-        # bukan diekstrak dari teks jawaban LLM lagi. Kalau tidak ada context
-        # sama sekali (percakapan umum tanpa RAG), retrieval_confidence sudah
-        # otomatis None dari compute_retrieval_confidence() (koleksi kosong)
-        # — baris `if not context_chunks` yang dulu ada di sini jadi redundan
-        # dan dihapus, bukan dihilangkan diam-diam.
-        confidence_score = retrieval_confidence
-
-        # ---------- AFTER LLM: demask PII kembali ke data asli ----------
+        confidence_score = retrieval_confidence  # pass-through dari caller, bukan dihitung di sini
         if pii_mapping:
             reply = demask(reply, pii_mapping)
 

@@ -1,29 +1,17 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Skema Pydantic — bentuk data yang masuk (request) & keluar (response) dari API.
-"""
+"""Skema Pydantic — bentuk data yang masuk (request) & keluar (response) dari API."""
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 from app.config import settings
 
-# Provider yang dianggap "commercial" untuk keperluan ambang batas panjang
-# prompt — duplikat kecil dari COMMERCIAL_PROVIDERS di llm/router.py, sengaja
-# tidak di-import langsung dari sana supaya schemas.py (lapisan validasi
-# request, dijalankan paling awal) tidak bergantung ke modul llm/.
-_COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}
+_COMMERCIAL_PROVIDERS = {"groq", "gemini", "mistral", "cloudflare"}  # duplikat kecil dari llm/router.py, sengaja lepas import biar schemas.py tidak bergantung modul llm/
 
 
 _SPECIAL_CHARS = set("!@#$%^&*()_+-=[]{}|;:'\",.<>/?`~\\")
 
 
 def validate_password_strength(password: str) -> str:
-    """
-    Aturan password sesuai SRS ISR-002.a/b: kompleks (huruf besar, huruf
-    kecil, angka, karakter khusus) dan minimal 12 karakter. Sama persis
-    dengan validasi di frontend (register/page.jsx & change-password/page.jsx),
-    supaya tidak bisa "dilewati" dengan memanggil API langsung tanpa lewat UI.
-    """
+    """SRS ISR-002.a/b: kompleks + minimal 12 karakter — sama persis dengan validasi frontend, supaya tidak bisa dilewati lewat API langsung."""
     if len(password) < 12:
         raise ValueError("Password minimal 12 karakter")
     if not any(c.isupper() for c in password):
@@ -67,18 +55,13 @@ class ChangePasswordRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str | None = None
     token_type: str = "bearer"
-    # SRS ISR-001.g: info login sebelumnya + percobaan gagal sejak saat itu
-    previous_login_at: datetime | None = None
+    previous_login_at: datetime | None = None  # SRS ISR-001.g
     failed_attempts_since_last_login: int = 0
-    # SRS ISR-002.c: true kalau password sudah lewat 90 hari, frontend WAJIB
-    # arahkan user ke halaman ganti password (bukan langsung ke /chat)
-    password_expired: bool = False
-    # SRS ISR-001.d: password sudah benar, tapi login BELUM SELESAI — kalau
-    # salah satu true, `access_token` di atas sengaja None (belum boleh
-    # dianggap login), frontend harus arahkan ke alur MFA memakai `mfa_token`.
+    password_expired: bool = False  # SRS ISR-002.c: true = frontend wajib arahkan ke ganti password
+    # SRS ISR-001.d: kalau salah satu true, access_token sengaja None, frontend arahkan ke alur MFA pakai mfa_token
     mfa_required: bool = False           # akun sudah punya MFA aktif, minta kode TOTP
     mfa_setup_required: bool = False     # akun WAJIB MFA tapi belum pernah setup
-    mfa_token: str | None = None         # token sementara (5 menit), khusus buat 2 endpoint MFA di bawah
+    mfa_token: str | None = None         # token sementara (5 menit), khusus 2 endpoint MFA di bawah
 
 
 class MfaSetupRequest(BaseModel):
@@ -115,7 +98,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str | None
     role: str
-    divisi: str | None = None  # None = tidak terikat 1 divisi (atau, khusus IT_ADMIN, artinya admin GLOBAL)
+    divisi: str | None = None  # None = tidak terikat 1 divisi (IT_ADMIN: admin global)
 
     class Config:
         from_attributes = True
@@ -132,14 +115,14 @@ class UserRoleUpdateRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def check_valid_role(cls, v: str) -> str:
-        from app.models import Role  # import lokal — hindari import melingkar di level modul
+        from app.models import Role  # import lokal — hindari import melingkar
         if v not in Role.ALL:
             raise ValueError(f"Role tidak valid. Pilihan: {', '.join(Role.ALL)}")
         return v
 
 
 class UserDivisiUpdateRequest(BaseModel):
-    divisi: str | None  # None = lepas dari divisi manapun (utk IT_ADMIN berarti jadi admin GLOBAL)
+    divisi: str | None  # None = lepas dari divisi manapun (IT_ADMIN jadi admin global)
 
     @field_validator("divisi")
     @classmethod
@@ -154,6 +137,9 @@ class UserDivisiUpdateRequest(BaseModel):
 class SystemSettingsResponse(BaseModel):
     commercial_llm_force_stopped: bool
     export_allowed_roles: list[str]
+    chat_rate_limit_max_messages: int
+    chat_rate_limit_window_seconds: int
+    chat_retention_days: int | None
     updated_by: str | None
     updated_at: datetime | None
 
@@ -165,6 +151,35 @@ class UpdateExportRolesRequest(BaseModel):
     roles: list[str]
 
 
+# ---- SRS poin 4.c-d: rate limit & API limiter dikonfigurasi IT Admin (dulu cuma .env) ----
+class UpdateRateLimitRequest(BaseModel):
+    max_messages: int
+    window_seconds: int
+
+    @field_validator("max_messages", "window_seconds")
+    @classmethod
+    def must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Nilai harus lebih besar dari 0")
+        return v
+
+
+# ---- SRS poin 6: konfigurasi retensi data historis ----
+class UpdateRetentionRequest(BaseModel):
+    retention_days: int | None  # None = tanpa batas (nonaktifkan retensi)
+
+    @field_validator("retention_days")
+    @classmethod
+    def must_be_positive_or_none(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("Retensi harus lebih besar dari 0 hari, atau kosongkan untuk tanpa batas")
+        return v
+
+
+class RetentionApplyResponse(BaseModel):
+    archived_count: int
+
+
 # ---- Chat ----
 class ChatCreate(BaseModel):
     title: str | None = "Percakapan Baru"
@@ -174,6 +189,7 @@ class ChatResponse(BaseModel):
     id: str
     title: str
     created_at: datetime
+    archived: bool = False
 
     class Config:
         from_attributes = True
@@ -200,13 +216,7 @@ class MessageCreate(BaseModel):
 
     @model_validator(mode="after")
     def check_content_length(self):
-        """
-        Guardrail F2-04 / SRS Model Usage Policy poin b: batasi panjang prompt
-        supaya tidak membengkakkan biaya token LLM commercial tanpa kendali
-        (BR-04 — penggunaan recurring cost yang efektif). Pakai model_validator
-        (bukan field_validator biasa) karena ambangnya butuh nilai llm_provider,
-        bukan cuma content saja.
-        """
+        """Guardrail F2-04 / SRS Model Usage Policy poin b — ambang beda tergantung provider, makanya model_validator bukan field_validator."""
         limit = (
             settings.max_prompt_length_commercial
             if self.llm_provider in _COMMERCIAL_PROVIDERS
@@ -233,22 +243,11 @@ class MessageResponse(BaseModel):
 
 
 class SourceCitation(BaseModel):
-    """
-    SRS FCR-003 poin 12.a: "Answers show source references". Satu entri per
-    dokumen/FAQ unik yang chunk-nya ikut dipakai di PROVIDED CONTEXT jawaban
-    ini (lihat _build_source_citations() di chat/routes.py) -- bukan satu
-    entri per chunk, supaya dokumen yang nyumbang 5 chunk tidak tampil 5x.
-    """
+    """SRS poin 12.a: source references — satu entri per dokumen/FAQ unik (bukan per chunk), lihat _build_source_citations() di chat/routes.py."""
     label: str  # nama yang ditampilkan ke user: "file.pdf (hal. 3, 7)", atau "FAQ Helpdesk"
     filename: str | None = None
     source_type: str  # "chat_document" | "kb_divisi" | "faq"
-    # Nomor halaman PDF (1-indexed) tempat chunk-chunk yang dipakai berasal,
-    # diurutkan & tanpa duplikat. Kosong untuk FAQ (tidak ada konsep halaman)
-    # atau kalau extract_pages_from_pdf() tidak bisa memetakan halaman dengan
-    # aman untuk dokumen ini (lihat _extract_pages_with_fallback() di
-    # rag/vectorstore.py) -- bukan berarti tidak ada halaman, cuma tidak bisa
-    # dipastikan, jadi sengaja dikosongkan daripada menebak.
-    pages: list[int] = []
+    pages: list[int] = []  # nomor halaman (1-indexed) sumber chunk, urut tanpa duplikat; kosong utk FAQ atau kalau halaman tidak bisa dipastikan
 
 
 class ChatReplyResponse(BaseModel):
@@ -261,21 +260,14 @@ class ChatReplyResponse(BaseModel):
     sources: list[SourceCitation] = []
     new_title: str | None = None
     message_id: str | None = None
-    # FCR-003 poin 7: "sistem MENAWARKAN eskalasi" — bukan langsung bikin
-    # tiket. True kalau confidence di bawah ambang, dipakai frontend untuk
-    # tampilkan banner tanya user, BUKAN auto-create tiket (lihat
-    # helpdesk/routes.py: POST /tickets, dipanggil user kalau setuju).
-    escalation_offered: bool = False
-    # SRS hal. 17, poin 9.a: Intent classification — "greeting"/"chitchat"/
-    # "question". Diekspos ke response biar bisa diverifikasi lewat testing
-    # (sama alasannya dengan confidence_score/pii_detected), bukan cuma
-    # sinyal internal yang tidak terlihat.
-    intent: str = "question"
+    escalation_offered: bool = False  # SRS poin 7: sistem MENAWARKAN eskalasi, bukan auto-create tiket (lihat helpdesk/routes.py POST /tickets)
+    intent: str = "question"  # SRS hal. 17 poin 9.a: diekspos ke response supaya bisa diverifikasi lewat testing
 
 
 # ---- Helpdesk (FCR-003 poin 7 — eskalasi ke human helpdesk) ----
 class CreateTicketRequest(BaseModel):
-    message_id: str  # jawaban AI low-confidence yang user setuju dieskalasi
+    chat_id: str
+    message_id: str | None = None  # None = eskalasi manual (tombol "Hubungi Admin"); terisi = dari banner confidence rendah
 
 
 class TicketResponse(BaseModel):

@@ -1,20 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-WebSocket chat real-time untuk tiket helpdesk — implementasi "human
-helpdesk" di SRS FCR-003 poin 7 sebagai percakapan langsung user<->admin,
-bukan cuma tiket satu-arah.
-
-Kenapa WebSocket butuh auth berbeda dari endpoint HTTP biasa: browser
-TIDAK BISA mengirim header `Authorization: Bearer <token>` custom saat
-melakukan WebSocket handshake (beda dari fetch/XHR biasa) — jadi token JWT
-dikirim lewat query string (`?token=...`) dan divalidasi lewat
-resolve_user_from_token() yang sama dipakai get_current_user() untuk HTTP.
-
-Connection manager IN-MEMORY (bukan Redis pub/sub) — konsisten dengan pola
-_active_session/_last_activity yang sudah ada di auth/utils.py: cukup untuk
-skala PoC single-instance, TIDAK akan sinkron kalau backend dijalankan
-multi-instance (keterbatasan yang sudah didokumentasikan di modul serupa).
-"""
+"""WebSocket chat real-time untuk tiket helpdesk — "human helpdesk" (SRS poin 7) sebagai percakapan langsung user<->admin, bukan tiket satu-arah."""
 from collections import defaultdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends
@@ -55,8 +39,7 @@ manager = ConnectionManager()
 
 @router.websocket("/ws/helpdesk/tickets/{ticket_id}")
 async def ticket_chat(websocket: WebSocket, ticket_id: str, token: str = Query(...)):
-    # Depends() tidak otomatis dijalankan di dekorator @websocket seperti di
-    # @router.get — bikin Session sendiri per koneksi, ditutup manual di finally.
+    # Depends() tidak jalan otomatis di @websocket seperti di @router.get -- Session dibuat manual per koneksi, ditutup di finally
     db: Session = SessionLocal()
     try:
         try:
@@ -83,9 +66,7 @@ async def ticket_chat(websocket: WebSocket, ticket_id: str, token: str = Query(.
                 if not content:
                     continue
 
-                # Tiket yang sudah ditutup admin tidak bisa dilanjutkan
-                # chat-nya lagi — cegah pesan "menggantung" pasca-penutupan.
-                db.refresh(ticket)
+                db.refresh(ticket)  # tiket yang sudah ditutup admin tidak bisa dilanjutkan chatnya
                 if ticket.status == TicketStatus.CLOSED:
                     await websocket.send_json({"error": "Tiket ini sudah ditutup"})
                     continue

@@ -1,19 +1,25 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Endpoint manajemen user — sebelumnya ganti role user cuma bisa manual lewat
-SQL langsung ke database (lihat catatan di project-handoff.md), tidak ada
-jalur API sama sekali. Router ini menutup gap itu. Dibatasi Role.IT_ADMIN.
-"""
+"""Endpoint manajemen user (ganti role/divisi) — sebelumnya cuma bisa lewat SQL manual. Dibatasi Role.IT_ADMIN."""
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, SystemSettings
-from app.schemas import AdminUserResponse, UserRoleUpdateRequest, UserDivisiUpdateRequest, SystemSettingsResponse, UpdateExportRolesRequest
+from app.models import Role, User, SystemSettings, Chat
+from app.schemas import (
+    AdminUserResponse, UserRoleUpdateRequest, UserDivisiUpdateRequest, SystemSettingsResponse,
+    UpdateExportRolesRequest, UpdateRateLimitRequest, UpdateRetentionRequest, RetentionApplyResponse,
+)
 from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _assert_global_admin(admin: User):
+    """SystemSettings itu tabel singleton (efeknya lintas divisi), jadi setelan sistem dikunci ke admin global — kecuali force-stop, lihat catatan di toggle_commercial_llm()."""
+    if get_divisi_scope(admin) is not None:
+        raise HTTPException(status_code=403, detail="Cuma admin global yang bisa mengubah setelan sistem")
 
 
 def _get_or_create_settings(db: Session) -> SystemSettings:
@@ -27,12 +33,13 @@ def _get_or_create_settings(db: Session) -> SystemSettings:
 
 
 def _settings_response(settings_row: SystemSettings) -> SystemSettingsResponse:
-    # Dibangun manual (bukan from_attributes langsung) karena
-    # export_allowed_roles di DB disimpan string koma-pisah, sedangkan API
-    # keluar sebagai list[str] — perlu lewat get_export_allowed_roles() dulu.
+    # export_allowed_roles disimpan string koma-pisah di DB, API keluar sebagai list[str]
     return SystemSettingsResponse(
         commercial_llm_force_stopped=settings_row.commercial_llm_force_stopped,
         export_allowed_roles=settings_row.get_export_allowed_roles(),
+        chat_rate_limit_max_messages=settings_row.chat_rate_limit_max_messages,
+        chat_rate_limit_window_seconds=settings_row.chat_rate_limit_window_seconds,
+        chat_retention_days=settings_row.chat_retention_days,
         updated_by=settings_row.updated_by,
         updated_at=settings_row.updated_at,
     )
@@ -40,10 +47,7 @@ def _settings_response(settings_row: SystemSettings) -> SystemSettingsResponse:
 
 @router.get("/users", response_model=list[AdminUserResponse])
 def list_users(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
-    # SRS hal. 68/70: "Admin User dari setiap divisi" — admin dengan divisi
-    # TERISI cuma boleh lihat/kelola user DI DIVISINYA SENDIRI, bukan
-    # seluruh perusahaan. Admin global (divisi=None) tetap lihat semua,
-    # seperti sebelumnya.
+    # SRS hal. 68/70: admin divisi cuma lihat user di divisinya sendiri; admin global (divisi=None) lihat semua
     scope = get_divisi_scope(admin)
     query = db.query(User)
     if scope is not None:
@@ -59,10 +63,7 @@ def update_user_role(
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
     if user_id == admin.id:
-        # Cegah admin tidak sengaja menurunkan role akunnya sendiri sampai
-        # terkunci dari fitur admin — kalau memang perlu, minta admin LAIN
-        # yang ubah, atau lewat SQL manual (jalur darurat yang masih ada).
-        raise HTTPException(status_code=400, detail="Tidak bisa mengubah role akun sendiri")
+        raise HTTPException(status_code=400, detail="Tidak bisa mengubah role akun sendiri")  # cegah admin mengunci diri sendiri
 
     target = db.query(User).filter(User.id == user_id).first()
     if not target:
@@ -70,10 +71,7 @@ def update_user_role(
 
     scope = get_divisi_scope(admin)
     if scope is not None and target.divisi != scope:
-        # Admin divisi PTI tidak boleh ubah role user divisi lain — bahkan
-        # sekadar TAHU dia ada pun tidak seharusnya (404, bukan 403, supaya
-        # tidak bocorkan "user ini ada tapi bukan hak Anda").
-        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")  # 404 bukan 403 -- jangan bocorkan keberadaan user divisi lain
 
     old_role = target.role
     target.role = payload.role
@@ -95,12 +93,7 @@ def update_user_divisi(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
-    """
-    SENGAJA cuma admin GLOBAL (divisi=None) yang boleh memindah-mindah
-    keanggotaan divisi siapa pun — admin divisi (scope terisi) tidak
-    diberi endpoint ini sama sekali, supaya dia tidak bisa "keluar" dari
-    scope-nya sendiri atau menyerobot user divisi lain masuk ke divisinya.
-    """
+    """Cuma admin GLOBAL (divisi=None) yang boleh memindah keanggotaan divisi user mana pun."""
     if get_divisi_scope(admin) is not None:
         raise HTTPException(status_code=403, detail="Cuma admin global yang bisa mengubah keanggotaan divisi")
     if user_id == admin.id:
@@ -132,15 +125,12 @@ def get_system_settings(db: Session = Depends(get_db), user: User = Depends(requ
 
 @router.post("/system-settings/toggle-commercial-llm", response_model=SystemSettingsResponse)
 def toggle_commercial_llm(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
-    """
-    Nyalakan/matikan force-stop LLM Commercial — SRS FCR-003 hal. 10, Rules
-    poin 2: "Terdapat button 'force stop' dan disable seluruh penggunaan LLM
-    Commercial untuk kebutuhan menghentikan operasional ke LLM Commercial
-    saat dibutuhkan." Sengaja TOGGLE (bukan endpoint terpisah enable/disable)
-    supaya satu tombol di UI, konsisten dengan bahasa SRS-nya sendiri
-    ("button force stop") — satu tombol yang berubah fungsi tergantung
-    status sekarang, bukan dua tombol terpisah.
-    """
+    """Toggle force-stop LLM Commercial — SRS hal. 10 Rules poin 2, satu tombol yang berubah fungsi tergantung status."""
+    # SENGAJA TIDAK dikunci ke admin global (beda dari setelan sistem lain di file ini): ini emergency
+    # kill switch, arahnya fail-safe (semua dipaksa ke on-prem), reversibel, dan teraudit CRITICAL —
+    # risiko "tidak ada yang bisa menekan saat insiden" lebih besar daripada risiko salah tekan.
+    # Efeknya tetap GLOBAL walau ditekan admin divisi: ancaman "jangan kirim apa pun ke LLM
+    # commercial" tidak selesai kalau cuma satu divisi yang dihentikan.
     settings_row = _get_or_create_settings(db)
     settings_row.commercial_llm_force_stopped = not settings_row.commercial_llm_force_stopped
     settings_row.updated_by = admin.id
@@ -163,14 +153,12 @@ def update_export_roles(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
+    _assert_global_admin(admin)  # kontrol keluarnya data dari sistem, sekelas kebijakan retensi
     invalid = [r for r in payload.roles if r not in Role.ALL]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Role tidak dikenal: {', '.join(invalid)}")
 
-    # IT_ADMIN dipaksa selalu ikut — kalau tidak, admin bisa tidak sengaja
-    # mengunci SEMUA orang (termasuk dirinya sendiri) dari fitur export,
-    # tanpa jalan balik lewat UI (cuma bisa lewat SQL manual).
-    roles = sorted(set(payload.roles) | {Role.IT_ADMIN})
+    roles = sorted(set(payload.roles) | {Role.IT_ADMIN})  # IT_ADMIN dipaksa selalu ikut supaya admin tidak bisa mengunci diri sendiri
 
     settings_row = _get_or_create_settings(db)
     old_roles = settings_row.export_allowed_roles
@@ -185,3 +173,79 @@ def update_export_roles(
         metadata={"old_roles": old_roles, "new_roles": settings_row.export_allowed_roles},
     )
     return _settings_response(settings_row)
+
+
+# ---------- SRS poin 4.c-d: rate limit & API limiter dikonfigurasi IT Admin (dulu cuma lewat .env) ----------
+
+@router.post("/system-settings/rate-limit", response_model=SystemSettingsResponse)
+def update_rate_limit(
+    payload: UpdateRateLimitRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    _assert_global_admin(admin)  # kapasitas server itu sumber daya BERSAMA — kalau tiap divisi bisa naikkan jatahnya sendiri, proteksinya tidak ada artinya
+    settings_row = _get_or_create_settings(db)
+    old_values = (settings_row.chat_rate_limit_max_messages, settings_row.chat_rate_limit_window_seconds)
+    settings_row.chat_rate_limit_max_messages = payload.max_messages
+    settings_row.chat_rate_limit_window_seconds = payload.window_seconds
+    settings_row.updated_by = admin.id
+    db.commit()
+    db.refresh(settings_row)
+
+    log_guardrail_event(
+        db, admin.id, EventType.RATE_LIMIT_CONFIG_CHANGED,
+        detail=f"Rate limit chat diubah oleh {admin.email}",
+        metadata={
+            "old_max_messages": old_values[0], "old_window_seconds": old_values[1],
+            "new_max_messages": payload.max_messages, "new_window_seconds": payload.window_seconds,
+        },
+    )
+    return _settings_response(settings_row)
+
+
+# ---------- SRS poin 6: konfigurasi retensi data historis ----------
+
+@router.post("/system-settings/retention", response_model=SystemSettingsResponse)
+def update_retention(
+    payload: UpdateRetentionRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(Role.IT_ADMIN)),
+):
+    _assert_global_admin(admin)  # retensi = kewajiban regulasi (POJK/kearsipan), harus seragam se-perusahaan, bukan preferensi tiap divisi
+    settings_row = _get_or_create_settings(db)
+    old_value = settings_row.chat_retention_days
+    settings_row.chat_retention_days = payload.retention_days
+    settings_row.updated_by = admin.id
+    db.commit()
+    db.refresh(settings_row)
+
+    log_guardrail_event(
+        db, admin.id, EventType.RETENTION_POLICY_CHANGED,
+        detail=f"Kebijakan retensi chat diubah oleh {admin.email}",
+        metadata={"old_retention_days": old_value, "new_retention_days": payload.retention_days},
+    )
+    return _settings_response(settings_row)
+
+
+@router.post("/system-settings/retention/apply", response_model=RetentionApplyResponse)
+def apply_retention(db: Session = Depends(get_db), admin: User = Depends(require_role(Role.IT_ADMIN))):
+    """Terapkan kebijakan retensi SEKARANG — arsipkan (bukan hapus permanen) chat aktif yang lebih tua dari chat_retention_days."""
+    _assert_global_admin(admin)  # aksi massal lintas divisi (menyentuh chat SEMUA user), bukan cuma divisi si admin
+    settings_row = _get_or_create_settings(db)
+    if settings_row.chat_retention_days is None:
+        raise HTTPException(status_code=400, detail="Kebijakan retensi belum diatur — set jumlah hari terlebih dahulu")
+
+    cutoff = datetime.utcnow() - timedelta(days=settings_row.chat_retention_days)
+    stale_chats = db.query(Chat).filter(Chat.archived.is_(False), Chat.created_at < cutoff).all()
+    now = datetime.utcnow()
+    for chat in stale_chats:
+        chat.archived = True
+        chat.archived_at = now
+    db.commit()
+
+    log_guardrail_event(
+        db, admin.id, EventType.RETENTION_POLICY_APPLIED,
+        detail=f"Kebijakan retensi diterapkan oleh {admin.email}",
+        metadata={"retention_days": settings_row.chat_retention_days, "archived_count": len(stale_chats)},
+    )
+    return RetentionApplyResponse(archived_count=len(stale_chats))

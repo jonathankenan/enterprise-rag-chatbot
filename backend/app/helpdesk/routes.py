@@ -1,23 +1,9 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Endpoint tiket helpdesk — SRS FCR-003 poin 7 "Eskalasi otomatis". Sesuai
-teks SRS literal ("sistem MENAWARKAN eskalasi ke human helpdesk"), tiket
-TIDAK dibuat otomatis oleh sistem lagi — chat/routes.py cuma menandai
-jawaban sebagai escalation_offered=True, lalu USER sendiri yang konfirmasi
-lewat POST /tickets di bawah kalau mau lanjut. "Human helpdesk" di sini
-diimplementasikan sebagai chat real-time (lihat helpdesk/ws.py untuk
-WebSocket-nya), bukan cuma tiket satu-arah yang dibaca sepihak oleh admin.
-
-list_tickets/close_ticket tetap dibatasi Role.IT_ADMIN (belum ada role SRS
-yang eksplisit representasi staf helpdesk, jadi IT Admin dipakai sebagai
-analog terdekat). get_ticket & POST /tickets bisa diakses PEMILIK tiket
-ATAU IT_ADMIN — pemilik perlu baca/kirim pesan di tiketnya sendiri.
-"""
+"""Endpoint tiket helpdesk (SRS poin 7) — sistem cuma MENAWARKAN eskalasi, user sendiri yang konfirmasi via POST /tickets. "Human helpdesk" diimplementasikan sebagai chat real-time (lihat helpdesk/ws.py)."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, Chat, Message, SenderType
+from app.models import Role, User, HelpdeskTicket, HelpdeskMessage, HelpdeskSender, Chat, Message, SenderType, TicketStatus
 from app.schemas import (
     TicketResponse, TicketDetailResponse, MessageResponse,
     CreateTicketRequest, HelpdeskMessageResponse,
@@ -41,9 +27,7 @@ def _get_ticket_or_403(ticket_id: str, db: Session, user: User) -> HelpdeskTicke
 
 def _ticket_detail(ticket: HelpdeskTicket, db: Session) -> TicketDetailResponse:
     chat = db.query(Chat).filter(Chat.id == ticket.chat_id).first()
-    # "Riwayat percakapan terlampir dalam tiket" (SRS) — demasked untuk pihak
-    # yang berwenang (pemilik chat aslinya, atau staf helpdesk yang menangani).
-    messages = [
+    messages = [  # riwayat percakapan terlampir (SRS), demasked untuk pihak berwenang
         MessageResponse(
             id=m.id, sender=m.sender, content=_display_content(m),
             llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
@@ -71,12 +55,7 @@ def list_tickets(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    IT Admin melihat SEMUA tiket (antrian helpdesk). User biasa cuma boleh
-    lihat tiketnya SENDIRI — dipaksa lewat filter user_id, bukan lewat
-    require_role, supaya user bisa navigasi balik ke tiket aktifnya sendiri
-    (lihat chat/page.jsx sidebar) tanpa endpoint terpisah.
-    """
+    """IT Admin melihat semua tiket; user biasa cuma tiketnya sendiri (filter user_id, bukan require_role, supaya user tetap bisa navigasi ke tiket aktifnya)."""
     query = db.query(HelpdeskTicket).join(User, HelpdeskTicket.user_id == User.id)
     if user.role != Role.IT_ADMIN:
         query = query.filter(HelpdeskTicket.user_id == user.id)
@@ -98,21 +77,37 @@ def create_ticket(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    User SENDIRI yang konfirmasi tawaran eskalasi (SRS: "sistem menawarkan
-    eskalasi" — bukan langsung membuat tiket tanpa izin). message_id harus
-    jawaban AI di CHAT MILIK user ini, dan confidence-nya memang di bawah
-    ambang — dua validasi ini mencegah user membuat tiket dari pesan
-    sembarangan (mis. jawaban high-confidence, atau chat milik orang lain).
-    """
+    """2 jalur eskalasi, user sendiri yang memutuskan: (1) message_id terisi = banner confidence rendah; (2) message_id kosong = tombol "Hubungi Admin" permanen, lebih discoverable daripada deteksi niat lewat LLM."""
+    chat = db.query(Chat).filter(Chat.id == payload.chat_id).first()
+    if not chat or chat.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+
+    if payload.message_id is None:
+        existing_manual = (  # cegah spam tiket kalau tombol diklik berkali-kali, pakai ulang tiket open yang ada
+            db.query(HelpdeskTicket)
+            .filter(HelpdeskTicket.chat_id == chat.id, HelpdeskTicket.message_id.is_(None), HelpdeskTicket.status == TicketStatus.OPEN)
+            .first()
+        )
+        if existing_manual:
+            return _ticket_detail(existing_manual, db)
+
+        ticket = HelpdeskTicket(chat_id=chat.id, user_id=user.id, message_id=None, confidence_score=None)
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        log_guardrail_event(
+            db, user.id, EventType.HELPDESK_ESCALATED,
+            detail=f"chat_id={chat.id}, ticket_id={ticket.id} (manual, tombol Hubungi Admin)",
+            metadata={"manual": True},
+        )
+        return _ticket_detail(ticket, db)
+
+    # ---------- Jalur banner confidence rendah (perilaku lama, tidak berubah) ----------
     message = db.query(Message).filter(Message.id == payload.message_id).first()
     if not message or message.sender != SenderType.assistant:
         raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
-
-    chat = db.query(Chat).filter(Chat.id == message.chat_id).first()
-    if not chat or chat.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Pesan ini bukan milik Anda")
-
+    if message.chat_id != chat.id:
+        raise HTTPException(status_code=400, detail="Pesan ini bukan bagian dari percakapan yang dimaksud")
     if message.confidence_score is None:
         raise HTTPException(status_code=400, detail="Pesan ini tidak memenuhi syarat eskalasi")
 

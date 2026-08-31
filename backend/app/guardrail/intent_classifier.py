@@ -1,29 +1,22 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Intent Classification — SRS FCR-003 hal. 17, poin 9: "Sistem melakukan:
-a) Intent classification, b) Role validation, c) Filtering guardrail".
-Role validation (RBAC) dan Filtering guardrail (filters.py/prompt_injection.py)
-sudah ada; ini menutup poin (a) yang sebelumnya belum ada langkah terpisah.
-
-Pendekatan berbasis ATURAN (regex), bukan panggilan LLM tambahan — beda dari
-get_standalone_query() yang memang butuh LLM buat merangkai ulang kalimat.
-Klasifikasi di sini cuma perlu jawab pertanyaan sempit "perlu RAG atau
-tidak", jadi heuristik sudah cukup dan JAUH lebih murah/cepat (tidak nambah
-1 pemanggilan LLM lagi di setiap pesan, tidak nambah latency).
-"""
+"""Intent Classification (SRS FCR-003 poin 9a) — 2 lapis: regex (gratis) lalu LLM (nebeng analyze_query, lihat llm/router.py)."""
 import re
 
 
 class Intent:
-    GREETING = "greeting"      # "halo", "selamat pagi", dst — sapaan pembuka
-    CHITCHAT = "chitchat"       # "makasih", "oke", "sip" — basa-basi, bukan pertanyaan
-    QUESTION = "question"       # default — perlu diproses lewat RAG seperti biasa
+    # ---------- Lapis 1 (regex) ----------
+    GREETING = "greeting"        # sapaan pembuka
+    CHITCHAT = "chitchat"        # basa-basi, bukan pertanyaan
+
+    # ---------- Lapis 2 (LLM) ----------
+    DOCUMENT_QUERY = "document_query"    # nanya isi dokumen chat ini
+    FAQ_LOOKUP = "faq_lookup"            # pertanyaan umum/prosedural
+    SUMMARY_REQUEST = "summary_request"  # minta ringkasan semua dokumen
+    GENERAL_CHAT = "general_chat"        # obrolan, bukan pencarian informasi
+
+    QUESTION = "question"  # fallback kalau klasifikasi LLM gagal
 
 
-# Cuma cocok kalau pesan itu PENDEK dan SELURUHNYA basa-basi — pesan
-# panjang yang KEBETULAN diawali "halo" (mis. "Halo, saya mau tanya soal
-# audit log...") tetap harus lewat RAG, bukan di-skip cuma karena ada
-# kata "halo" di depan. Makanya polanya \A...\Z (cocok utuh, bukan search).
+# Pola \A...\Z (cocok utuh) — pesan panjang yang cuma DIAWALI "halo" tetap lanjut RAG.
 _GREETING_PATTERNS = [re.compile(p, re.I) for p in [
     r"\A(hai|halo|hello|hi|hey)[!.\s]*\Z",
     r"\Aselamat (pagi|siang|sore|malam)[!.\s]*\Z",
@@ -37,17 +30,24 @@ _CHITCHAT_PATTERNS = [re.compile(p, re.I) for p in [
     r"\A(sampai jumpa|bye|dadah|see you)[!.\s]*\Z",
 ]]
 
-# Dipakai chat/routes.py buat memutuskan skip RAG atau tidak — dikumpulkan
-# di satu tempat (bukan hardcode {"greeting","chitchat"} di 2 tempat beda)
-# supaya kalau nanti nambah kategori baru yang juga harus skip RAG, cukup
-# diedit di sini.
-SKIP_RETRIEVAL_INTENTS = frozenset({Intent.GREETING, Intent.CHITCHAT})
+SKIP_RETRIEVAL_INTENTS = frozenset({Intent.GREETING, Intent.CHITCHAT})  # skip RAG total
+
+LAYER2_INTENTS = frozenset({  # daftar putih output LLM, cegah kategori halusinasi
+    Intent.DOCUMENT_QUERY, Intent.FAQ_LOOKUP, Intent.SUMMARY_REQUEST,
+    Intent.GENERAL_CHAT, Intent.QUESTION,
+})
 
 
-def classify_intent(text: str) -> str:
+def classify_intent_rule_based(text: str) -> str | None:
+    """Lapis 1 saja — None berarti "lanjut ke lapis 2", beda dari QUESTION (fallback gagal)."""
     stripped = text.strip()
     if any(p.match(stripped) for p in _GREETING_PATTERNS):
         return Intent.GREETING
     if any(p.match(stripped) for p in _CHITCHAT_PATTERNS):
         return Intent.CHITCHAT
-    return Intent.QUESTION
+    return None
+
+
+def classify_intent(text: str) -> str:
+    """Placeholder sebelum lapis 2 — chat/routes.py menimpa hasil ini kalau lanjut ke LLM."""
+    return classify_intent_rule_based(text) or Intent.QUESTION

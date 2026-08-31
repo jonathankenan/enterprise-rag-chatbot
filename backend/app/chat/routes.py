@@ -1,10 +1,6 @@
-"""
-[TITIK INTEGRASI A + B]
-Endpoint ini menggabungkan:
-- Fungsi dari Anggota B: autentikasi, guardrail (F1-04, F2-04), audit log, simpan/ambil dari database
-- Fungsi dari Anggota A: retrieval RAG, LLM switching (F1-05)
-"""
+"""Titik integrasi: autentikasi/guardrail/audit log/database + retrieval RAG/LLM switching (F1-05)."""
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -23,7 +19,7 @@ from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
 from app.rag.vectorstore import retrieve_context
-from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS
+from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
 from app.llm.router import route_and_generate, LLMResult
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 from app.chat.pdf_export import generate_pdf
@@ -38,12 +34,7 @@ GUARDRAIL_REFUSAL_MESSAGE = (
 
 
 def _mask_for_storage(text: str, entities: list[dict] | None = None) -> tuple[str, str | None]:
-    """
-    Siapkan (content, pii_mapping) untuk disimpan ke kolom Message — SRS
-    FCR-003 poin 3.j: histori WAJIB dalam bentuk sudah di-mask. Kembalikan
-    pii_mapping sebagai None (bukan "{}") kalau tidak ada PII, supaya kolom
-    di DB tetap NULL untuk pesan biasa (bukan string JSON kosong di mana-mana).
-    """
+    """Siapkan (content, pii_mapping) untuk disimpan ke Message (SRS poin 3.j) — pii_mapping None (bukan "{}") kalau tidak ada PII."""
     if entities is None:
         entities = detect_pii_entities(text)
     if not entities:
@@ -53,14 +44,7 @@ def _mask_for_storage(text: str, entities: list[dict] | None = None) -> tuple[st
 
 
 def _display_content(msg: Message) -> str:
-    """
-    Kembalikan isi pesan yang SIAP ditampilkan ke pemilik chat: demasked
-    kembali ke data asli kalau pesan ini punya pii_mapping tersimpan. Dipakai
-    di endpoint yang menampilkan riwayat (get_messages, export_pdf) — BUKAN
-    di respons langsung setelah kirim pesan (send_message sudah pakai
-    result.reply yang belum sempat di-mask sama sekali, jadi tidak perlu
-    di-demask ulang).
-    """
+    """Isi pesan siap ditampilkan ke pemilik chat (demasked) — dipakai di endpoint riwayat, bukan respons langsung setelah kirim pesan."""
     if not msg.pii_mapping:
         return msg.content
     return demask(msg.content, json.loads(msg.pii_mapping))
@@ -68,7 +52,7 @@ def _display_content(msg: Message) -> str:
 
 @router.post("", response_model=ChatResponse)
 def create_chat(payload: ChatCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """[B] Buat sesi percakapan baru."""
+    """Buat sesi percakapan baru."""
     chat = Chat(user_id=user.id, title=payload.title)
     db.add(chat)
     db.commit()
@@ -78,19 +62,47 @@ def create_chat(payload: ChatCreate, db: Session = Depends(get_db), user: User =
 
 
 @router.get("/history", response_model=list[ChatResponse])
-def get_chat_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """[B] Ambil daftar percakapan milik user yang sedang login."""
-    return db.query(Chat).filter(Chat.user_id == user.id).order_by(Chat.created_at.desc()).all()
+def get_chat_history(archived: bool = False, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Ambil daftar percakapan milik user yang sedang login — default cuma yang aktif, archived=true buat lihat arsip (SRS poin 4)."""
+    return (
+        db.query(Chat)
+        .filter(Chat.user_id == user.id, Chat.archived.is_(archived))
+        .order_by(Chat.created_at.desc())
+        .all()
+    )
+
+
+@router.patch("/{chat_id}/archive", response_model=ChatResponse)
+def archive_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Arsipkan percakapan — alternatif reversibel dari hapus permanen (SRS poin 4: 'menghapus atau mengarsipkan')."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+    chat.archived = True
+    chat.archived_at = datetime.utcnow()
+    db.commit()
+    db.refresh(chat)
+    log_guardrail_event(db, user.id, EventType.CHAT_ARCHIVED, detail=f"chat_id={chat.id}, title={chat.title}")
+    return chat
+
+
+@router.patch("/{chat_id}/unarchive", response_model=ChatResponse)
+def unarchive_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Pulihkan percakapan dari arsip."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
+    chat.archived = False
+    chat.archived_at = None
+    db.commit()
+    db.refresh(chat)
+    log_guardrail_event(db, user.id, EventType.CHAT_UNARCHIVED, detail=f"chat_id={chat.id}, title={chat.title}")
+    return chat
 
 
 @router.get("/{chat_id}/messages", response_model=list[MessageResponse])
 def get_messages(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """
-    [B] Ambil semua pesan dalam satu percakapan.
-    Isi pesan tersimpan dalam bentuk masked (SRS 3.j) — di-demask di sini
-    khusus untuk pemilik chat yang sah (endpoint ini sudah dijaga
-    `Chat.user_id == user.id` di atas), supaya dia tetap lihat data asli.
-    """
+    """Ambil semua pesan dalam satu percakapan — demasked khusus untuk pemilik chat yang sah."""
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
@@ -105,16 +117,12 @@ def get_messages(chat_id: str, db: Session = Depends(get_db), user: User = Depen
 
 @router.delete("/{chat_id}")
 def delete_chat(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """[B] Hapus percakapan beserta seluruh pesannya."""
+    """Hapus percakapan beserta seluruh pesannya."""
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
 
-    # Log SEBELUM benar-benar dihapus — setelah ini, chat & pesannya lenyap
-    # permanen, jadi ini satu-satunya kesempatan mencatat chat.title dan
-    # jumlah pesannya sebelum hilang (aksi destruktif, sebelumnya TIDAK ADA
-    # jejak sama sekali kalau ada chat yang terhapus).
-    message_count = db.query(Message).filter(Message.chat_id == chat.id).count()
+    message_count = db.query(Message).filter(Message.chat_id == chat.id).count()  # log SEBELUM dihapus, satu-satunya kesempatan mencatat
     log_guardrail_event(
         db, user.id, EventType.CHAT_DELETED,
         detail=f"chat_id={chat.id}, title={chat.title}",
@@ -134,7 +142,7 @@ def rename_chat(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """[B] Ganti judul percakapan secara manual."""
+    """Ganti judul percakapan secara manual."""
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
@@ -152,16 +160,7 @@ def rename_chat(
 
 
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
-    """
-    SRS FCR-003 poin 12.a: "Answers show source references". context_chunks
-    sudah punya filename/page/source_type sejak retrieve_context() (lihat
-    rag/vectorstore.py) -- ini DEDUP jadi satu entri per dokumen/FAQ unik
-    (bukan satu per chunk, satu dokumen bisa nyumbang banyak chunk ke context
-    yang sama), sambil MENGUMPULKAN semua nomor halaman yang chunk-nya ikut
-    kepakai, supaya label-nya bisa jadi "file.pdf (hal. 2, 5)" bukan cuma
-    "file.pdf" -- dua chunk beda halaman dari dokumen yang sama tetap satu
-    entri citation, bukan dua.
-    """
+    """SRS poin 12.a — dedup context_chunks jadi satu entri per dokumen/FAQ unik, kumpulkan semua nomor halaman jadi label "file.pdf (hal. 2, 5)"."""
     order: list[str] = []          # key insertion order, buat urutan citation stabil
     labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file
     filenames: dict[str, str | None] = {}
@@ -169,16 +168,7 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
     pages: dict[str, set[int]] = {}
 
     for chunk in context_chunks:
-        # is_top_match ditandai retrieve_context() -- cuma 3 chunk dengan
-        # similarity TERBAIK (sama seperti yang dipakai untuk confidence_score,
-        # lihat komentar di sana) yang layak disebut sebagai sumber. Chunk lain
-        # tetap masuk PROVIDED CONTEXT ke LLM (context_chunks di sini utuh),
-        # tapi tidak semuanya "sumber jawaban ini" -- 2026-08-24, ditambahkan
-        # setelah citation "FR-01" ikut menyebut 5 halaman lain yang tidak ada
-        # kaitan sama sekali (cuma "di sekitar secara topik" di window top_k).
-        # .get(..., True) -- default True supaya get_all_session_chunks() ("ringkas
-        # semua", tidak diranking/tidak ditandai is_top_match) tetap kutip semuanya,
-        # sesuai maksud awal permintaan "ringkas SEMUA dokumen ini".
+        # cuma chunk is_top_match (3 similarity terbaik) yang layak jadi sumber -- default True supaya get_all_session_chunks() ("ringkas semua") tetap kutip semuanya
         if not chunk.get("is_top_match", True):
             continue
 
@@ -189,10 +179,7 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
             label = "FAQ Helpdesk"
         else:
             filename = chunk.get("filename") or "Dokumen tanpa nama"
-            # source_type ikut jadi bagian key -- filename yang sama secara
-            # kebetulan muncul di kb_divisi DAN chat_document (jarang, tapi
-            # mungkin) tetap dianggap 2 sumber berbeda, bukan digabung.
-            key = f"{source_type}:{filename}"
+            key = f"{source_type}:{filename}"  # source_type ikut key -- filename sama tapi source_type beda tetap dianggap 2 sumber
             label = filename
 
         if key not in labels:
@@ -224,29 +211,14 @@ async def send_message(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """
-    Endpoint utama chat — alur lengkap F1-03, F1-04, F1-05, F2-04:
-    1. [B] Rate limiting per-user (F2-04 / SRS Model Usage Policy poin c-d)
-    2. [B] Validasi chat milik user
-    3. [B] Guardrail dasar (F1-04) + lanjutan (F2-04) — BALAS NORMAL (bukan error) kalau ditolak
-    4. [B] Simpan pesan user ke database
-    5. [A] Retrieval — cari potongan dokumen relevan (RAG)
-    6. [A+B] LLM switching + guardrail before/after LLM (masking PII, output filter)
-    7. [B] Simpan jawaban AI ke database + catat audit log (dengan detail lengkap)
-    """
-    # ---------- Rate limiting (paling murah, dicek paling awal) ----------
-    check_chat_rate_limit(db, user.id)
+    """Endpoint utama chat — F1-03/F1-04/F1-05/F2-04: rate limit -> validasi chat -> guardrail -> simpan pesan user -> retrieval RAG -> LLM+guardrail -> simpan jawaban+audit log."""
+    check_chat_rate_limit(db, user.id)  # paling murah, dicek paling awal
 
     chat = db.query(Chat).filter(Chat.id == payload.chat_id, Chat.user_id == user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Percakapan tidak ditemukan")
 
-    # ---------- SRS FCR-003 Rules poin 2: force-stop LLM Commercial ----------
-    # Dicek SEKALI di awal, dipakai untuk paksa SEMUA pemanggilan LLM di
-    # endpoint ini (rephrase query, jawaban utama, auto-generate judul chat)
-    # ke on-prem — bukan cuma jawaban utamanya saja. "Disable SELURUH
-    # penggunaan LLM Commercial" di teks SRS ditafsirkan literal: termasuk
-    # pemanggilan internal (auto-title) yang user bahkan tidak sadar terjadi.
+    # SRS hal. 10 Rules poin 2: force-stop dicek sekali, paksa SEMUA pemanggilan LLM (rephrase, jawaban, auto-title) ke on-prem
     system_settings = db.query(SystemSettings).filter(SystemSettings.id == "global").first()
     commercial_llm_disabled = bool(system_settings and system_settings.commercial_llm_force_stopped)
     effective_provider = "on-prem" if commercial_llm_disabled else payload.llm_provider
@@ -255,11 +227,8 @@ async def send_message(
     is_blocked = is_prompt_blocked(payload.content)
     is_injection = is_prompt_injection(payload.content)
 
-    # ---------- Guardrail lintas-giliran: cuma perlu dicek kalau pesan ----------
-    # SEKARANG belum ke-flag sendirian — kalau sudah, cek kumulatif jadi
-    # tidak relevan lagi (sudah pasti diblokir juga).
     is_multi_turn = False
-    if not is_blocked and not is_injection:
+    if not is_blocked and not is_injection:  # cek kumulatif cuma relevan kalau pesan sekarang belum ke-flag sendirian
         recent_user_texts = [
             m.content for m in
             db.query(Message)
@@ -273,10 +242,7 @@ async def send_message(
     if is_blocked or is_injection or is_multi_turn:
         event_type = EventType.PROMPT_BLOCKED if is_blocked else EventType.INJECTION_BLOCKED
 
-        # dict biasa yang diisi bertahap (bukan reassignment) — supaya kalau
-        # is_blocked & is_injection kebetulan sama-sama True di satu pesan
-        # yang sama, metadata-nya TERGABUNG, bukan salah satu ketimpa.
-        metadata: dict = {}
+        metadata: dict = {}  # diisi bertahap, bukan reassignment -- supaya blocked & injection sekaligus tergabung, tidak saling timpa
         if is_blocked:
             metadata["category"] = get_blocked_category(payload.content)
         if is_injection or is_multi_turn:
@@ -287,10 +253,7 @@ async def send_message(
         metadata = metadata or None
         log_guardrail_event(db, user.id, event_type, detail=payload.content[:200], metadata=metadata)
 
-        # Simpan tetap dalam bentuk masked (SRS 3.j) meski pesannya diblokir
-        # sebelum sempat diproses LLM — PII di pesan tetap PII, terlepas dari
-        # apakah pesannya lolos guardrail lain atau tidak.
-        blocked_content, blocked_pii_mapping = _mask_for_storage(payload.content)
+        blocked_content, blocked_pii_mapping = _mask_for_storage(payload.content)  # tetap masked meski diblokir sebelum sempat diproses LLM
         user_msg = Message(chat_id=chat.id, sender=SenderType.user, content=blocked_content, pii_mapping=blocked_pii_mapping)
         db.add(user_msg)
         ai_msg = Message(
@@ -313,10 +276,7 @@ async def send_message(
     chat_history = db.query(Message).filter(Message.chat_id == chat.id).order_by(Message.created_at.desc()).limit(6).all()
     chat_history.reverse()
 
-    # ---------- Deteksi PII SEKALI di sini, dipakai untuk 2 keperluan ----------
-    # (1) masking sebelum simpan ke histori (SRS 3.j), (2) diteruskan ke
-    # route_and_generate supaya Presidio tidak jalan ulang untuk teks yang
-    # sama persis (lihat parameter pii_entities baru di router.py).
+    # deteksi PII sekali, dipakai untuk (1) masking sebelum simpan, (2) diteruskan ke route_and_generate biar Presidio tidak jalan ulang
     user_pii_entities = detect_pii_entities(payload.content)
     stored_user_content, user_pii_mapping = _mask_for_storage(payload.content, entities=user_pii_entities)
 
@@ -343,23 +303,28 @@ async def send_message(
         context_chunks, retrieval_confidence = [], None
         session_has_document = False
     else:
-        from app.llm.router import get_standalone_query
-        search_query = await get_standalone_query(payload.content, chat_history, effective_provider)
+        # Lapis 2 (LLM, nebeng pemanggilan rephrase query — llm/router.py analyze_query()) timpa intent placeholder jadi kategori lebih kaya
+        from app.llm.router import analyze_query
+        analysis = await analyze_query(payload.content, chat_history, effective_provider)
+        search_query = analysis["standalone_query"]
+        intent = analysis["intent"]
 
-        query_lower = search_query.lower()
-        if "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower:
+        query_lower = search_query.lower()  # keyword OR dipertahankan sebagai jaring pengaman kalau LLM gagal menangkap summary_request
+        is_summary = (
+            intent == Intent.SUMMARY_REQUEST
+            or "summarize" in query_lower or "summary" in query_lower or "ringkas" in query_lower
+        )
+
+        if is_summary:
             from app.rag.vectorstore import get_all_session_chunks, has_session_document
             context_chunks = get_all_session_chunks(chat_id=chat.id, limit=15)
             session_has_document = has_session_document(chat_id=chat.id)
-            # Permintaan "ringkas semua" ambil SELURUH chunk apa adanya, bukan
-            # hasil pencarian semantik top-k — konsep "seberapa relevan hasil
-            # pencarian" tidak berlaku di sini, jadi tidak ada confidence yang
-            # bisa dihitung secara jujur untuk kasus ini.
-            retrieval_confidence = None
+            retrieval_confidence = None  # "ringkas semua" ambil seluruh chunk apa adanya, tidak ada skor relevansi yang jujur untuk dihitung
         else:
             from app.rag.vectorstore import has_session_document, extract_query_identifiers
             context_chunks, retrieval_confidence = retrieve_context(
                 search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
+                weight_hint=intent,
             )
             session_has_document = has_session_document(chat_id=chat.id)
 
@@ -469,7 +434,7 @@ async def send_message(
                 "ilustrasi, bukan hasil pengukuran.\n\n"
             ) + result.reply
 
-    # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM (dengan detail lengkap) ----------
+    # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM ----------
     if result.pii_detected:
         log_guardrail_event(
             db, user.id, EventType.PII_DETECTED,
@@ -488,11 +453,7 @@ async def send_message(
             metadata={"category": result.output_blocked_category, "llm_used": result.llm_used},
         )
 
-    # Jawaban AI juga bisa mengandung PII — entah karena mengulang balik data
-    # yang user kirim, atau mengutip data dari dokumen RAG yang di-upload.
-    # Ini teks BARU (hasil generate), jadi deteksi PII-nya tidak bisa reuse
-    # dari mana pun, harus dihitung sendiri di sini.
-    stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)
+    stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)  # teks baru hasil generate, deteksi PII-nya dihitung sendiri di sini
 
     ai_msg = Message(
         chat_id=chat.id,
@@ -505,24 +466,14 @@ async def send_message(
     db.add(ai_msg)
     db.commit()
 
-    # ---------- FCR-003 poin 7: sistem MENAWARKAN eskalasi ke human helpdesk ----------
-    # SRS literal: "sistem menawarkan eskalasi" (bukan langsung membuat tiket
-    # tanpa izin). Confidence None (percakapan umum tanpa RAG) sengaja TIDAK
-    # memicu ini — itu bukan "jawaban tidak meyakinkan", memang tidak relevan
-    # diberi skor (lihat router.py: confidence dipaksa None kalau
-    # context_chunks kosong). Tiket BARU dibuat kalau user klik konfirmasi
-    # di frontend -> POST /api/helpdesk/tickets (lihat helpdesk/routes.py).
+    # SRS poin 7: sistem MENAWARKAN eskalasi (bukan auto-create tiket); confidence None (general chat) sengaja tidak pernah memicu ini
     escalation_offered = (
         result.confidence_score is not None
         and result.confidence_score < settings.escalation_confidence_threshold
     )
 
     new_title = None
-    # commercial_llm_disabled dicek di sini juga — auto-generate judul chat
-    # SELALU pakai call_commercial_llm() langsung (tidak lewat route_and_generate,
-    # jadi tidak otomatis ke-cover oleh effective_provider di atas), jadi
-    # perlu di-skip manual kalau force-stop aktif.
-    if chat.title == "Percakapan Baru" and not commercial_llm_disabled:
+    if chat.title == "Percakapan Baru" and not commercial_llm_disabled:  # auto-title selalu pakai call_commercial_llm() langsung, perlu di-skip manual
         try:
             prompt = f"Buatlah judul singkat (maksimal 3-5 kata) yang merangkum pesan berikut. Hanya kembalikan teks judulnya saja, tanpa tanda kutip atau penjelasan apapun.\n\nPesan: {payload.content}"
             new_title = await call_commercial_llm(prompt)
@@ -546,15 +497,7 @@ async def send_message(
 
 @router.get("/{chat_id}/export-pdf")
 def export_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """
-    [B] Ekspor riwayat percakapan menjadi PDF.
-
-    Spesifikasi Tingkat 2 (F2-08): "Ekspor percakapan ke PDF, dibatasi hanya
-    untuk role tertentu (mis. admin, compliance)." Daftar role yang
-    diizinkan dikonfigurasi RUNTIME oleh IT Admin (SystemSettings.
-    export_allowed_roles, lihat admin/routes.py) — bukan daftar tetap di
-    kode, supaya bisa disesuaikan tanpa deploy ulang.
-    """
+    """Ekspor riwayat percakapan ke PDF — F2-08, role yang diizinkan dikonfigurasi runtime lewat SystemSettings.export_allowed_roles (admin/routes.py)."""
     system_settings = db.query(SystemSettings).filter(SystemSettings.id == "global").first()
     allowed_roles = system_settings.get_export_allowed_roles() if system_settings else [Role.IT_ADMIN, Role.COMPLIANCE]
     if user.role not in allowed_roles:
@@ -580,9 +523,7 @@ def export_pdf(chat_id: str, db: Session = Depends(get_db), user: User = Depends
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal generate PDF: {str(e)}")
 
-    # Data keluar sistem sebagai file — jalur potensial kebocoran data,
-    # dicatat siapa yang export chat mana dan kapan.
-    log_guardrail_event(db, user.id, EventType.CHAT_EXPORTED, detail=f"chat_id={chat.id}, title={chat.title}")
+    log_guardrail_event(db, user.id, EventType.CHAT_EXPORTED, detail=f"chat_id={chat.id}, title={chat.title}")  # jalur potensial kebocoran data, dicatat
 
     return Response(
         content=pdf_bytes,

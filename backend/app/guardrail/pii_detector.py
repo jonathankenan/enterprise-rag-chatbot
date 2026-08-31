@@ -1,21 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Deteksi & masking PII (F2-04) — Microsoft Presidio + recognizer kustom
-untuk pola data identitas Indonesia yang lengkap.
-
-Catatan desain: entitas PERSON (nama orang) SENGAJA TIDAK dimasukkan ke
-_TARGET_ENTITIES. Model NLP Bahasa Inggris (en_core_web_sm) terbukti sering
-salah mengira kata/istilah Indonesia sebagai nama orang (mis. "NIK", "haloo"),
-dan whitelist manual tidak bisa mengejar semua variasi/typo yang mungkin
-muncul. Karena nama tunggal juga PII yang relatif lemah dibanding data
-terstruktur (NIK, email, kartu kredit, dll), risiko false-positive dianggap
-lebih merugikan (memaksa ke model kecil secara keliru) daripada manfaat
-proteksinya. Fokus deteksi tetap pada data terstruktur yang akurasinya tinggi.
-
-Prasyarat instalasi:
-    pip install presidio-analyzer spacy
-    python -m spacy download en_core_web_sm
-"""
+"""Deteksi & masking PII (F2-04) — Microsoft Presidio + recognizer kustom untuk pola data identitas Indonesia."""
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
@@ -26,7 +9,7 @@ _nlp_config = {
 _nlp_engine = NlpEngineProvider(nlp_configuration=_nlp_config).create_engine()
 _analyzer = AnalyzerEngine(nlp_engine=_nlp_engine)
 
-# ---------- Recognizer kustom untuk pola identitas Indonesia ----------
+# PERSON sengaja tidak dimasukkan ke _TARGET_ENTITIES -- model NLP Inggris sering salah kira istilah Indonesia sebagai nama orang
 
 _analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="ID_NIK",
@@ -34,16 +17,7 @@ _analyzer.registry.add_recognizer(PatternRecognizer(
     context=["nik", "ktp", "identitas"],
 ))
 
-# CATATAN (pasca-audit): recognizer ID_KK SENGAJA DIHAPUS. Nomor KK dan NIK
-# di Indonesia sama-sama 16 digit — regex-nya identik dengan ID_NIK di atas.
-# Karena _remove_overlaps() di bawah selalu memilih skor tertinggi saat dua
-# entitas bertumpuk posisinya, ID_KK (skor 0.4) tidak akan PERNAH menang
-# melawan ID_NIK (skor 0.75) untuk angka 16-digit manapun — recognizer ini
-# dulu ada di kode tapi secara efektif tidak pernah bisa terpicu (dead code).
-# Bukannya membiarkan recognizer yang terlihat aktif padahal tidak pernah
-# jalan, lebih jujur dihapus: angka 16-digit tetap terdeteksi sebagai PII
-# lewat ID_NIK, hanya labelnya generik karena pola angka semata memang
-# tidak bisa membedakan NIK vs KK tanpa kata konteks tambahan di sekitarnya.
+# ID_KK sengaja dihapus -- regex-nya identik NIK (16 digit) dan skornya selalu kalah, jadi dead code (pasca-audit)
 
 _analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="ID_NPWP",
@@ -93,8 +67,6 @@ _analyzer.registry.add_recognizer(PatternRecognizer(
     context=["plat", "nomor polisi", "kendaraan"],
 ))
 
-# Recognizer email kustom dengan skor tinggi — mengalahkan skor entitas lain
-# yang mungkin tumpang tindih pada bagian username email.
 _analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="EMAIL_ADDRESS",
     patterns=[Pattern(
@@ -104,7 +76,6 @@ _analyzer.registry.add_recognizer(PatternRecognizer(
     )],
 ))
 
-# Entitas target — PERSON SENGAJA TIDAK disertakan (lihat catatan desain di atas).
 _TARGET_ENTITIES = [
     "ID_NIK", "ID_NPWP", "ID_PHONE", "ID_SIM", "ID_PASPOR",
     "ID_BPJS", "ID_REKENING_BANK", "ID_PLAT_KENDARAAN",
@@ -124,12 +95,7 @@ def _remove_overlaps(entities):
 
 
 def detect_pii_entities(text: str) -> list[dict]:
-    """
-    Kembalikan daftar entitas PII yang terdeteksi (skor >= 0.5).
-    Ini SATU-SATUNYA fungsi yang menjalankan Presidio secara langsung —
-    dipakai baik untuk keputusan (apakah ada PII?), masking, maupun detail audit log,
-    supaya Presidio tidak dijalankan berulang kali untuk teks yang sama.
-    """
+    """Kembalikan daftar entitas PII terdeteksi (skor >= 0.5) — satu-satunya fungsi yang menjalankan Presidio langsung."""
     raw = _analyzer.analyze(text=text, language="en", entities=_TARGET_ENTITIES)
     clean = _remove_overlaps(raw)
     return [
@@ -140,15 +106,7 @@ def detect_pii_entities(text: str) -> list[dict]:
 
 
 def mask_pii(text: str, entities: list[dict] | None = None) -> tuple[str, dict[str, str]]:
-    """
-    Ganti setiap PII dengan placeholder unik, mis. [ID_NIK_1].
-    Kembalikan teks yang sudah di-mask + mapping placeholder -> nilai asli
-    (dipakai nanti oleh demask() untuk mengembalikan ke nilai asli).
-
-    entities: kalau sudah dihitung sebelumnya lewat detect_pii_entities(),
-              berikan di sini supaya Presidio tidak dijalankan ulang.
-              Kalau None, akan dihitung otomatis di dalam fungsi ini.
-    """
+    """Ganti tiap PII dengan placeholder unik (mis. [ID_NIK_1]), kembalikan teks ter-mask + mapping placeholder->nilai asli."""
     if entities is None:
         entities = detect_pii_entities(text)
 
@@ -163,8 +121,7 @@ def mask_pii(text: str, entities: list[dict] | None = None) -> tuple[str, dict[s
         mapping[placeholder] = original_value
         replacements.append((e["start"], e["end"], placeholder))
 
-    # Ganti dari BELAKANG ke DEPAN supaya index karakter tidak bergeser
-    masked_text = text
+    masked_text = text  # ganti dari belakang ke depan supaya index karakter tidak bergeser
     for start, end, placeholder in sorted(replacements, key=lambda r: r[0], reverse=True):
         masked_text = masked_text[:start] + placeholder + masked_text[end:]
 

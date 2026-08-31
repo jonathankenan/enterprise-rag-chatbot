@@ -1,7 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota A]
-Endpoint: POST /api/documents/upload — unggah PDF untuk masuk ke knowledge base RAG.
-"""
+"""Endpoint: POST /api/documents/upload — unggah PDF untuk masuk ke knowledge base RAG."""
 import io
 import uuid
 
@@ -33,10 +30,7 @@ async def upload_document(
 ):
     file_bytes = await file.read()
     pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
-    # Flat text kept around only for the (currently disabled, see block below)
-    # whole-document guardrail scan -- indexing itself uses `pages` so chunks
-    # can be tagged with page numbers (SRS FCR-003 poin 12.a).
-    text = "\n\n".join(p["text"] for p in pages)
+    text = "\n\n".join(p["text"] for p in pages)  # flat text buat guardrail scan; indexing pakai `pages` supaya bisa ditag nomor halaman
 
     # ---------- Guardrail F2-04 pada KONTEN dokumen, bukan cuma prompt chat ----------
     # Sebelumnya teks PDF langsung di-index tanpa pemeriksaan apa pun, sehingga
@@ -80,10 +74,7 @@ async def upload_document(
     db.add(doc_record)
     db.commit()
 
-    # Upload yang BERHASIL (beda dari DOCUMENT_BLOCKED di atas) — dokumen ini
-    # ikut memengaruhi jawaban AI untuk sesi chat terkait, layak dicatat siapa
-    # yang menambahkannya.
-    log_guardrail_event(
+    log_guardrail_event(  # upload berhasil (beda dari DOCUMENT_BLOCKED), layak dicatat siapa yang menambahkannya
         db, user.id, EventType.DOCUMENT_UPLOADED,
         detail=f"document_upload:{file.filename}",
         metadata={"chat_id": chat_id, "doc_id": doc_id, "chunk_count": chunk_count},

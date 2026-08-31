@@ -1,18 +1,11 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Rate limiting sederhana untuk mencegah brute-force pada endpoint login.
-Implementasi in-memory (disimpan di RAM) — cukup untuk skala internship.
-Untuk produksi sungguhan, biasanya dipindah ke Redis agar tidak hilang saat restart
-dan bisa dipakai bersama di banyak server.
-"""
+"""Rate limiting login sederhana, in-memory (RAM) — cukup untuk skala internship, produksi biasanya pindah ke Redis."""
 import time
 from fastapi import HTTPException
 
 MAX_ATTEMPTS = 5
 WINDOW_SECONDS = 15 * 60  # 15 menit
 
-# Menyimpan: { "email@contoh.com": [timestamp1, timestamp2, ...] }
-_failed_attempts: dict[str, list[float]] = {}
+_failed_attempts: dict[str, list[float]] = {}  # { "email@contoh.com": [timestamp1, timestamp2, ...] }
 
 
 def check_rate_limit(email: str):
@@ -20,8 +13,7 @@ def check_rate_limit(email: str):
     now = time.time()
     attempts = _failed_attempts.get(email, [])
 
-    # Buang percobaan yang sudah di luar jendela waktu (lebih dari 15 menit lalu)
-    attempts = [t for t in attempts if now - t < WINDOW_SECONDS]
+    attempts = [t for t in attempts if now - t < WINDOW_SECONDS]  # buang percobaan di luar jendela waktu
     _failed_attempts[email] = attempts
 
     if len(attempts) >= MAX_ATTEMPTS:

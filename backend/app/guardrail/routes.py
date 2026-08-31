@@ -1,16 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Endpoint audit log guardrail — dibatasi Role.AUDIT_VIEWERS (IT_ADMIN,
-COMPLIANCE, AUDITOR — SRS FCR-003 hal. 15, poin 2.d).
-
-Catatan pembersihan (2026-08-12): endpoint /recent dan /high-severity yang
-dulu ada di sini SUDAH DIHAPUS — keduanya cuma kasus khusus dari /search
-(recent = /search tanpa filter apapun, high-severity = /search?severity=high)
-dan tidak pernah benar-benar dipakai frontend (dead code sejak dibuat).
-Fungsi get_recent_events()/get_high_severity_events() di audit_log.py tetap
-dibiarkan ada (utility murni, tidak berbahaya kalau tidak dipakai), tapi
-endpoint API-nya dihapus supaya tidak ada permukaan API yang menganggur.
-"""
+"""Endpoint audit log guardrail — dibatasi Role.AUDIT_VIEWERS (IT_ADMIN, COMPLIANCE, AUDITOR — SRS hal. 15 poin 2.d)."""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Response
@@ -50,11 +38,7 @@ def search(
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*Role.AUDIT_VIEWERS)),
 ):
-    """
-    Pencarian audit log serba-guna — SRS ISR-004.d (Search, Sort, Filter data).
-    Semua parameter opsional & bisa dikombinasikan, mis.
-    /api/audit/search?event_type=injection_blocked&severity=medium&sort_by=severity&sort_order=asc
-    """
+    """Pencarian audit log serba-guna — SRS ISR-004.d (Search, Sort, Filter data), semua parameter opsional & bisa dikombinasikan."""
     return search_events(
         db, event_type=event_type, severity=severity, user_id=user_id,
         search_text=q, since=since, until=until,
@@ -73,11 +57,7 @@ def export(
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*Role.AUDIT_VIEWERS)),
 ):
-    """
-    Export audit log ke file CSV — SRS ISR-004.d 'Export to file'. Pakai
-    filter yang sama seperti /search (tanpa limit/sort, export semua yang
-    cocok filter — default limit besar supaya tidak keliru kepotong diam-diam).
-    """
+    """Export audit log ke CSV — SRS ISR-004.d 'Export to file', filter sama seperti /search, limit besar supaya tidak diam-diam kepotong."""
     events = search_events(
         db, event_type=event_type, severity=severity, user_id=user_id,
         search_text=q, since=since, until=until, limit=10000,

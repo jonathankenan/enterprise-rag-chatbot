@@ -1,7 +1,4 @@
-"""
-[DIKERJAKAN BERSAMA]
-Entry point aplikasi FastAPI. Menyatukan semua router dari A dan B.
-"""
+"""Entry point aplikasi FastAPI. Menyatukan semua router."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,9 +13,7 @@ from app.admin.routes import router as admin_router
 from app.faq.routes import router as faq_router
 from app.kb.routes import router as kb_router
 
-# Buat semua tabel di PostgreSQL kalau belum ada (cukup untuk skala internship;
-# untuk produksi biasanya pakai Alembic migration)
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine)  # buat semua tabel kalau belum ada (skala internship; produksi biasanya pakai Alembic)
 
 app = FastAPI(title="Generic ChatBot AI — Tingkat 1")
 

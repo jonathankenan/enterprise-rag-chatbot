@@ -1,54 +1,6 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Guardrail dasar (F1-04) — filter kata/frasa terlarang berbasis regex,
-dikelompokkan per kategori. Ini lapisan pertama (paling murah/cepat)
-sebelum guardrail lanjutan (F2-04: prompt_injection.py, pii_detector.py,
-output_filter.py).
-
-Kategori berikut disusun mengikuti daftar Content Restriction di SRS
-FCR-003 (hal. 15), poin 3.b — "Pemblokiran terhadap": SARA, ujaran
-kebencian, pornografi, kekerasan, ilegal instruction & prompt injection
-(prompt injection sendiri ditangani terpisah di prompt_injection.py), dan
-self-harm guidance. Ditambah kategori "serangan_teknis" untuk menutup
-poin 3.l — "Pembatasan pada file yang di upload atau prompt yang di
-sampaikan berisikan code execute".
-
-Catatan desain (pasca-audit):
-- Token pendek (mis. "sabu", "bom") WAJIB pakai \\b...\\b (word boundary).
-  Tanpa ini, dulu ada bug substring match: "sabu" ikut cocok pada kata
-  "sabun" yang sama sekali tidak berhubungan, sehingga kalimat sesantai
-  "rekomendasi sabun cuci" ikut diblokir sebagai konten narkoba.
-- Ditambahkan padanan Bahasa Inggris di semua kategori — prompt user
-  tidak selalu Indonesia.
-- Kategori "sara" dan "ujaran_kebencian" DIPISAH (sebelumnya digabung
-  jadi satu "sara_kebencian" yang isinya cuma frasa META "ujaran
-  kebencian" itu sendiri, bukan pola konten kebencian sesungguhnya).
-  Untuk daftar kata makian/slur eksplisit per suku/ras/agama, KAMI TIDAK
-  menaruhnya langsung sebagai literal di source code ini — selain
-  berisiko duplikat/tidak lengkap, menyimpan daftar slur di plaintext
-  source control juga berisiko disalahgunakan (mis. di-scrape balik
-  sebagai "daftar kata kasar siap pakai"). Praktik produksi yang lebih
-  baik: daftar tersebut disimpan terpisah (mis. file konfigurasi yang
-  di-load runtime, bukan di-commit ke git) dan dikurasi oleh tim
-  trust-and-safety. Di sini kita fokus pada POLA KALIMAT diskriminatif
-  yang bisa dideteksi tanpa daftar kata kasar eksplisit.
-- Kategori "pornografi" diperluas tapi tetap menghindari kata yang
-  berisiko tinggi ambigu dengan idiom (mis. "telanjang kaki" = idiom
-  "tanpa alas kaki"), makanya beberapa istilah sengaja dipasangkan
-  dengan kata benda media (foto/video/konten) supaya lebih presisi.
-- Kategori "instruksi_ilegal_lainnya" menampung permintaan instruksi
-  ilegal di luar senjata/narkoba: peretasan, phishing, pemalsuan
-  dokumen/identitas, penipuan/scam terstruktur.
-
-Ini tetap pendekatan keyword statis — secara inheren rawan false-negative
-(sinonim/parafrase yang belum terdaftar tetap lolos) dan bisa saja masih
-punya false-positive pada kasus tepi lain yang belum ditemukan. Ini bukan
-lapisan pertahanan satu-satunya, makanya ada F2-04 di belakangnya.
-"""
+"""Guardrail dasar (F1-04) — filter kata/frasa terlarang berbasis regex per kategori, lapisan pertama sebelum F2-04 (prompt_injection.py, pii_detector.py, output_filter.py). Kategori mengikuti SRS hal. 15 poin 3.b/3.l."""
 import re
 
-# Daftar pola per kategori. Semua pola dianggap regex (case-insensitive),
-# pakai \b untuk token pendek supaya tidak nyangkut di tengah kata lain.
 BLOCKED_KEYWORDS: dict[str, list[str]] = {
     "kekerasan": [
         r"\bbom\b", r"senjata ilegal", r"rakit senjata", r"bahan peledak",
@@ -103,12 +55,7 @@ BLOCKED_KEYWORDS: dict[str, list[str]] = {
         r"metode (bunuh diri|menyakiti diri) yang (efektif|tidak sakit)",
     ],
     "serangan_teknis": [
-        # SRS 3.l: pembatasan pada file/prompt yang berisi code execute
-        # atau upaya serangan teknis. SENGAJA tidak menandai penyebutan
-        # API/perintah semata (mis. "subprocess.run(" atau "os.system(")
-        # karena aktor sistem ini termasuk divisi PTI (IT) yang wajar
-        # bertanya soal kode sungguhan — pola di bawah fokus ke FRAMING
-        # niat jahat/perusakan, bukan sekadar istilah teknis.
+        # fokus ke framing niat jahat, bukan sekadar istilah teknis (aktor sistem termasuk divisi PTI/IT)
         r"\brm\s+-rf\s+/",
         r"buatkan (script|kode|program) (untuk )?(menghapus semua|memformat|merusak) (file|harddisk|sistem)",
         r"write (a script|code) to (delete all|wipe|destroy) (files|the system)",
@@ -134,10 +81,7 @@ def is_prompt_blocked(text: str) -> bool:
 
 
 def get_blocked_category(text: str) -> str | None:
-    """
-    Kembalikan nama kategori yang memicu blokir (untuk keperluan logging/audit),
-    atau None kalau tidak ada yang cocok.
-    """
+    """Kembalikan nama kategori yang memicu blokir (untuk logging/audit), atau None kalau tidak ada yang cocok."""
     for category, patterns in _COMPILED.items():
         if any(p.search(text) for p in patterns):
             return category

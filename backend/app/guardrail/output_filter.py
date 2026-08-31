@@ -1,10 +1,4 @@
-"""
-[PENANGGUNG JAWAB: Anggota B]
-Guardrail AFTER LLM (F2-04) — mengecek jawaban AI sebelum ditampilkan ke user.
-Kategori mengikuti daftar content restriction pada dokumen SRS asli (FCR-003):
-SARA, ujaran kebencian, konten seksual, kekerasan, instruksi ilegal, self-harm,
-ditambah saran hukum/medis/finansial yang spesifik.
-"""
+"""Guardrail AFTER LLM (F2-04) — cek jawaban AI sebelum ditampilkan, kategori mengikuti SRS FCR-003 content restriction."""
 import re
 
 _RESTRICTED_PATTERNS: dict[str, list[re.Pattern]] = {
@@ -57,7 +51,6 @@ STANDARD_REFUSAL_MESSAGE = (
     "Untuk kebutuhan spesifik, silakan konsultasikan dengan pihak/profesional yang berwenang."
 )
 
-# Pesan khusus untuk kategori self-harm — mengarahkan ke bantuan, bukan sekadar menolak
 SELF_HARM_REDIRECT_MESSAGE = (
     "Saya tidak dapat membantu dengan permintaan ini. Jika Anda atau seseorang yang Anda kenal "
     "sedang mengalami masa sulit, silakan hubungi layanan dukungan seperti "
@@ -66,10 +59,7 @@ SELF_HARM_REDIRECT_MESSAGE = (
 
 
 def check_output_restricted(text: str) -> str | None:
-    """
-    Kembalikan nama kategori kalau jawaban AI terdeteksi masuk kategori
-    terlarang, atau None kalau aman.
-    """
+    """Kembalikan nama kategori kalau jawaban AI terdeteksi masuk kategori terlarang, atau None kalau aman."""
     lowered = text.lower()
     for category, patterns in _RESTRICTED_PATTERNS.items():
         if any(p.search(lowered) for p in patterns):
