@@ -160,14 +160,116 @@ def extract_pages_from_pdf(file_bytes) -> list[dict]:
 
 
 
+# ── Pemotongan tabel per baris ──────────────────────────────────────────────
+# Satu baris tabel = satu record. Digabung jadi satu chunk bersama baris-baris
+# lain, record-record itu berebut di dalam satu vektor, dan model melihat
+# tetangga yang nilainya bisa disalin. Itu akar kegagalan "NFR-PERF-03
+# prioritasnya Must Have": chunk tabel FR (punya kolom Priority) ikut masuk
+# konteks saat user bertanya soal NFR (tabel yang TIDAK punya kolom itu).
+#
+# Penjagaan identifier di chat/routes.py sudah menutup kebocoran ANTAR-tabel.
+# Yang tersisa kebocoran DI DALAM satu tabel: ditanya NFR-PERF-03, konteksnya
+# tetap memuat NFR-PERF-01 sampai -05 lengkap dengan angkanya masing-masing.
+# Memotong per baris membuat pertanyaan presisi cuma melihat barisnya sendiri.
+#
+# Tiap baris membawa HEADER tabelnya. Tanpa itu
+# "|NFR-PERF-03|Vector Index Search Speed|< 45 ms|100 ms|" kehilangan nama
+# kolomnya dan jadi deretan angka tanpa arti, baik bagi embedding maupun
+# bagi model.
+#
+# JUDUL BAGIAN cuma ikut kalau dia LANGSUNG memperkenalkan tabelnya (tidak
+# ada baris prosa menyela). Aturan "pakai judul terdekat sebelumnya" sempat
+# dicoba dan SALAH: pymupdf4llm mengeluarkan tabel NFR halaman 8 dua kali --
+# versi teks polos di bawah judul aslinya "6.1 Performance & Latency SLAs",
+# lalu versi pipe-table SETELAH judul "6.2 Security, Privacy & Regulatory
+# Compliance", padahal isinya milik 6.1. Barisnya jadi berlabel bagian yang
+# keliru. Diukur pada Project NEXUS: 3 dari 12 tabel langsung di bawah
+# judulnya (ketiganya benar), 9 sisanya dipisah prosa atau tidak punya judul
+# di halaman itu sama sekali.
+#
+# Harganya: tabel FR halaman 7 kehilangan judul "5. Detailed Functional
+# Requirements" yang sebenarnya benar. Itu diterima -- label bagian yang
+# SALAH persis jenis konteks meyakinkan-tapi-keliru yang sedang kita
+# berantas, sementara kehilangan label yang benar cuma mengurangi sinyal.
+# Identifier, deskripsi dan nama kolom tetap ada di barisnya.
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+
+# Tabel 2 kolom di Project NEXUS bukan tabel record, melainkan daftar
+# definisi ("Endpoint URL:", "HTTP Method:", "Headers:"). Memotongnya per
+# baris justru mencerai-beraikan satu spesifikasi jadi kepingan kunci-nilai,
+# jadi tabel seperti itu dibiarkan utuh.
+TABLE_ROW_MIN_COLUMNS = 3
+TABLE_ROW_MIN_ROWS = 2
+
+
+def _table_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """
     Pecah teks markdown jadi potongan-potongan kecil (chunk).
-    Menggunakan MarkdownTextSplitter agar tidak merusak format markdown
-    seperti tabel atau header.
+
+    Prosa lewat MarkdownTextSplitter seperti sebelumnya. Tabel markdown yang
+    cukup lebar dan cukup panjang dipotong SATU CHUNK PER BARIS, masing-masing
+    membawa header tabel dan judul bagian terdekat -- lihat catatan di atas.
     """
     splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
-    chunks = splitter.split_text(text)
+    lines = text.split("\n")
+    chunks: list[str] = []
+    buffer: list[str] = []
+    heading = ""
+
+    def flush_buffer():
+        body = "\n".join(buffer).strip()
+        buffer.clear()
+        if body:
+            chunks.extend(c for c in splitter.split_text(body) if c.strip())
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_table_head = (
+            _TABLE_ROW_RE.match(line)
+            and not _TABLE_SEP_RE.match(line)
+            and i + 1 < len(lines)
+            and _TABLE_SEP_RE.match(lines[i + 1])
+        )
+        if not is_table_head:
+            if _HEADING_RE.match(line):
+                heading = line.strip()
+            elif line.strip():
+                # Ada isi lain menyela: judul itu tidak lagi bisa dianggap
+                # memperkenalkan tabel yang menyusul.
+                heading = ""
+
+        if is_table_head:
+            header, separator = line, lines[i + 1]
+            j = i + 2
+            body_rows = []
+            while (j < len(lines) and _TABLE_ROW_RE.match(lines[j])
+                   and not _TABLE_SEP_RE.match(lines[j])):
+                body_rows.append(lines[j])
+                j += 1
+            if (len(_table_cells(header)) >= TABLE_ROW_MIN_COLUMNS
+                    and len(body_rows) >= TABLE_ROW_MIN_ROWS):
+                # Prosa sebelum tabel diselesaikan dulu supaya tidak ikut
+                # tercampur ke dalam chunk baris.
+                flush_buffer()
+                for row in body_rows:
+                    parts = [heading] if heading else []
+                    parts.append("\n".join([header.strip(), separator.strip(), row.strip()]))
+                    chunks.append("\n\n".join(parts))
+                heading = ""   # sudah terpakai; tabel berikutnya harus punya judulnya sendiri
+                i = j
+                continue
+
+        buffer.append(line)
+        i += 1
+
+    flush_buffer()
     return [c for c in chunks if c.strip()]
 
 

@@ -223,12 +223,16 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("models", nargs="*", default=[])
     ap.add_argument("--runs", type=int, default=1)
+    ap.add_argument("--chat-id", dest="chat_id", default=None,
+                    help="Pakai chat_id tertentu, bukan hasil _find_chat_id(). "
+                         "Dipakai untuk membandingkan dua strategi chunking "
+                         "atas dokumen yang sama.")
     ap.add_argument("--think", dest="think", action="store_true", default=None)
     ap.add_argument("--no-think", dest="think", action="store_false")
     args = ap.parse_args()
 
     models = args.models or [settings.ollama_model]
-    chat_id = _find_chat_id()
+    chat_id = args.chat_id or _find_chat_id()
     print(f"chat_id  : {chat_id}\nnum_ctx  : {settings.ollama_num_ctx}"
           f"\ntemp     : {settings.ollama_temperature}\nsoal     : {len(CASES)} x {args.runs} run")
 
