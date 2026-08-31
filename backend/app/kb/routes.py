@@ -12,7 +12,7 @@ from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import is_document_injection, get_document_matched_signals
-from app.rag.vectorstore import extract_pages_from_pdf, index_kb_document, delete_kb_document_from_index
+from app.rag.vectorstore import extract_pages_from_pdf, index_kb_document, delete_kb_document_from_index, content_hash, find_kb_duplicate
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
 
@@ -47,6 +47,7 @@ def list_documents(db: Session = Depends(get_db), admin: User = Depends(require_
 async def upload_kb_document(
     file: UploadFile = File(...),
     divisi: str | None = Form(None),
+    replace: bool = Form(False),
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
@@ -71,8 +72,57 @@ async def upload_kb_document(
         )
         raise HTTPException(status_code=400, detail=KB_PDF_REJECTED_MESSAGE)
 
+    # ── 2026-08-31: penjaga unggahan ganda ──────────────────────────────────
+    # Dokumen yang sama pernah terindeks dua kali dan akibatnya TIDAK terlihat
+    # dari luar sama sekali: tidak ada error, tidak ada peringatan, daftar
+    # dokumen cuma menampilkan dua baris yang wajar. Yang rusak diam-diam
+    # adalah daya ambilnya -- retrieval mengambil top_k=10, tapi karena tiap
+    # chunk punya kembaran, yang sampai ke model cuma 5 chunk berbeda. Baris
+    # yang duduk di peringkat 5-6 terpotong, dan pertanyaannya dijawab "tidak
+    # tersedia" padahal datanya ada.
+    #
+    # Dua pemeriksaan, keduanya per-divisi karena berkas yang sama sengaja
+    # diunggah ke dua divisi itu sah (retrieval memisahkannya lewat filter
+    # divisi):
+    #   1. isi identik  -> sidik jari SHA-256 berkasnya
+    #   2. nama sama    -> menangkap ekspor ulang yang isinya berubah sedikit
+    #      sehingga hash-nya beda, tapi maksudnya jelas mengganti
+    hash_isi = content_hash(file_bytes)
+    kembar_id = find_kb_duplicate(hash_isi, divisi)
+    kembar_nama = db.query(KbDocument).filter(
+        KbDocument.filename == file.filename,
+        KbDocument.divisi.is_(None) if divisi is None else KbDocument.divisi == divisi,
+    ).first()
+
+    if (kembar_id or kembar_nama) and not replace:
+        lama = kembar_nama or db.query(KbDocument).filter(KbDocument.id == kembar_id).first()
+        alasan = "isinya identik" if kembar_id else "namanya sama"
+        wilayah = divisi or "Company Wide"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Dokumen ini sudah ada di {wilayah} ({alasan}"
+                + (f", diunggah {lama.created_at:%d %b %Y}" if lama else "")
+                + "). Mengunggahnya lagi TIDAK menambah pengetahuan — justru "
+                "memangkas hasil pencarian karena tiap potongan jadi punya "
+                "kembaran. Hapus dulu yang lama, atau ulangi dengan "
+                "replace=true untuk menggantinya."
+            ),
+        )
+
+    if replace:
+        for lama in [d for d in (kembar_nama,) if d] + (
+            [db.query(KbDocument).filter(KbDocument.id == kembar_id).first()] if kembar_id else []
+        ):
+            if lama is None:
+                continue
+            delete_kb_document_from_index(lama.id)
+            db.delete(lama)
+        db.commit()
+
     doc_id = str(uuid.uuid4())
-    chunk_count = index_kb_document(pages=pages, doc_id=doc_id, filename=file.filename, divisi=divisi)
+    chunk_count = index_kb_document(pages=pages, doc_id=doc_id, filename=file.filename,
+                                    divisi=divisi, hash_isi=hash_isi)
 
     doc_record = KbDocument(id=doc_id, divisi=divisi, filename=file.filename, chunk_count=chunk_count, uploaded_by=admin.id)
     db.add(doc_record)

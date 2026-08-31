@@ -1,3 +1,4 @@
+import hashlib
 import re
 import chromadb
 from chromadb.utils import embedding_functions
@@ -278,7 +279,40 @@ KB_DIVISI_COLLECTION_NAME = "kb_divisi"
 KB_COMPANY_WIDE_SENTINEL = "company_wide"  # ChromaDB metadata tidak bisa nyimpen None
 
 
-def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None) -> int:
+def content_hash(file_bytes: bytes) -> str:
+    """Sidik jari isi berkas, dipakai menolak unggahan ganda ke KB."""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def find_kb_duplicate(hash_isi: str, divisi: str | None) -> str | None:
+    """
+    doc_id dokumen yang isinya PERSIS SAMA dan berada di divisi yang sama,
+    atau None kalau belum ada.
+
+    2026-08-31: dokumen yang sama terindeks dua kali (sekali lewat UI, sekali
+    lewat script uji) dan akibatnya tidak terlihat sama sekali dari luar --
+    tidak ada error, tidak ada peringatan. Yang berubah cuma daya ambil:
+    retrieval mengambil top_k=10, tapi karena tiap chunk punya kembaran, yang
+    benar-benar sampai ke model CUMA 5 chunk berbeda. Baris "Jumlah pegawai
+    tetap" ada di peringkat 5-6 dan persis terpotong di situ; pertanyaannya
+    dijawab "tidak tersedia" padahal datanya ada.
+
+    Dicek per DIVISI, bukan global: berkas yang sama sengaja diunggah ke dua
+    divisi adalah hal yang sah (mis. kebijakan yang berlaku di keduanya), dan
+    retrieval memang memisahkannya lewat filter divisi.
+    """
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    hasil = collection.get(
+        where={"$and": [{"content_hash": hash_isi},
+                        {"divisi": divisi or KB_COMPANY_WIDE_SENTINEL}]},
+        include=["metadatas"], limit=1,
+    )
+    metas = hasil.get("metadatas") or []
+    return metas[0].get("doc_id") if metas else None
+
+
+def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None,
+                      hash_isi: str | None = None) -> int:
     """Multi-Tenant KB (SRS poin 11) — divisi=None berarti Company Wide, chunk per halaman sama seperti index_document()."""
     collection = get_collection(KB_DIVISI_COLLECTION_NAME)
     divisi_tag = divisi or KB_COMPANY_WIDE_SENTINEL
@@ -288,6 +322,11 @@ def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str
         for c in chunk_text(page_info["text"]):
             documents.append(c)
             meta = {"doc_id": doc_id, "filename": filename, "chunk_index": len(documents) - 1, "divisi": divisi_tag}
+            # Disimpan di metadata Chroma, bukan kolom Postgres, supaya
+            # pemeriksaan duplikat tidak butuh perubahan skema -- dan karena
+            # yang benar-benar rusak akibat duplikat memang indeksnya.
+            if hash_isi:
+                meta["content_hash"] = hash_isi
             if page_info["page"] is not None:
                 meta["page"] = page_info["page"]
             metadatas.append(meta)

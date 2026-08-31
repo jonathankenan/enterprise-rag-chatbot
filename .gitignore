@@ -24,3 +24,6 @@ pyrefly.toml
 
 # Logs
 *.log
+
+# PDF fixture KB dibangkitkan scripts/make_kb_fixtures.py — reproducible, jangan di-commit
+backend/kb_fixtures/
