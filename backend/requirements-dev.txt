@@ -1,0 +1,4 @@
+# requirements-dev.txt
+# Kebutuhan pengembangan saja, tidak dipasang di lingkungan produksi.
+#   pip install -r requirements-dev.txt
+pytest==9.1.1
