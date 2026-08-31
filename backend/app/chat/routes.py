@@ -363,6 +363,20 @@ async def send_message(
                     # pertanyaan sintesis tidak menyebut identifier tunggal
                     # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
                     # kosong dan cabang ini tidak aktif sama sekali.
+                    # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
+                    # per baris. Karena query ini menyebut identifier, yang
+                    # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
+                    # membawa serta baris tetangga yang nilainya bisa disalin,
+                    # dan itu justru bug yang sedang ditutup.
+                    #
+                    # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
+                    # naratif tentang item yang sama tetap berguna.
+                    baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
+                    if baris:
+                        id_chunks = baris + [
+                            c for c in id_chunks if not c.get("table_body_rows")
+                        ]
+
                     context_chunks = id_chunks
 
                     # ── identifier yang cuma hidup di dalam contoh ──────────

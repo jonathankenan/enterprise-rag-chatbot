@@ -81,14 +81,146 @@ def extract_pages_from_pdf(file_bytes) -> list[dict]:
 
 
 
+# ── Tabel: diindeks UTUH sekaligus PER BARIS ────────────────────────────────
+# Satu baris tabel adalah satu record. Digabung jadi satu chunk bersama
+# baris-baris lain, record-record itu berebut di dalam satu vektor dan model
+# melihat tetangga yang nilainya bisa disalin -- akar kegagalan "NFR-PERF-03
+# prioritasnya Must Have".
+#
+# Percobaan pertama (commit 6dbdc18, di-revert lewat 0313bae) memotong tabel
+# HANYA per baris dan itu SALAH. Terukur pada perbandingan retrieval:
+#
+#     E1 "bandingkan baseline dan target FCR dan waktu tunggu"
+#       tabel utuh   : 48% ADA   78% ADA   45 detik ADA   -> 3/3 fakta
+#       hanya baris  : 48% ADA   78% ADA   45 detik HILANG -> 2/3 fakta
+#
+# Ketiga angka itu tinggal di BARIS BERBEDA dari satu tabel. Sebagai chunk
+# utuh ketiganya datang bersama; dipecah, dua baris masuk top-10 dan baris
+# ketiga kalah bersaing.
+#
+# Jadi keduanya diindeks. Yang memilih di antaranya adalah saringan
+# identifier di chat/routes.py:
+#
+#   * Pertanyaan presisi menyebut identifier ("berapa prioritas NFR-PERF-03")
+#     -> saringan aktif, ambil chunk BARIS, buang chunk tabel utuh. Tidak ada
+#     baris tetangga yang bisa disalin.
+#   * Pertanyaan sintesis tidak menyebut identifier ("bandingkan baseline dan
+#     target") -> saringan TIDAK aktif sama sekali, chunk tabel utuh tetap
+#     tersedia lengkap dengan seluruh barisnya.
+#
+# Yang terlewat waktu menolak ide ini sebelumnya: saringan identifier bisa
+# MEMILIH di antara dua chunk, bukan cuma menyaring keluar.
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+
+# Tabel 2 kolom di Project NEXUS bukan tabel record, melainkan daftar definisi
+# ("Endpoint URL:", "HTTP Method:", "Headers:"). Memotongnya per baris justru
+# mencerai-beraikan satu spesifikasi jadi kepingan kunci-nilai.
+TABLE_ROW_MIN_COLUMNS = 3
+TABLE_ROW_MIN_ROWS = 2
+
+
+def _table_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def count_table_body_rows(text: str) -> int:
+    """
+    Berapa baris ISI tabel markdown yang dimuat sebuah chunk (header dan garis
+    pemisah tidak dihitung). Dipakai chat/routes.py untuk memilih chunk paling
+    spesifik: 1 = chunk satu baris, >1 = chunk tabel utuh, 0 = prosa biasa.
+    """
+    lines = text.split("\n")
+    body = 0
+    for i, ln in enumerate(lines):
+        if not _TABLE_ROW_RE.match(ln) or _TABLE_SEP_RE.match(ln):
+            continue
+        # baris tepat sebelum garis pemisah adalah header, bukan isi
+        if i + 1 < len(lines) and _TABLE_SEP_RE.match(lines[i + 1]):
+            continue
+        body += 1
+    return body
+
+
 def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """
     Pecah teks markdown jadi potongan-potongan kecil (chunk).
-    Menggunakan MarkdownTextSplitter agar tidak merusak format markdown
-    seperti tabel atau header.
+
+    Prosa lewat MarkdownTextSplitter seperti sebelumnya. Tabel markdown yang
+    cukup lebar dan cukup panjang menghasilkan chunk GANDA: tabel utuh, plus
+    satu chunk per baris. Lihat catatan di atas untuk alasannya.
     """
     splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
-    chunks = splitter.split_text(text)
+    lines = text.split("\n")
+    chunks: list[str] = []
+    buffer: list[str] = []
+    heading = ""
+
+    def flush_buffer():
+        body = "\n".join(buffer).strip()
+        buffer.clear()
+        if body:
+            chunks.extend(c for c in splitter.split_text(body) if c.strip())
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        is_table_head = (
+            _TABLE_ROW_RE.match(line)
+            and not _TABLE_SEP_RE.match(line)
+            and i + 1 < len(lines)
+            and _TABLE_SEP_RE.match(lines[i + 1])
+        )
+        if not is_table_head:
+            if _HEADING_RE.match(line):
+                heading = line.strip()
+            elif line.strip():
+                # Ada isi lain menyela: judul itu tidak lagi bisa dianggap
+                # memperkenalkan tabel yang menyusul. Lihat catatan judul di bawah.
+                heading = ""
+            buffer.append(line)
+            i += 1
+            continue
+
+        header, separator = line, lines[i + 1]
+        j = i + 2
+        body_rows = []
+        while (j < len(lines) and _TABLE_ROW_RE.match(lines[j])
+               and not _TABLE_SEP_RE.match(lines[j])):
+            body_rows.append(lines[j])
+            j += 1
+
+        if (len(_table_cells(header)) < TABLE_ROW_MIN_COLUMNS
+                or len(body_rows) < TABLE_ROW_MIN_ROWS):
+            buffer.append(line)          # tabel kecil: biarkan mengalir apa adanya
+            i += 1
+            continue
+
+        # JUDUL BAGIAN cuma ikut kalau LANGSUNG memperkenalkan tabelnya.
+        # Aturan "judul terdekat sebelumnya" sempat dicoba dan SALAH:
+        # pymupdf4llm mengeluarkan tabel NFR halaman 8 dua kali -- versi teks
+        # polos di bawah judul aslinya "6.1 Performance & Latency SLAs", lalu
+        # versi pipe-table SETELAH judul "6.2 Security, Privacy & Regulatory
+        # Compliance", padahal isinya milik 6.1. Diukur pada Project NEXUS:
+        # 3 dari 12 tabel langsung di bawah judulnya (ketiganya benar), 9
+        # sisanya dipisah prosa atau tidak berjudul di halaman itu. Label
+        # bagian yang SALAH lebih merugikan daripada tidak ada label.
+        prefix = [heading] if heading else []
+        flush_buffer()                    # prosa sebelum tabel diselesaikan dulu
+
+        table = "\n".join([header.strip(), separator.strip()]
+                          + [r.strip() for r in body_rows])
+        chunks.append("\n\n".join(prefix + [table]))          # tabel utuh
+        for row in body_rows:
+            chunks.append("\n\n".join(
+                prefix + ["\n".join([header.strip(), separator.strip(), row.strip()])]
+            ))                                                 # satu baris
+
+        heading = ""      # sudah terpakai; tabel berikutnya perlu judulnya sendiri
+        i = j
+
+    flush_buffer()
     return [c for c in chunks if c.strip()]
 
 
@@ -509,6 +641,11 @@ def retrieve_context(
             # Identifiernya ADA di chunk ini, tapi cuma sebagai data di dalam
             # cuplikan contoh -- lihat identifier_only_in_example().
             "id_in_example": identifier_only_in_example(d.page_content, query_ids),
+            # Berapa baris isi tabel dimuat chunk ini: 1 = chunk satu baris,
+            # >1 = chunk tabel utuh, 0 = prosa. Tabel diindeks dalam dua
+            # bentuk (lihat chunk_text), dan angka inilah yang dipakai
+            # chat/routes.py untuk memilih yang paling spesifik.
+            "table_body_rows": count_table_body_rows(d.page_content),
         })
     return chunks, confidence
 

@@ -72,6 +72,11 @@ _lexical = "\n".join([
     _assignment(VECTOR_SRC, "_JSON_PAIR_RE"),
     _segment(VECTOR_SRC, "_example_spans"),
     _segment(VECTOR_SRC, "identifier_only_in_example"),
+    # 2026-08-31: chunk juga ditandai table_body_rows (tabel diindeks utuh DAN
+    # per baris, lihat chunk_text), jadi tail-nya ikut menutup penghitungnya.
+    _assignment(VECTOR_SRC, "_TABLE_ROW_RE"),
+    _assignment(VECTOR_SRC, "_TABLE_SEP_RE"),
+    _segment(VECTOR_SRC, "count_table_body_rows"),
 ])
 
 
