@@ -11,7 +11,7 @@ from app.schemas import KbDocumentResponse
 from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
-from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
+from app.guardrail.prompt_injection import is_document_injection, get_document_matched_signals
 from app.rag.vectorstore import extract_pages_from_pdf, index_kb_document, delete_kb_document_from_index
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
@@ -60,11 +60,14 @@ async def upload_kb_document(
     pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
     text = "\n\n".join(p["text"] for p in pages)  # flat text buat guardrail scan; indexing pakai `pages` supaya bisa ditag nomor halaman
 
-    if is_prompt_blocked(text) or is_prompt_injection(text):  # sama seperti dokumen chat & FAQ, wajib lolos F2-04 sebelum diindeks
+    # Sama seperti upload dokumen chat & FAQ — konten yang masuk ke RAG
+    # (apalagi ini bisa ditarik SELURUH divisi atau company-wide) wajib
+    # lolos guardrail F2-04 sebelum diindeks.
+    if is_prompt_blocked(text) or is_document_injection(text):
         log_guardrail_event(
             db, admin.id, EventType.DOCUMENT_BLOCKED,
             detail=f"kb_document_upload:{file.filename}",
-            metadata={"divisi": divisi, "category": get_blocked_category(text), "matched_patterns": get_matched_signals(text)},
+            metadata={"divisi": divisi, "category": get_blocked_category(text), "matched_patterns": get_document_matched_signals(text)},
         )
         raise HTTPException(status_code=400, detail=KB_PDF_REJECTED_MESSAGE)
 

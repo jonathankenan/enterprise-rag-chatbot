@@ -18,6 +18,13 @@ class EventType:
     RATE_LIMIT_HIT = "rate_limit_hit"            # F1-01 & F2-04
     LOGIN_FAILED = "login_failed"
     LOGIN_SUCCESS = "login_success"
+    # Login lewat direktori Azure AD TIRUAN (AZURE_MOCK_ENABLED, lihat
+    # auth/mock_directory.py). Event terpisah, bukan LOGIN_SUCCESS biasa:
+    # sesi yang dihasilkan sah persis seperti SSO sungguhan, jadi ini
+    # satu-satunya penanda bahwa identitasnya TIDAK pernah diverifikasi
+    # Microsoft. Severity HIGH supaya menonjol di halaman /audit — kalau
+    # sampai muncul di lingkungan yang bukan mesin pengembangan, itu temuan.
+    AZURE_MOCK_LOGIN = "azure_mock_login"
 
     # Kirim pesan/prompt biasa SENGAJA tidak dicatat di sini — sudah lengkap di tabel Message terenkripsi, duplikasi cuma jadi noise
     CHAT_CREATED = "chat_created"
@@ -61,6 +68,7 @@ _SEVERITY_MAP = {
     EventType.RATE_LIMIT_HIT: Severity.HIGH,
     EventType.LOGIN_FAILED: Severity.LOW,
     EventType.LOGIN_SUCCESS: Severity.LOW,
+    EventType.AZURE_MOCK_LOGIN: Severity.HIGH,
     EventType.CHAT_CREATED: Severity.LOW,
     EventType.CHAT_DELETED: Severity.LOW,        # aksi normal user, bukan pelanggaran
     EventType.DOCUMENT_UPLOADED: Severity.LOW,

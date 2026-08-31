@@ -20,6 +20,7 @@ out/
 .vscode/
 .idea/
 pyrefly.toml
+.claude/settings.local.json
 
 # Logs
 *.log

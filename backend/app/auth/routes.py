@@ -199,8 +199,23 @@ def change_password(
 # ---------- SSO Azure AD — simulasi "Logon menggunakan LDAP M365 BEI" (SRS hal. 64) ----------
 # Tenant di sini tenant developer/pribadi, bukan tenant BEI asli -- alur OAuth-nya beneran jalan, cuma tidak terhubung ke direktori karyawan BEI sungguhan.
 
-def _get_msal_app() -> msal.ConfidentialClientApplication:
-    # Guard "sudah dikonfigurasi" satu-satunya di sini, supaya semua caller dapat 400 rapi (bukan 500 dari MSAL) kalau .env kosong
+def _get_msal_app():
+    # Mode direktori tiruan (auth/mock_directory.py) — dipakai kalau tenant
+    # Azure tidak tersedia. Dicegat DI SINI, di satu-satunya tempat MSAL
+    # dibuat, supaya azure_login_url() dan azure_callback() di bawah tidak
+    # perlu tahu apa-apa soal mode ini: keduanya tetap memanggil dua metode
+    # yang sama, dan MockMsalApp mengembalikan bentuk yang sama dengan MSAL.
+    # Kalau tenant sudah ada, cukup matikan AZURE_MOCK_ENABLED — tidak ada
+    # cabang khusus yang tertinggal di endpoint.
+    if settings.azure_mock_enabled:
+        from app.auth.mock_directory import MockMsalApp
+        return MockMsalApp(picker_url=settings.azure_mock_picker_url)
+
+    # Pengecekan "sudah dikonfigurasi atau belum" ditaruh DI SINI (satu-satunya
+    # tempat), bukan diulang di tiap endpoint pemanggilnya — sebelumnya
+    # azure_login_url() punya pengecekan ini tapi azure_callback() lupa,
+    # akibatnya azure_callback() lempar 500 mentah (ValueError dari MSAL,
+    # authority URL tidak lengkap) bukan 400 yang rapi kalau .env kosong.
     if not (settings.azure_client_id and settings.azure_tenant_id and settings.azure_client_secret):
         raise HTTPException(status_code=400, detail="SSO Azure AD belum dikonfigurasi di server (lihat backend/.env)")
     return msal.ConfidentialClientApplication(
@@ -217,6 +232,28 @@ def azure_login_url():
         redirect_uri=settings.azure_redirect_uri,
     )
     return AzureLoginUrlResponse(auth_url=auth_url)
+
+
+@router.get("/azure/mock-picker", include_in_schema=False)
+def azure_mock_picker(redirect_uri: str):
+    """
+    Berdiri menggantikan halaman login Microsoft saat AZURE_MOCK_ENABLED aktif.
+    Menampilkan daftar pegawai palsu; memilih satu = redirect balik ke
+    redirect_uri dengan ?code=<email>, persis bentuk yang dikirim Microsoft.
+
+    include_in_schema=False supaya endpoint ini tidak ikut muncul di /docs —
+    dia bukan bagian dari API produk, cuma perkakas pengembangan.
+    """
+    if not settings.azure_mock_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    # redirect_uri dibatasi ke yang dikonfigurasi. Tanpa ini endpoint yang
+    # menerima URL bebas ini jadi open redirect — kecil, tapi tidak ada
+    # alasan membiarkannya karena nilainya memang cuma satu.
+    if redirect_uri != settings.azure_redirect_uri:
+        raise HTTPException(status_code=400, detail="redirect_uri tidak dikenal")
+    from fastapi.responses import HTMLResponse
+    from app.auth.mock_directory import render_picker_page
+    return HTMLResponse(render_picker_page(redirect_uri))
 
 
 @router.post("/azure/callback", response_model=TokenResponse)
@@ -243,6 +280,16 @@ def azure_callback(payload: AzureCallbackRequest, db: Session = Depends(get_db))
         raise HTTPException(
             status_code=403,
             detail="Akun ini belum terdaftar di sistem. Hubungi IT Admin untuk didaftarkan terlebih dahulu.",
+        )
+
+    # Login lewat direktori tiruan TIDAK BOLEH senyap: dari sisi data hasilnya
+    # sesi yang sah persis seperti SSO beneran, jadi satu-satunya cara
+    # membedakannya belakangan adalah jejak ini. Dicatat SEBELUM cabang MFA
+    # supaya tetap tercatat walau user berhenti di layar MFA.
+    if settings.azure_mock_enabled:
+        log_guardrail_event(
+            db, user.id, EventType.AZURE_MOCK_LOGIN,
+            detail=f"Login lewat DIREKTORI AZURE TIRUAN (bukan Microsoft): email={email}",
         )
 
     if user.auth_provider != "azure":

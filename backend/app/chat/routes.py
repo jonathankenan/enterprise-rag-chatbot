@@ -20,7 +20,7 @@ from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
 from app.rag.vectorstore import retrieve_context
 from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
-from app.llm.router import route_and_generate
+from app.llm.router import route_and_generate, LLMResult
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
 from app.chat.pdf_export import generate_pdf
 
@@ -284,7 +284,19 @@ async def send_message(
     db.add(user_msg)
     db.commit()
 
-    # SRS hal. 17 poin 9.a: Lapis 1 (regex, gratis) dicek paling awal -- sapaan/basa-basi murni di-skip total dari retrieval
+    # ---------- SRS hal. 17, poin 9.a: Intent classification ----------
+    # Dicek PALING AWAL, sebelum get_standalone_query() (yang butuh 1
+    # pemanggilan LLM) maupun retrieve_context() (ensemble 4-leg: dokumen
+    # chat + FAQ + KB divisi + BM25) — buat sapaan/basa-basi murni ("halo",
+    # "makasih"), KEDUANYA di-skip total. Bukan cuma penghematan kosmetik:
+    # pesan sependek "oke" tidak pernah butuh RAG sama sekali.
+    # Diisi daftar identifier (mis. ["FR-14"]) kalau query menyebut identifier
+    # yang TIDAK ADA di korpus — lihat penjagaan identifier di bawah.
+    identifier_missing: list[str] | None = None
+    # Diisi kalau identifier yang ditanya ADA di korpus, tapi setiap
+    # kemunculannya cuma di dalam cuplikan contoh — lihat penjagaan di bawah.
+    identifier_in_example: list[str] | None = None
+
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
         search_query = payload.content
@@ -309,22 +321,132 @@ async def send_message(
             session_has_document = has_session_document(chat_id=chat.id)
             retrieval_confidence = None  # "ringkas semua" ambil seluruh chunk apa adanya, tidak ada skor relevansi yang jujur untuk dihitung
         else:
-            from app.rag.vectorstore import has_session_document
+            from app.rag.vectorstore import has_session_document, extract_query_identifiers
             context_chunks, retrieval_confidence = retrieve_context(
                 search_query, chat_id=chat.id, collection_name="kb_general", top_k=10, user_divisi=user.divisi,
                 weight_hint=intent,
             )
             session_has_document = has_session_document(chat_id=chat.id)
 
-    try:
-        result = await route_and_generate(
-            payload.content, context_chunks, chat_history, effective_provider,
-            pii_entities=user_pii_entities,
-            session_has_document=session_has_document,
-            retrieval_confidence=retrieval_confidence,
+            # ── 2026-08-26: penjagaan identifier, DETERMINISTIK ──────────────
+            # Dua kegagalan nyata yang tidak bisa ditutup instruksi prompt,
+            # sudah dicoba dua kali (instruksi 6, lalu GROUNDING_RULE di ujung
+            # prompt -- lihat llm/router.py):
+            #   * "jelaskan req ID FR-14" -> FR-14 TIDAK ADA di dokumen (FR
+            #     berhenti di FR-12), tapi model menjawab panjang lebar tentang
+            #     NFR-PERF-03. Bukan sekadar gagal menolak: dia menjawab item
+            #     yang sama sekali lain.
+            #   * "berapa prioritas NFR-PERF-03" -> dijawab "Must Have".
+            #     Tabel NFR (hal. 8) tidak punya kolom Priority sama sekali;
+            #     nilai itu disalin dari tabel FR hal. 7 yang ikut masuk
+            #     konteks. Pertanyaan LANGSUNG tentang field yang tidak ada
+            #     ternyata jauh lebih menggoda model daripada sekadar
+            #     menyebutkannya tanpa diminta.
+            #
+            # Keduanya berakar pada satu hal: model tidak pernah memeriksa
+            # bahwa item yang ditanya benar-benar ada di konteks. Itu
+            # pemeriksaan yang bisa dilakukan kode secara pasti, jadi tidak
+            # perlu dititipkan ke model 7B.
+            query_ids = extract_query_identifiers(search_query)
+            if query_ids:
+                id_chunks = [c for c in context_chunks if c.get("id_match")]
+                if not id_chunks:
+                    # Tidak satu pun chunk menyebut identifier ini. Bukan
+                    # "retrieval-nya lemah" -- korpusnya memang tidak memuatnya.
+                    identifier_missing = sorted(i.upper() for i in query_ids)
+                else:
+                    # Kunci konteks ke chunk yang benar-benar membahas item
+                    # yang ditanya. Tabel tetangga tidak lagi ikut terkirim,
+                    # jadi tidak ada nilai field yang bisa disalin.
+                    #
+                    # Kasus sintesis multi-dokumen (FR-12) tidak dirugikan:
+                    # pertanyaan sintesis tidak menyebut identifier tunggal
+                    # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
+                    # kosong dan cabang ini tidak aktif sama sekali.
+                    # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
+                    # per baris. Karena query ini menyebut identifier, yang
+                    # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
+                    # membawa serta baris tetangga yang nilainya bisa disalin,
+                    # dan itu justru bug yang sedang ditutup.
+                    #
+                    # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
+                    # naratif tentang item yang sama tetap berguna.
+                    baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
+                    if baris:
+                        id_chunks = baris + [
+                            c for c in id_chunks if not c.get("table_body_rows")
+                        ]
+
+                    context_chunks = id_chunks
+
+                    # ── identifier yang cuma hidup di dalam contoh ──────────
+                    # Kegagalan ketiga, beda dari dua di atas. Ditanya
+                    # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
+                    # dokumen sungguhan, lengkap dengan "skor 0.892
+                    # menunjukkan kesamaan tinggi antara kueri Anda dan
+                    # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
+                    # tempelan di dalam CONTOH respons API (hal. 9), dan
+                    # 0.892 angka mati yang diketik penulis dokumen.
+                    #
+                    # Saringan id_match di atas tidak bisa menangkapnya:
+                    # dia menanyakan "apakah string ini muncul", dan memang
+                    # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
+                    #
+                    # Ini terjadi di Groq — model komersial yang jauh lebih
+                    # besar dari on-prem mana pun yang kita pakai — jadi
+                    # menaikkan ukuran model bukan jawabannya.
+                    if all(c.get("id_in_example") for c in id_chunks):
+                        identifier_in_example = sorted(i.upper() for i in query_ids)
+
+    if identifier_missing:
+        # Jawab tanpa memanggil LLM sama sekali. Menyerahkan penolakan ini ke
+        # model justru sudah terbukti gagal dua kali, dan tidak ada yang perlu
+        # digenerasi: pertanyaannya menyebut item yang tidak ada di dokumen.
+        # context_chunks dikosongkan supaya tidak ada sitasi yang menempel —
+        # mengutip halaman untuk item yang tidak ada di situ justru menyesatkan.
+        context_chunks = []
+        retrieval_confidence = None
+        daftar = ", ".join(identifier_missing)
+        result = LLMResult(
+            reply=(
+                f"Saya tidak menemukan {daftar} di dokumen yang tersedia. "
+                "Identifier itu tidak muncul di isi dokumen mana pun yang bisa saya akses, "
+                "jadi saya tidak bisa menjelaskannya tanpa mengarang. "
+                "Coba periksa lagi penulisannya, atau sebutkan dokumen yang memuatnya."
+            ),
+            llm_used="guardrail (identifier tidak ditemukan)",
+            is_sensitive=False,
+            confidence_score=None,
+            pii_detected=bool(user_pii_entities),
+            pii_entities=user_pii_entities or [],
         )
-    except CommercialLLMError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    else:
+        try:
+            result = await route_and_generate(
+                payload.content, context_chunks, chat_history, effective_provider,
+                pii_entities=user_pii_entities,
+                session_has_document=session_has_document,
+                retrieval_confidence=retrieval_confidence,
+                identifier_in_example=identifier_in_example,
+            )
+        except CommercialLLMError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+        if identifier_in_example:
+            # Peringatannya ditempelkan KODE, bukan diminta lewat prompt.
+            # EXAMPLE_RULE di router.py memang ikut dikirim, tapi kepatuhan
+            # model terhadap aturan prompt sudah gagal berkali-kali di sesi
+            # ini — sedangkan pertanyaan "apakah item ini nyata" sudah
+            # dijawab pasti oleh kode. Jadi jawabannya tidak boleh bergantung
+            # pada model mau menuruti atau tidak.
+            daftar = ", ".join(identifier_in_example)
+            result.reply = (
+                f"Catatan: {daftar} bukan dokumen atau item yang benar-benar ada. "
+                "Namanya cuma muncul sebagai contoh di dalam cuplikan "
+                "(payload API, blok kode, atau template), jadi nilai apa pun "
+                "yang menyertainya — skor, nominal, tanggal — adalah angka "
+                "ilustrasi, bukan hasil pengukuran.\n\n"
+            ) + result.reply
 
     # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM ----------
     if result.pii_detected:

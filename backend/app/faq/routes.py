@@ -10,7 +10,7 @@ from app.schemas import CreateFaqRequest, FaqEntryResponse, FaqBulkImportRespons
 from app.auth.utils import require_role
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
-from app.guardrail.prompt_injection import is_prompt_injection, get_matched_signals
+from app.guardrail.prompt_injection import is_document_injection, get_document_matched_signals
 from app.rag.vectorstore import index_faq_entry, delete_faq_entry_from_index, extract_text_from_pdf
 from app.faq.parser import parse_faq_pairs
 
@@ -58,11 +58,14 @@ async def upload_faq_pdf(
     file_bytes = await file.read()
     text = extract_text_from_pdf(io.BytesIO(file_bytes))
 
-    if is_prompt_blocked(text) or is_prompt_injection(text):  # FAQ company-wide, wajib lolos guardrail F2-04 sebelum diindeks
+    # Sama seperti upload dokumen chat (rag/routes.py) — konten yang masuk
+    # ke RAG (apalagi FAQ ini company-wide, ditarik ke SEMUA chat) tetap
+    # wajib lolos guardrail F2-04 sebelum diindeks.
+    if is_prompt_blocked(text) or is_document_injection(text):
         log_guardrail_event(
             db, admin.id, EventType.DOCUMENT_BLOCKED,
             detail=f"faq_pdf_upload:{file.filename}",
-            metadata={"category": get_blocked_category(text), "matched_patterns": get_matched_signals(text)},
+            metadata={"category": get_blocked_category(text), "matched_patterns": get_document_matched_signals(text)},
         )
         raise HTTPException(status_code=400, detail=FAQ_PDF_REJECTED_MESSAGE)
 
