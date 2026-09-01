@@ -589,6 +589,95 @@ def test_render_duplicate_suppression_needs_real_word_overlap():
     assert all(c["is_top_match"] for c in chunks), "genuinely different content must not be suppressed"
 
 
+def test_render_duplicate_detection_ignores_a_heading_that_only_the_table_side_has():
+    """Regression: caught by re-running this exact pair straight off the real
+    fixture (KB_PTI_Pedoman_Operasional.pdf, page 1). The clean render is
+    preceded by a section heading ("### Ketentuan pengadaan...") that the
+    scrambled render never has -- that heading alone dropped the word-overlap
+    ratio to 65%, under the 0.75 threshold, so the scrambled duplicate still
+    won a citation slot alongside the clean one. Comparing only the TABLE
+    ROW lines (not the heading) brings it to 81%."""
+    real_table_with_heading = (
+        "### Ketentuan pengadaan lintas divisi mengacu pada PTI-09, yang belum "
+        "diterbitkan pada saat dokumen ini disusun.\n\n"
+        "|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+        "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+        "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+        "diserahkan maksimal 3 hari kerja.|")
+    real_scrambled_full_page = (
+        "SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+        "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+        "maksimal 3 hari kerja.\n\nSOP-02 Permintaan Akses Permintaan akses ke "
+        "Core Trading Engine memerlukan persetujuan dua\nSistem tingkat dan "
+        "otomatis dicabut setelah 90 hari tanpa aktivitas.\n\nSOP-03 Rilis ke "
+        "Produksi Rilis hanya boleh dijalankan Selasa dan Kamis pukul "
+        "19.00-22.00 WIB, di\nluar itu wajib emergency change request.\n\n"
+        "## 3. Inventaris Dokumen Internal\n\n**ID** **Nama Dokumen** "
+        "**Pemilik** **Frekuensi**\n**Dokumen** **Pembaruan**")
+    assert _vs._is_render_duplicate(real_table_with_heading, real_scrambled_full_page)
+
+
+# --------------------------------------- reanchor_citable_chunks (added 2026-09-01)
+# chat/routes.py narrows context_chunks to id_chunks for identifier queries
+# (only chunks that actually mention the identifier survive, row-preferred).
+# is_top_match on each dict was computed by retrieve_context() BEFORE that
+# narrowing, so it can point at a chunk that just got dropped, or -- the live
+# case this covers -- at a same-shaped chunk for a DIFFERENT code that won on
+# raw similarity ("jelaskan SOP-01" citing the SOP-02 row).
+
+def test_reanchors_when_the_original_top_match_was_dropped():
+    """The chunk retrieve_context() marked as the anchor didn't mention this
+    identifier at all (a same-shaped row for a different code) and was
+    filtered out of id_chunks before reanchor runs. The real match, further
+    down the id-narrowed list, must become citable instead of nothing at
+    all being cited."""
+    wrong_code_row = {"text": "|SOP-02|Permintaan Akses|...|", "filename": "f.pdf",
+                       "page": 1, "source_type": "kb_divisi", "is_top_match": True}
+    right_code_row = {"text": "|SOP-01|Penanganan Insiden|...|", "filename": "f.pdf",
+                      "page": 1, "source_type": "kb_divisi", "is_top_match": False}
+    id_chunks = [right_code_row]  # wrong_code_row already dropped by the id_match filter upstream
+    _vs.reanchor_citable_chunks(id_chunks)
+    assert right_code_row["is_top_match"] is True
+
+
+def test_reanchor_keeps_a_survivor_that_was_already_top_match():
+    """If the original selection happens to still be valid after narrowing,
+    reanchor should not second-guess it."""
+    a = {"text": "a", "is_top_match": True}
+    b = {"text": "b", "is_top_match": False}
+    chunks = [a, b]
+    _vs.reanchor_citable_chunks(chunks)
+    assert a["is_top_match"] is True
+    assert b["is_top_match"] is False
+
+
+def test_reanchor_also_suppresses_render_duplicates_among_survivors():
+    """Both the scrambled prose and the clean table row mention SOP-01 (both
+    pass the id_match filter upstream), so both can land in id_chunks
+    together -- reanchor must still never let the scrambled one be citable
+    alongside the clean one, same rule as retrieve_context()'s own dedup."""
+    scrambled = {"text": "SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                          "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                          "maksimal 3 hari kerja.",
+                 "filename": "f.pdf", "page": 1, "is_top_match": False}
+    clean = {"text": "|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                     "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                     "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                     "diserahkan maksimal 3 hari kerja.|",
+             "filename": "f.pdf", "page": 1, "is_top_match": False}
+    id_chunks = [clean, scrambled]  # row-preference already put the clean one first
+    _vs.reanchor_citable_chunks(id_chunks)
+    assert clean["is_top_match"] is True
+    assert scrambled["is_top_match"] is False
+
+
+def test_reanchor_respects_the_limit():
+    chunks = [{"text": str(i), "is_top_match": False} for i in range(5)]
+    _vs.reanchor_citable_chunks(chunks, limit=2)
+    assert sum(c["is_top_match"] for c in chunks) == 2
+    assert [c["is_top_match"] for c in chunks[:2]] == [True, True], "falls back to list order, table-row-preference already applied by the caller"
+
+
 # ---------------------------------------------------------------- standalone
 if __name__ == "__main__":
     tests = [(n, o) for n, o in sorted(globals().items())

@@ -627,6 +627,49 @@ def get_bm25_retriever(chat_id: str, collection_name: str = "kb_general", top_k:
     )
     return retriever
 
+
+def get_kb_divisi_bm25_retriever(allowed_divisi: list[str], top_k: int = 10):
+    """2026-09-01: leg BM25 buat koleksi kb_divisi -- sebelumnya TIDAK ADA sama
+    sekali. get_bm25_retriever() di atas cuma mengindeks chunk bertag
+    `chat_id`, dan chunk kb_divisi tidak pernah punya field itu (lihat
+    index_kb_document()), jadi KbDivisiRetriever (murni vektor) adalah
+    SATU-SATUNYA jalur retrieval untuk seluruh KB divisi -- tanpa pencocokan
+    leksikal sama sekali.
+
+    Ditemukan lewat panel citation (fitur klik-citation, 2026-09-01): query
+    "jelaskan SOP-01" -- string identifier PERSIS -- top-match-nya malah baris
+    "Jumlah pegawai tetap: 84" yang tidak ada hubungannya sama sekali. Bukan
+    kasus render-duplikat (lihat suppressed_render_dupes di atas); anchor-nya
+    dari awal salah karena tidak ada sinyal leksikal yang bisa menandingi
+    kemiripan vektor yang keliru punya all-MiniLM-L6-v2 pada query pendek
+    Indonesia (kelemahan yang sudah dicatat sejak 2026-08-26 utk dokumen
+    chat, ternyata kb_divisi malah tidak dapat mitigasi BM25 itu sama
+    sekali).
+
+    Dibangun ulang dari `collection.get()` tiap panggilan, sama seperti
+    get_bm25_retriever() -- BM25Retriever tidak reusable lintas query karena
+    korpusnya (allowed_divisi) berbeda per user. Filter divisi diterapkan DI
+    SINI, bukan di ensemble, supaya leg ini juga tidak pernah bocor lintas
+    divisi (SRS hal. 14) -- sama seperti KbDivisiRetriever.
+    """
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    if collection.count() == 0:
+        return None
+    results = collection.get(where={"divisi": {"$in": allowed_divisi}}, include=["documents", "metadatas"])
+    docs_list = results.get("documents") or []
+    metas_list = results.get("metadatas") or []
+
+    lc_docs = [LCDocument(page_content=d, metadata=m or {}) for d, m in zip(docs_list, metas_list)]
+    if not lc_docs:
+        return None
+
+    retriever = BM25Retriever.from_documents(
+        documents=lc_docs,
+        preprocess_func=custom_bm25_tokenizer,
+    )
+    retriever.k = top_k  # get_bm25_retriever() di atas tidak menyetel ini (masih pakai default k=4 langchain) -- tidak disentuh di sini, di luar cakupan perbaikan hari ini
+    return retriever
+
 def _distance_to_similarity_percent(distance: float) -> float:
     """Konversi L2-squared distance -> cosine similarity, valid karena embedding model menghasilkan vektor ternormalisasi."""
     return max(0.0, min(1.0, 1 - (distance / 2)))
@@ -638,18 +681,27 @@ _WEIGHT_PROFILES = {
     Intent.FAQ_LOOKUP: (0.15, 0.55, 0.15),      # pertanyaan umum -> leg FAQ dominan
     Intent.GENERAL_CHAT: (0.3, 0.25, 0.25),     # tidak jelas arahnya -> bobot rata
 }
-_BM25_SHARE = 0.3  # porsi tetap buat leg BM25, tidak berubah oleh weight_hint
+_BM25_SHARE = 0.3  # porsi TOTAL buat leg BM25 (satu atau dua), tidak berubah oleh weight_hint
 
 
-def _resolve_weights(weight_hint: str | None, has_bm25: bool) -> list[float]:
-    """Skalakan bobot 3-leg dasar (menjaga rasio antar-leg) supaya BM25 selalu dapat porsi tetap kalau ada."""
+def _resolve_weights(weight_hint: str | None, bm25_legs: int = 0) -> list[float]:
+    """Skalakan bobot 3-leg dasar (menjaga rasio antar-leg) supaya BM25 selalu dapat porsi tetap kalau ada.
+
+    2026-09-01: bm25_legs menggantikan has_bm25 (bool) -- sejak leg BM25
+    kb_divisi ditambahkan, bisa ada 0, 1 (cuma dokumen chat, atau cuma KB
+    divisi), atau 2 leg BM25 aktif berbarengan. _BM25_SHARE tetap porsi
+    TOTAL, dibagi rata kalau lebih dari satu leg aktif -- bm25_legs=1 tetap
+    berperilaku identik dengan has_bm25=True sebelumnya (satu-satunya kasus
+    yang sudah ada sebelum hari ini).
+    """
     base = _WEIGHT_PROFILES.get(weight_hint, _DEFAULT_WEIGHTS)
-    if not has_bm25:
+    if bm25_legs <= 0:
         return list(base)
     total = sum(base)
     remaining = 1.0 - _BM25_SHARE
     scaled = [round(w / total * remaining, 4) for w in base]
-    return scaled + [_BM25_SHARE]
+    per_leg = round(_BM25_SHARE / bm25_legs, 4)
+    return scaled + [per_leg] * bm25_legs
 
 
 # Berapa baris dari satu tabel harus muncul di hasil sebelum sisanya ikut
@@ -694,6 +746,100 @@ def _expand_table_rows(docs: list, chat_id: str, collection_name: str) -> list:
     return docs + extra
 
 
+def _has_table_row(text: str) -> bool:
+    return any(_TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln) for ln in text.split("\n"))
+
+
+def _table_row_lines(text: str) -> str:
+    """Baris tabel SAJA dari sebuah chunk (buang heading/prosa yang
+    mengapitnya) -- dipakai _is_render_duplicate() supaya heading pengantar
+    yang cuma menempel di SATU render (mis. render tabel yang benar biasanya
+    didahului judul bagian, "### Ketentuan pengadaan...") tidak mengencerkan
+    rasio overlap. Kalau tidak ada baris tabel sama sekali, kembalikan teks
+    apa adanya (sisi prosa memang harus dibandingkan utuh, dia bukan yang
+    dipersempit)."""
+    lines = [ln for ln in text.split("\n") if _TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln)]
+    return "\n".join(lines) if lines else text
+
+
+def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> bool:
+    """True kalau dua potongan teks pada dasarnya sama isinya, cuma dirender
+    pymupdf4llm dalam dua bentuk berbeda (satu tabel pipe yang benar, satu
+    prosa yang kata-katanya tercampur) -- lihat catatan panjang di
+    retrieve_context(). Diukur dari overlap kata SIGNIFIKAN (>=4 huruf),
+    bukan urutan -- versi prosa yang tercampur urutan katanya tetap harus
+    terdeteksi. Dihoist ke level modul 2026-09-01 supaya reanchor_citable_chunks()
+    bisa memakainya juga, bukan cuma retrieve_context().
+
+    Sisi manapun yang berbentuk tabel dipersempit dulu ke _table_row_lines()
+    sebelum dibandingkan. Tanpa ini, diukur langsung pada kasus nyata
+    (chunk "Ketentuan pengadaan..." + baris SOP-01 vs versi prosanya):
+    overlap cuma 65% -- di bawah ambang, duplikatnya lolos tersitasi
+    berdampingan -- karena heading pengantar yang cuma ada di render tabel
+    (bukan di render prosanya) ikut dihitung sebagai kata unik. Dipersempit
+    ke baris tabelnya saja, rasio yang sama naik ke 81%."""
+    table_a, table_b = _table_row_lines(text_a), _table_row_lines(text_b)
+    words_a = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", table_a)}
+    words_b = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", table_b)}
+    if not words_a or not words_b:
+        return False
+    smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    return len(smaller & larger) / len(smaller) >= threshold
+
+
+# Batas JUMLAH sitasi per jawaban -- dipakai retrieve_context() (seleksi awal)
+# dan reanchor_citable_chunks() (seleksi ulang setelah penyempitan identifier
+# di chat/routes.py). Dihoist ke level modul 2026-09-01 supaya dua tempat itu
+# tidak diam-diam melenceng satu sama lain.
+TOP_MATCHES = 3
+
+
+def reanchor_citable_chunks(chunks: list[dict], limit: int = TOP_MATCHES) -> None:
+    """2026-09-01: dipanggil chat/routes.py SETELAH context_chunks dipersempit
+    jadi id_chunks (lihat penjagaan identifier) -- is_top_match yang melekat
+    di tiap dict dihitung retrieve_context() SEBELUM penyempitan itu, jadi
+    bisa menunjuk chunk yang sudah tidak ada lagi di daftar (dibuang karena
+    bukan identifier yang ditanya), atau -- kasus nyata yang ditemukan lewat
+    panel citation -- menunjuk chunk yang KEBETULAN mirip bentuknya (baris
+    tabel kode LAIN) tapi salah kode: "jelaskan SOP-01" menyitasi baris
+    SOP-02 karena baris itu menang similarity keseluruhan, padahal id_match-
+    nya False sejak awal (bukan render-duplikat, sekadar baris tabel lain
+    yang bentuknya serupa).
+
+    Mengubah is_top_match IN-PLACE, bukan mengembalikan list baru -- dict
+    yang sama juga dikirim sebagai context ke LLM, jadi identitasnya harus
+    tetap sama persis.
+
+    Prioritas: chunk yang SUDAH lolos seleksi retrieve_context() (similarity
+    floor, render-dedup, larangan Daftar Isi) didahulukan kalau masih ada di
+    antara kandidat yang tersisa -- itu seleksi yang lebih ketat daripada
+    sekadar urutan. Kalau tidak ada satu pun yang selamat dari penyempitan
+    (kasus di atas), jatuh balik ke urutan `chunks` apa adanya -- yang di
+    jalur identifier SUDAH diurutkan chat/routes.py supaya baris tabel
+    presisi (table_body_rows==1) didahulukan dari prosa.
+
+    Render-dedup dijalankan LAGI di sini (bukan cuma diwariskan dari
+    retrieve_context()): id_chunks bisa memuat render-duplikat yang di
+    retrieve_context() dulu SAMA-SAMA tidak jadi anchor (jadi tidak ada info
+    is_top_match yang bisa diwariskan) tapi keduanya lolos filter id_match
+    (menyebut identifier yang sama) -- baris tabel bersih dan versi
+    prosanya yang tercampur. Tanpa ini keduanya bisa lolos jadi citable
+    berdampingan, dan versi prosa yang tercampur tetap terlihat user di
+    panel citation walau versi bersihnya ikut tercantum.
+    """
+    survivors = [c for c in chunks if not any(
+        c is not other and c.get("filename") == other.get("filename")
+        and c.get("page") == other.get("page")
+        and _has_table_row(other.get("text", "")) and not _has_table_row(c.get("text", ""))
+        and _is_render_duplicate(c.get("text", ""), other.get("text", ""))
+        for other in chunks
+    )]
+    already = [c for c in survivors if c.get("is_top_match")]
+    keep_ids = {id(c) for c in (already or survivors)[:limit]}
+    for c in chunks:
+        c["is_top_match"] = id(c) in keep_ids
+
+
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
     user_divisi: str | None = None, weight_hint: str | None = None,
@@ -704,11 +850,16 @@ def retrieve_context(
     allowed_divisi = [KB_COMPANY_WIDE_SENTINEL] + ([user_divisi] if user_divisi else [])
     kb_retriever = KbDivisiRetriever(allowed_divisi=allowed_divisi, top_k=top_k)
     bm25_retriever = get_bm25_retriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
+    # 2026-09-01: leg BM25 KEDUA, khusus kb_divisi -- lihat catatan panjang
+    # di get_kb_divisi_bm25_retriever(). Tanpa ini, KB divisi cuma punya
+    # jalur vektor, dan query pendek ber-identifier ("jelaskan SOP-01") bisa
+    # kalah bersaing similarity melawan chunk yang topiknya tidak nyambung.
+    kb_bm25_retriever = get_kb_divisi_bm25_retriever(allowed_divisi=allowed_divisi, top_k=top_k)
 
     retrievers = [chroma_retriever, faq_retriever, kb_retriever]
-    weights = _resolve_weights(weight_hint, has_bm25=bm25_retriever is not None)
-    if bm25_retriever:
-        retrievers.append(bm25_retriever)
+    bm25_legs = [r for r in (bm25_retriever, kb_bm25_retriever) if r is not None]
+    weights = _resolve_weights(weight_hint, bm25_legs=len(bm25_legs))
+    retrievers.extend(bm25_legs)
 
     ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
     docs = ensemble.invoke(search_query)
@@ -772,17 +923,8 @@ def retrieve_context(
     # Chunk itu TETAP terindeks dan tetap dikirim sebagai konteks ke LLM --
     # cuma tidak pernah ditampilkan sebagai sumber, karena itulah yang
     # sekarang terlihat langsung oleh user lewat panel citation.
-    def _has_table_row(text: str) -> bool:
-        return any(_TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln) for ln in text.split("\n"))
-
-    def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> bool:
-        words_a = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text_a)}
-        words_b = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text_b)}
-        if not words_a or not words_b:
-            return False
-        smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
-        return len(smaller & larger) / len(smaller) >= threshold
-
+    # (_has_table_row/_is_render_duplicate ada di level modul -- lihat di
+    # atas -- supaya reanchor_citable_chunks() bisa memakai logika yang sama.)
     suppressed_render_dupes: set[int] = set()
     for i in range(len(docs)):
         if not _has_table_row(docs[i].page_content):
@@ -797,7 +939,6 @@ def retrieve_context(
                 suppressed_render_dupes.add(j)
 
     # Peringkat diambil dari urutan ensemble (RRF gabungan), bukan distance mentah -- supaya chunk yang cuma ditemukan BM25 tetap bisa terkutip
-    TOP_MATCHES = 3
     ranked = [i for i in range(len(docs)) if i not in suppressed_render_dupes][:TOP_MATCHES]
 
     # Relevance floor relatif ke peringkat 1 -- peringkat 2-3 cuma ikut terkutip kalau similarity-nya masih dekat dari peringkat 1
@@ -928,6 +1069,58 @@ def retrieve_context(
         prefix = " ".join(docs[i].page_content.split())[:n].lower()
         return f"{meta.get('filename')}|{meta.get('page')}|{prefix}"
 
+    # ── 2026-09-01: BM25-only butuh overlap kata nyata kalau TIDAK ada
+    # identifier di query ──────────────────────────────────────────────────
+    # "sim is None -> lolos tanpa syarat" (baris di bawah) sengaja dibuat
+    # 2026-08-25 supaya kecocokan STRING PERSIS lewat BM25 (mis. identifier)
+    # tidak kalah cuma karena tidak punya jarak vektor. Untuk query
+    # BER-IDENTIFIER itu aman: _has_query_id() di atas sudah memaksa chunk
+    # benar-benar menyebut KODE yang ditanya, jadi "lolos tanpa syarat" itu
+    # sebenarnya "lolos karena sudah lolos pemeriksaan yang lebih ketat".
+    #
+    # Untuk query SINTESIS (query_ids kosong, "daftar regulasi yang berlaku
+    # di perusahaan") _has_query_id() SENGAJA pasif (selalu True -- supaya
+    # kasus multi-dokumen macam FR-12 tidak ikut tersaring), jadi "sim is
+    # None -> lolos" jadi jalan bebas hambatan TANPA penjagaan topikal sama
+    # sekali. BM25Retriever sendiri tidak punya ambang skor -- dia
+    # mengembalikan top-k apa adanya sekalipun skornya nyaris nol.
+    #
+    # Ditemukan lewat fitur klik-citation, dikonfirmasi lewat leg BM25
+    # kb_divisi yang baru ditambahkan hari ini: query di atas menyitasi
+    # baris "PTI-03 Daftar Risiko PTI" (BM25-only, cuma berbagi kata
+    # "daftar") dan bahkan chunk JUDUL halaman PTI yang sama sekali tidak
+    # menyebut regulasi. Vektor tidak pernah mengembalikan chunk itu untuk
+    # query ini -- murni BM25 kebetulan cocok satu kata.
+    #
+    # Dijaga dengan overlap kata SIGNIFIKAN (>=4 huruf) terhadap query
+    # sendiri: BM25-only tanpa identifier di query wajib berbagi separuh
+    # dari kata signifikan query, bukan cuma satu kata kebetulan sama.
+    # 0.5 BELUM diukur lewat eval nyata (GPU/Ollama tidak terjangkau sesi
+    # ini) -- beri tahu siapa pun yang menaikkan/menurunkan ini untuk
+    # mengukur dulu, bukan menebak, seperti CITATION_SIMILARITY_GAP.
+    #
+    # _QUERY_STOPWORDS: diukur ulang setelah percobaan pertama TANPA daftar
+    # ini meloloskan "PTI-03 Daftar Risiko PTI" karena "yang" (kata sambung,
+    # 4 huruf, lolos filter panjang) dihitung sebagai 1 dari 4 kata "isi"
+    # query -- 25% dari kuota overlap tanpa makna topikal sama sekali. Daftar
+    # kecil ini sengaja SEMPIT (kata sambung/depan yang jelas tidak
+    # bermakna), bukan daftar stopword NLP umum -- kata seperti "wajib",
+    # "tidak", "harus" tetap dihitung karena membawa makna di teks kepatuhan.
+    _QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
+                        "oleh", "agar", "maka", "jika", "kalau", "serta",
+                        "dapat", "telah", "sudah", "untuk", "dengan"}
+    _QUERY_OVERLAP_MIN_RATIO = 0.5
+
+    def _content_words(text: str) -> set[str]:
+        return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
+
+    _query_words = _content_words(search_query)
+
+    def _bm25_only_matches_query(i: int) -> bool:
+        if query_ids or not _query_words:
+            return True  # sudah dijaga _has_query_id(), atau tidak ada apa pun buat dibandingkan
+        return len(_query_words & _content_words(docs[i].page_content)) / len(_query_words) >= _QUERY_OVERLAP_MIN_RATIO
+
     best_indices: set[int] = set()
     if anchor is not None:
         best_indices.add(anchor)
@@ -942,9 +1135,13 @@ def retrieve_context(
             if shape in cited_shapes:
                 continue
             sim = _similarity(i)
-            if sim is None or sim >= floor:
-                best_indices.add(i)
-                cited_shapes.add(shape)
+            if sim is None:
+                if not _bm25_only_matches_query(i):
+                    continue
+            elif sim < floor:
+                continue
+            best_indices.add(i)
+            cited_shapes.add(shape)
 
     # Confidence dihitung dari chunk yang BENAR-BENAR dikutip (best_indices), bukan semua top_k
     scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]

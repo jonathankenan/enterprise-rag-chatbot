@@ -18,7 +18,7 @@ from app.guardrail.prompt_injection import (
 from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
-from app.rag.vectorstore import retrieve_context
+from app.rag.vectorstore import retrieve_context, reanchor_citable_chunks
 from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
 from app.llm.router import route_and_generate, LLMResult
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
@@ -450,6 +450,16 @@ async def send_message(
                             ]
 
                         context_chunks = id_chunks
+
+                        # 2026-09-01: is_top_match tiap chunk dihitung
+                        # retrieve_context() SEBELUM penyempitan id_chunks di
+                        # atas -- bisa menunjuk chunk yang barusan dibuang
+                        # (bukan identifier ini) atau chunk berbentuk serupa
+                        # tapi kode berbeda. Sitasi harus dipilih ulang dari
+                        # id_chunks yang sudah diurutkan (baris presisi
+                        # dulu), bukan dari seleksi lama. Lihat
+                        # reanchor_citable_chunks().
+                        reanchor_citable_chunks(context_chunks)
 
                         # ── identifier yang cuma hidup di dalam contoh ──────────
                         # Kegagalan ketiga, beda dari dua di atas. Ditanya
