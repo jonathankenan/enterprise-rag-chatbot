@@ -30,6 +30,24 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     full_name: str | None = None
+    role: str | None = None    # divalidasi ke Role.SELF_REGISTERABLE
+    divisi: str | None = None  # divalidasi ke Divisi.ALL
+
+    @field_validator("role")
+    @classmethod
+    def check_self_registerable(cls, v: str | None) -> str | None:
+        from app.models import Role
+        if v is not None and v not in Role.SELF_REGISTERABLE:
+            raise ValueError("Role tersebut tidak bisa dipilih sendiri, hubungi IT Admin")
+        return v
+
+    @field_validator("divisi")
+    @classmethod
+    def check_valid_divisi(cls, v: str | None) -> str | None:
+        from app.models import Divisi
+        if v is not None and v not in Divisi.ALL:
+            raise ValueError(f"Divisi tidak valid. Pilihan: {', '.join(Divisi.ALL)}")
+        return v
 
     @field_validator("password")
     @classmethod
@@ -266,16 +284,20 @@ class ChatReplyResponse(BaseModel):
 
 # ---- Helpdesk (FCR-003 poin 7 — eskalasi ke human helpdesk) ----
 class CreateTicketRequest(BaseModel):
-    chat_id: str
-    message_id: str | None = None  # None = eskalasi manual (tombol "Hubungi Admin"); terisi = dari banner confidence rendah
+    """Tiket dibuat saat user MENGIRIM pesan pertama, bukan saat membuka halaman — makanya `content` yang wajib, bukan chat_id."""
+    content: str | None = None            # pesan pertama; wajib untuk jalur "Hubungi Admin"
+    attached_chat_id: str | None = None   # percakapan AI yang dilampirkan ke pesan pertama
+    chat_id: str | None = None            # cuma dipakai jalur eskalasi confidence rendah
+    message_id: str | None = None         # idem — jawaban AI yang memicu tawaran eskalasi
 
 
 class TicketResponse(BaseModel):
     id: str
-    chat_id: str
+    chat_id: str | None
     user_id: str
     user_email: str
     confidence_score: int | None
+    target_divisi: str | None = None  # None = ditangani IT Admin global
     status: str
     created_at: datetime
 
@@ -286,6 +308,8 @@ class HelpdeskMessageResponse(BaseModel):
     sender_role: str
     sender_id: str | None
     content: str
+    attached_chat_id: str | None = None
+    attached_chat_title: str | None = None  # diisi manual di route (bukan kolom DB) supaya UI tidak perlu query kedua
     created_at: datetime
 
     class Config:
@@ -294,11 +318,11 @@ class HelpdeskMessageResponse(BaseModel):
 
 class SendTicketMessageRequest(BaseModel):
     content: str
+    attached_chat_id: str | None = None
 
 
 class TicketDetailResponse(TicketResponse):
-    chat_title: str
-    messages: list[MessageResponse]  # riwayat chat AI (konteks awal, read-only)
+    chat_title: str | None = None
     ticket_messages: list[HelpdeskMessageResponse]  # percakapan user<->admin
 
 

@@ -1,0 +1,369 @@
+/* Design token tema IDX — SRS FCR-003 hal. 18 "Persyaratan User Interface/User Experience:
+   Menggunakan theme dan nuansa warna yang senada dengan website www.idx.co.id".
+   Nilai merah/netral di bawah diambil dari computed style www.idx.co.id, bukan ditebak. */
+
+:root {
+  /* Brand */
+  --idx-red: #9f0e0f;          /* warna utama idx.co.id (rgb 159,14,15) */
+  --idx-red-dark: #7a0a0b;     /* hover/active */
+  --idx-red-light: #c11617;
+  --idx-red-tint: #fbeaea;     /* latar lembut untuk banner beraksen merah */
+  --idx-red-soft: #c17b7b;     /* merah pudar tombol utama halaman login/daftar (mengikuti mockup) */
+
+  /* Netral */
+  --idx-text: #1a1a1a;         /* judul */
+  --idx-text-body: #4d4d4d;    /* teks utama */
+  --idx-text-muted: #656565;   /* keterangan */
+  --idx-text-subtle: #999999;  /* timestamp, label sekunder */
+
+  --idx-border: #e6e6e6;
+  --idx-border-light: #f0f0f0;
+  --idx-border-strong: #d9d9d9;
+
+  --idx-bg: #ffffff;
+  --idx-surface: #fafafa;      /* sidebar, kartu */
+  --idx-surface-alt: #f2f2f2;  /* header tabel */
+  --idx-surface-active: #ebebeb;
+
+  /* Semantik — merah bahaya sengaja dibuat LEBIH TERANG dari merah brand
+     supaya aksi destruktif tetap terbaca beda dari tombol aksi utama. */
+  --idx-success: #1b7f3b;
+  --idx-danger: #c62828;
+  --idx-danger-tint: #fdeaea;
+  --idx-danger-border: #f5c2c7;
+  --idx-warning: #b26a00;
+  --idx-warning-tint: #fff8e6;
+  --idx-warning-border: #ffe69c;
+  --idx-info-tint: #f4f6f8;
+  --idx-info-border: #dfe4e8;
+  --idx-info-text: #33506b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--idx-bg);
+  color: var(--idx-text-body);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 {
+  color: var(--idx-text);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* Aksen merah tipis di bawah judul halaman — meniru pola heading idx.co.id
+   ("IKHTISAR PASAR", "RINGKASAN PERDAGANGAN") yang selalu bergaris merah. */
+h1 {
+  padding-bottom: 10px;
+  border-bottom: 3px solid var(--idx-red);
+  display: inline-block;
+}
+
+a { color: var(--idx-red); text-decoration: none; }
+a:hover { color: var(--idx-red-dark); text-decoration: underline; }
+
+button { font-family: inherit; font-size: 13px; }
+button:not(:disabled) { cursor: pointer; }
+button:disabled { opacity: 0.55; }
+
+/* Gaya tombol utama HANYA untuk tombol "polos" — yang tidak menyetel background
+   lewat inline style (mis. submit form). Selektor :not([style*="background"])
+   dipakai supaya tombol ikon transparan & tombol berwarna khusus TIDAK ikut
+   kena warna teks putih di sini; tanpa penjaga ini, tombol ikon jadi
+   putih-di-atas-putih (tidak terbaca). */
+/* Kelas navigasi dikecualikan EKSPLISIT: tanpa ini aturan di bawah menang
+   secara spesifisitas (0-1-1 vs 0-1-0 milik .nav-item) dan seluruh menu
+   sidebar ikut jadi tombol merah solid. */
+button:not([style*="background"]):not([class*="btn-"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle) {
+  font-weight: 600;
+  background: var(--idx-red);
+  color: var(--idx-bg);
+  border: none;
+  border-radius: 4px;
+  padding: 9px 16px;
+  transition: background 0.15s ease;
+}
+button:not([style*="background"]):not([class*="btn-"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle):not(:disabled):hover {
+  background: var(--idx-red-dark);
+}
+
+/* Checkbox/radio ikut merah IDX (browser default-nya biru) */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--idx-red); }
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--idx-text-body);
+  border: 1px solid var(--idx-border-strong);
+  border-radius: 4px;
+  background: var(--idx-bg);
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--idx-red);
+  box-shadow: 0 0 0 2px rgba(159, 14, 15, 0.14);
+}
+
+/* ---------- Navigasi sidebar ---------- */
+/* Hover ditangani CSS (bukan state React) supaya tidak ada re-render per
+   gerakan mouse — daftar riwayat bisa panjang, itu jadi mahal. */
+.nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: var(--idx-text-body);
+  background: transparent;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.13s ease, color 0.13s ease;
+}
+.nav-item:hover { background: var(--idx-surface-active); color: var(--idx-text); }
+.nav-item.active { background: var(--idx-red-tint); color: var(--idx-red); font-weight: 600; }
+.nav-item.active:hover { background: var(--idx-red-tint); }
+.nav-caret { font-size: 9px; color: var(--idx-text-subtle); transition: transform 0.18s ease; }
+.nav-caret.open { transform: rotate(180deg); }
+
+/* Hierarki 2 tingkat: induk (menu utama & judul grup) tebal dan gelap,
+   anak (isi dropdown & daftar percakapan) lebih ringan + bergaris pemandu,
+   supaya sekali lihat jelas mana yang mengelompokkan dan mana yang isi. */
+.nav-item.nav-parent {
+  font-weight: 600;
+  color: var(--idx-text);
+  letter-spacing: 0.01em;
+}
+.nav-children {
+  margin: 2px 0 6px 18px;
+  padding-left: 10px;
+  border-left: 1.5px solid var(--idx-border);
+}
+.nav-children .nav-item { font-size: 13px; }
+.nav-children .chat-row-link { padding-left: 10px; }
+
+/* Mode sidebar ciut: tombol jadi kotak ikon saja, teksnya hilang */
+.nav-item.nav-icon-only {
+  justify-content: center;
+  padding: 10px 0;
+  color: var(--idx-text-body);
+}
+.nav-item.nav-icon-only.active { background: var(--idx-red-tint); color: var(--idx-red); }
+
+.sidebar-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--idx-text-muted);
+  cursor: pointer;
+  transition: background 0.13s ease, color 0.13s ease;
+}
+.sidebar-toggle:hover { background: var(--idx-surface-active); color: var(--idx-text); }
+
+/* Baris percakapan: tombol titik-tiga hanya muncul saat hover/fokus */
+.chat-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  margin-bottom: 2px;
+  transition: background 0.13s ease;
+}
+.chat-row:hover { background: var(--idx-surface-active); }
+.chat-row.active { background: var(--idx-red-tint); }
+.chat-row-link {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 4px 7px 12px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--idx-text-body);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-row.active .chat-row-link { color: var(--idx-red); font-weight: 600; }
+.chat-row-menu-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  padding: 4px 8px;
+  margin-right: 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--idx-text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: opacity 0.13s ease, background 0.13s ease;
+}
+.chat-row:hover .chat-row-menu-btn,
+.chat-row-menu-btn:focus-visible,
+.chat-row-menu-btn.open { opacity: 1; }
+.chat-row-menu-btn:hover { background: var(--idx-border); }
+
+/* Menu popup (titik-tiga & profil) */
+.popup-menu {
+  position: absolute;
+  z-index: 40;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--idx-bg);
+  border: 1px solid var(--idx-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  animation: popIn 0.12s ease-out;
+}
+.popup-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--idx-text-body);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.popup-item:hover { background: var(--idx-surface-active); }
+.popup-item.danger { color: var(--idx-danger); }
+.popup-item.danger:hover { background: var(--idx-danger-tint); }
+
+/* Gradiasi lembut di belakang layar kosong (Percakapan Baru & Hubungi Admin).
+   Sengaja tipis (opacity <= 0.09) dan memudar ke transparan: ini latar suasana,
+   bukan elemen yang harus menarik perhatian dari composer di tengahnya. */
+.empty-glow {
+  background:
+    radial-gradient(58% 42% at 50% 52%, rgba(159, 14, 15, 0.09), rgba(159, 14, 15, 0) 70%),
+    radial-gradient(34% 26% at 50% 44%, rgba(193, 22, 23, 0.06), rgba(193, 22, 23, 0) 75%);
+}
+
+/* ---------- Animasi transisi ---------- */
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* Dipasang di wrapper konten dengan key={pathname}, jadi tiap pindah halaman
+   elemennya di-mount ulang dan animasinya jalan lagi. */
+.page-enter { animation: fadeUp 0.24s ease-out; }
+.collapse-enter { animation: fadeUp 0.16s ease-out; }
+
+/* Ilustrasi login disembunyikan di layar sempit — form lebih penting */
+@media (max-width: 900px) {
+  .auth-illustration { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter, .collapse-enter, .popup-menu { animation: none; }
+  .nav-item, .chat-row, .chat-row-menu-btn, .nav-caret { transition: none; }
+}
+
+table { border-collapse: collapse; }
+
+/* Header kolom bergaya idx.co.id: bilah merah solid dengan teks putih,
+   seperti tab "Ekuitas" & judul tabel di halaman utama IDX. */
+thead th {
+  background: var(--idx-red);
+  color: #fff;
+  font-weight: 700;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  padding: 11px 10px;
+  border-bottom: none;
+}
+thead th:first-child { border-top-left-radius: 8px; }
+thead th:last-child { border-top-right-radius: 8px; }
+
+/* Judul halaman daftar/administrasi: merah kapital dengan garis bawah merah —
+   pola heading idx.co.id ("IKHTISAR PASAR", "RINGKASAN PERDAGANGAN"). */
+h1.page-title {
+  color: var(--idx-red);
+  text-transform: uppercase;
+  font-size: 18px;
+  letter-spacing: 0.04em;
+  padding-bottom: 8px;
+  border-bottom: 3px solid var(--idx-red);
+}
+
+/* Sub-judul di dalam kartu/panel. Sengaja HANYA menyetel display + weight:
+   font-size dan warna dibiarkan mewarisi, persis seperti <b> polos yang
+   dipakai "Force-Stop LLM Commercial". Sebelumnya warnanya dipaksa ke
+   --idx-text (#1a1a1a) yang lebih gelap, sehingga terbaca lebih tebal
+   padahal bobotnya sama-sama 700. */
+.card-label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+/* ---------- Varian tombol ----------
+   Tombol dengan kelas btn-* dikecualikan dari aturan otomatis di atas
+   (lihat :not([class*="btn-"])), jadi kelas ini yang menentukan tampilannya
+   — termasuk hover, yang dulu tidak ada pada tombol ber-inline background. */
+.btn-primary,
+.btn-success,
+.btn-outline,
+.btn-ghost,
+.btn-danger-outline {
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 9px 16px;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-primary { background: var(--idx-red); color: #fff; border: 1px solid var(--idx-red); }
+.btn-primary:hover:not(:disabled) { background: var(--idx-red-dark); border-color: var(--idx-red-dark); }
+
+.btn-success { background: var(--idx-success); color: #fff; border: 1px solid var(--idx-success); }
+.btn-success:hover:not(:disabled) { background: #15642e; border-color: #15642e; }
+
+.btn-outline { background: var(--idx-bg); color: var(--idx-red); border: 1px solid var(--idx-red); }
+.btn-outline:hover:not(:disabled) { background: var(--idx-red); color: #fff; }
+
+.btn-ghost { background: transparent; color: var(--idx-text-body); border: 1px solid var(--idx-border-strong); }
+.btn-ghost:hover:not(:disabled) { background: var(--idx-surface-active); color: var(--idx-text); border-color: var(--idx-text-subtle); }
+
+.btn-danger-outline { background: transparent; color: var(--idx-danger); border: 1px solid var(--idx-danger-border); }
+.btn-danger-outline:hover:not(:disabled) { background: var(--idx-danger); color: #fff; border-color: var(--idx-danger); }
+
+/* Dipakai pada <label> pemilih berkas — bukan <button>, tapi tampil sebagai tombol */
+label.btn-outline { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+label.btn-outline.is-disabled { opacity: 0.6; cursor: not-allowed; color: var(--idx-text-subtle); border-color: var(--idx-border-strong); }
+label.btn-outline.is-disabled:hover { background: var(--idx-bg); color: var(--idx-text-subtle); }
+
+/* Judul bagian di dalam halaman (kartu pengaturan, dsb) */
+.section-title {
+  display: block;
+  color: var(--idx-red);
+  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}

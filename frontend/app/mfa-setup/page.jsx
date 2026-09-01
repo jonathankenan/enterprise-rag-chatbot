@@ -67,22 +67,22 @@ export default function MfaSetupPage() {
 
   return (
     <div style={{ maxWidth: 400, margin: "60px auto", padding: 24 }}>
-      <h1>Setup Autentikasi Dua Faktor</h1>
-      <p style={{ color: "#666", fontSize: 14 }}>
-        Akun Anda (IT Admin) wajib mengaktifkan MFA sebelum bisa masuk (SRS ISR-001.d).
+      <h1 className="page-title">Setup Autentikasi Dua Faktor</h1>
+      <p style={{ color: "var(--idx-text-muted)", fontSize: 14 }}>
+        Akun IT Admin wajib mengaktifkan verifikasi dua faktor sebelum bisa masuk.
         Scan QR code ini pakai aplikasi authenticator (Google Authenticator, Authy, dll).
       </p>
 
       {loading && <p>Memuat...</p>}
-      {error && <p style={{ color: "red" }}>{error}</p>}
+      {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
       {qrCode && (
         <>
           <div style={{ textAlign: "center", margin: "20px 0" }}>
             <img src={qrCode} alt="QR Code MFA" style={{ width: 200, height: 200 }} />
           </div>
-          <p style={{ fontSize: 12, color: "#666" }}>
-            Tidak bisa scan? Masukkan kode ini secara manual: <code style={{ background: "#f1f1f1", padding: "2px 6px" }}>{secret}</code>
+          <p style={{ fontSize: 12, color: "var(--idx-text-muted)" }}>
+            Tidak bisa scan? Masukkan kode ini secara manual: <code style={{ background: "var(--idx-surface-alt)", padding: "2px 6px" }}>{secret}</code>
           </p>
 
           <form onSubmit={handleConfirm}>

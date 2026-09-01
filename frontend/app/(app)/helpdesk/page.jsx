@@ -8,7 +8,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "../../lib/api";
+import { api } from "../../../lib/api";
 
 export default function HelpdeskHubPage() {
   const router = useRouter();
@@ -39,7 +39,7 @@ export default function HelpdeskHubPage() {
     return (
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
         <h1>Akses Ditolak</h1>
-        <p style={{ color: "#666" }}>Halaman ini hanya untuk role IT Admin.</p>
+        <p style={{ color: "var(--idx-text-muted)" }}>Halaman ini hanya untuk role IT Admin.</p>
         <Link href="/chat">Kembali ke Chat</Link>
       </div>
     );
@@ -49,29 +49,28 @@ export default function HelpdeskHubPage() {
     <div style={{ padding: "20px 40px", maxWidth: 900, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <h1 style={{ margin: 0 }}>Helpdesk</h1>
-        <Link href="/chat">← Kembali ke Chat</Link>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <Link
           href="/helpdesk/tickets"
-          style={{ display: "block", padding: 24, borderRadius: 8, border: "1px solid #ddd", background: "#f9f9f9", textDecoration: "none", color: "inherit" }}
+          style={{ display: "block", padding: 24, borderRadius: 8, border: "1px solid var(--idx-border)", background: "var(--idx-surface)", textDecoration: "none", color: "inherit" }}
         >
-          <div style={{ fontSize: 28, marginBottom: 8 }}>🎫</div>
+          <div style={{ fontSize: 28, marginBottom: 8 }}></div>
           <b style={{ fontSize: 16 }}>Tiket Helpdesk</b>
-          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#666" }}>
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: "var(--idx-text-muted)" }}>
             Antrian eskalasi dari user — jawaban AI kurang meyakinkan, chat langsung dengan admin.
           </p>
         </Link>
 
         <Link
           href="/helpdesk/faq"
-          style={{ display: "block", padding: 24, borderRadius: 8, border: "1px solid #ddd", background: "#f9f9f9", textDecoration: "none", color: "inherit" }}
+          style={{ display: "block", padding: 24, borderRadius: 8, border: "1px solid var(--idx-border)", background: "var(--idx-surface)", textDecoration: "none", color: "inherit" }}
         >
-          <div style={{ fontSize: 28, marginBottom: 8 }}>📚</div>
+          <div style={{ fontSize: 28, marginBottom: 8 }}></div>
           <b style={{ fontSize: 16 }}>FAQ Helpdesk</b>
-          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#666" }}>
-            Kelola tanya-jawab yang otomatis jadi sumber jawaban AI di semua chat (SRS poin 10.b).
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: "var(--idx-text-muted)" }}>
+            Kelola tanya-jawab yang otomatis jadi sumber jawaban AI di semua chat.
           </p>
         </Link>
       </div>
