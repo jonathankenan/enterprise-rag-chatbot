@@ -285,6 +285,56 @@ JSON:"""
     return _parse_query_analysis(raw, fallback)
 
 
+# ── 2026-09-01: penjagaan hasil rewrite kueri ───────────────────────────────
+# qwen2.5:7b sering MENYALIN KEMBALI kalimat instruksinya alih-alih
+# menjalankannya, dan hasilnya masuk ke standalone_query apa adanya:
+#
+#     "rephrase the follow-up question into a standalone English search query"
+#     "rephrase the follow-up question into a standalone English search
+#      query: sebutkan isi SOP-02"
+#
+# Terukur pada 3 kueri x 3 run: on-prem mengembalikan echo instruksi di 7 dari
+# 9 percobaan; Groq nol dari 9. Ini BUKAN cuma jelek -- dia meracuni embedding.
+# Teks instruksi mendominasi vektornya sampai chunk yang benar terdorong keluar
+# top-10, lalu penjaga identifier melapor "tidak ditemukan" untuk item yang
+# sebetulnya ADA:
+#
+#     "contents of SOP-01"                         -> 2 chunk cocok, dijawab
+#     "rephrase the follow-up ...: ... SOP-01"     -> 0 chunk cocok, DITOLAK
+#
+# Itu persis yang terlihat di sesi 2026-09-01: SOP-01 ditolak sementara SOP-02
+# dan SOP-03 terjawab, dari korpus yang sama, dalam chat yang sama. Bukan acak
+# -- tergantung rewrite mana yang kebetulan bersih.
+#
+# Frasa di bawah milik prompt analyze_query itu sendiri. Tidak akan muncul di
+# kueri pencarian yang wajar, jadi kemunculannya adalah bukti kontaminasi.
+_ECHO_MARKERS = (
+    "follow-up question",
+    "standalone english",
+    "search query",
+    "conversational filler",
+    "json object",
+    "respond with only",
+    "classify the follow-up",
+)
+
+
+def _is_instruction_echo(text: str) -> bool:
+    lowered = text.lower()
+    return any(m in lowered for m in _ECHO_MARKERS)
+
+
+def _lost_identifiers(original: str, rewritten: str) -> bool:
+    """
+    True kalau pesan asli menyebut identifier item (SOP-02, FR-01, dst.) yang
+    hilang dari hasil rewrite. Impor ditaruh di dalam fungsi supaya router
+    tidak menarik rag.vectorstore (dan chromadb) saat impor modul.
+    """
+    from app.rag.vectorstore import extract_query_identifiers
+    asli = extract_query_identifiers(original)
+    return bool(asli) and not (asli & extract_query_identifiers(rewritten))
+
+
 def _parse_query_analysis(raw: str, fallback: dict) -> dict:
     """Strip markdown fence kalau ada, validasi intent ke LAYER2_INTENTS, fallback aman kalau parsing gagal."""
     text = raw.strip()
@@ -300,7 +350,21 @@ def _parse_query_analysis(raw: str, fallback: dict) -> dict:
         intent = parsed.get("intent")
         if intent not in LAYER2_INTENTS:
             intent = Intent.QUESTION
-        return {"standalone_query": query or fallback["standalone_query"], "intent": intent}
+        query = query or fallback["standalone_query"]
+
+        # Kembali ke pesan asli user kalau rewrite-nya tercemar. Pesan asli
+        # (biasanya bahasa Indonesia) bukan pilihan buruk: diukur 2026-08-31
+        # pada korpus Indonesia, kueri Indonesia dan Inggris praktis setara
+        # (6/8 vs 7/8) -- jauh lebih baik daripada teks instruksi.
+        if _is_instruction_echo(query):
+            query = fallback["standalone_query"]
+        # Rewrite yang MEMBUANG identifier juga merugikan: saringan identifier
+        # adalah tulang punggung beberapa penjaga, dan tanpa identifier di
+        # search_query semuanya jadi tidak aktif tanpa gejala apa pun.
+        elif _lost_identifiers(fallback["standalone_query"], query):
+            query = fallback["standalone_query"]
+
+        return {"standalone_query": query, "intent": intent}
     except (json.JSONDecodeError, AttributeError, TypeError):
         return fallback
 
