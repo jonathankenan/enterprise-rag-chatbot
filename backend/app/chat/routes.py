@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import Chat, Message, SenderType, User, SystemSettings, Role, Divisi
-from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation
+from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation, CitationChunk
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import (
@@ -162,10 +162,14 @@ def rename_chat(
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
     """SRS poin 12.a — dedup context_chunks jadi satu entri per dokumen/FAQ unik, kumpulkan semua nomor halaman jadi label "file.pdf (hal. 2, 5)"."""
     order: list[str] = []          # key insertion order, buat urutan citation stabil
-    labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file
+    labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file/judul
     filenames: dict[str, str | None] = {}
+    display_titles: dict[str, str | None] = {}
+    doc_types: dict[str, str | None] = {}
     source_types: dict[str, str] = {}
     pages: dict[str, set[int]] = {}
+    chunk_texts: dict[str, list[tuple]] = {}   # key -> [(page, text)], urutan kemunculan
+    chunk_seen_shapes: dict[str, set[str]] = {}  # dedup potongan yang sama dirender dua bentuk (lihat catatan _dedup_shape di vectorstore.py)
 
     for chunk in context_chunks:
         # cuma chunk is_top_match (3 similarity terbaik) yang layak jadi sumber -- default True supaya get_all_session_chunks() ("ringkas semua") tetap kutip semuanya
@@ -176,22 +180,48 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         if source_type == "faq":
             key = "faq"
             filename = None
+            display_title = None
+            doc_type = None
             label = "FAQ Helpdesk"
         else:
             filename = chunk.get("filename") or "Dokumen tanpa nama"
+            # 2026-09-01: judul yang diisi admin saat upload dipakai sebagai
+            # label kalau ada -- filename mentah (ex. "KB_PDF_PTI.pdf") cuma
+            # fallback utk dokumen lama/yang tidak diisi. doc_type ikut
+            # ditempel di label kalau ada, biar "Pedoman Operasional PTI
+            # 2025 (SOP)" alih-alih nama file teknis.
+            display_title = chunk.get("display_title")
+            doc_type = chunk.get("doc_type")
             key = f"{source_type}:{filename}"  # source_type ikut key -- filename sama tapi source_type beda tetap dianggap 2 sumber
-            label = filename
+            label = display_title or filename
+            if doc_type:
+                label = f"{label} ({doc_type})"
 
         if key not in labels:
             order.append(key)
             labels[key] = label
             filenames[key] = filename
+            display_titles[key] = display_title
+            doc_types[key] = doc_type
             source_types[key] = source_type
             pages[key] = set()
+            chunk_texts[key] = []
+            chunk_seen_shapes[key] = set()
 
         page = chunk.get("page")
         if page is not None:
             pages[key].add(page)
+
+        # Cuplikan isi yang benar-benar dikutip -- dasar citation yang bisa
+        # "dipencet" tanpa endpoint baru: teksnya sudah lolos filter divisi
+        # di retrieve_context(), tinggal dikirim apa adanya. Shape (halaman +
+        # 80 karakter pertama) dipakai membuang duplikat render (lihat
+        # _dedup_shape di vectorstore.py) supaya user tidak melihat "isi
+        # yang sama" dua kali di panel yang sama.
+        shape = f"{page}|{' '.join(chunk.get('text', '').split())[:80].lower()}"
+        if shape not in chunk_seen_shapes[key]:
+            chunk_seen_shapes[key].add(shape)
+            chunk_texts[key].append((page, chunk.get("text", "")))
 
     citations = []
     for key in order:
@@ -199,8 +229,11 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         label = labels[key]
         if sorted_pages:
             label = f"{label} (hal. {', '.join(str(p) for p in sorted_pages)})"
+        ordered_chunks = sorted(chunk_texts[key], key=lambda pt: (pt[0] is None, pt[0]))
         citations.append(SourceCitation(
-            label=label, filename=filenames[key], source_type=source_types[key], pages=sorted_pages,
+            label=label, filename=filenames[key], display_title=display_titles[key],
+            doc_type=doc_types[key], source_type=source_types[key], pages=sorted_pages,
+            chunks=[CitationChunk(page=p, text=t) for p, t in ordered_chunks],
         ))
     return citations
 

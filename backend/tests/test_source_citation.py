@@ -48,6 +48,7 @@ def _assignment(source: str, name: str) -> str:
 # ---------------------------------------------------------------- load units
 _ns: dict = {}
 exec("from pydantic import BaseModel", _ns)
+exec(_segment(SCHEMAS_SRC, "CitationChunk"), _ns)
 exec(_segment(SCHEMAS_SRC, "SourceCitation"), _ns)
 exec(_segment(ROUTES_SRC, "_build_source_citations"), _ns)
 build_citations = _ns["_build_source_citations"]
@@ -128,8 +129,24 @@ def dist_for(sim_pct: float) -> float:
 
 
 class Doc:
-    """Stand-in for a langchain Document."""
-    def __init__(self, text="...", **meta):
+    """
+    Stand-in for a langchain Document.
+
+    text defaults to a per-instance UNIQUE placeholder, not a fixed "...".
+    2026-09-01: citation selection started deduping candidates by page_content
+    shape (see _dedup_shape in retrieve_context) so two near-identical chunks
+    can't both win a citation slot. Every existing fixture that left text at
+    its old fixed default would collide under that check and look like
+    duplicates of each other -- not what those tests are about. A test that
+    genuinely wants duplicate/near-duplicate text still can, by passing
+    text= explicitly with the same string on two Docs.
+    """
+    _counter = 0
+
+    def __init__(self, text=None, **meta):
+        if text is None:
+            Doc._counter += 1
+            text = f"chunk placeholder #{Doc._counter}"
         self.page_content = text
         self.metadata = meta
 

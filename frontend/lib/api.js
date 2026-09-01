@@ -333,10 +333,13 @@ export const api = {
   // ---- Multi-Tenant Knowledge Base (dibatasi Role.IT_ADMIN, scope divisi otomatis di backend) ----
   listKbDocuments: () => request("/api/kb/documents"),
 
-  uploadKbDocument: (file, divisi) => {
+  uploadKbDocument: (file, divisi, { displayTitle, docType, replace } = {}) => {
     const formData = new FormData();
     formData.append("file", file);
     if (divisi) formData.append("divisi", divisi);
+    if (displayTitle) formData.append("display_title", displayTitle);
+    if (docType) formData.append("doc_type", docType);
+    if (replace) formData.append("replace", "true");
     const token = getToken();
     return fetch(`${API_URL}/api/kb/upload`, {
       method: "POST",

@@ -260,12 +260,21 @@ class MessageResponse(BaseModel):
         from_attributes = True
 
 
+class CitationChunk(BaseModel):
+    """2026-09-01: satu potongan teks yang benar-benar dipakai model untuk menyusun jawaban -- dikirim apa adanya, bukan lewat endpoint baru, supaya tidak membuka jalur akses baru yang harus diperiksa ulang divisinya (teks ini sudah lolos filter divisi di retrieve_context())."""
+    page: int | None = None
+    text: str
+
+
 class SourceCitation(BaseModel):
     """SRS poin 12.a: source references — satu entri per dokumen/FAQ unik (bukan per chunk), lihat _build_source_citations() di chat/routes.py."""
     label: str  # nama yang ditampilkan ke user: "file.pdf (hal. 3, 7)", atau "FAQ Helpdesk"
     filename: str | None = None
+    display_title: str | None = None  # judul yang diisi admin saat upload KB, None kalau tidak diisi/bukan dokumen KB
+    doc_type: str | None = None       # salah satu KbDocType.ALL, None kalau tidak diisi/bukan dokumen KB
     source_type: str  # "chat_document" | "kb_divisi" | "faq"
     pages: list[int] = []  # nomor halaman (1-indexed) sumber chunk, urut tanpa duplikat; kosong utk FAQ atau kalau halaman tidak bisa dipastikan
+    chunks: list[CitationChunk] = []  # isi cuplikan yang dikutip, urut per halaman -- buat citation yang bisa "dipencet" tanpa endpoint baru
 
 
 class ChatReplyResponse(BaseModel):
@@ -378,6 +387,8 @@ class KbDocumentResponse(BaseModel):
     id: str
     divisi: str | None  # None = Company Wide
     filename: str
+    display_title: str | None = None  # 2026-09-01: judul yang diisi admin saat upload, None utk dokumen lama
+    doc_type: str | None = None       # salah satu KbDocType.ALL
     chunk_count: int
     uploaded_by: str | None
     created_at: datetime

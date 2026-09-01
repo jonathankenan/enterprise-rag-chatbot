@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Role, User, Divisi, KbDocument
+from app.models import Role, User, Divisi, KbDocument, KbDocType
 from app.schemas import KbDocumentResponse
 from app.auth.utils import require_role, get_divisi_scope
 from app.guardrail.audit_log import log_guardrail_event, EventType
@@ -48,6 +48,8 @@ async def upload_kb_document(
     file: UploadFile = File(...),
     divisi: str | None = Form(None),
     replace: bool = Form(False),
+    display_title: str | None = Form(None),
+    doc_type: str | None = Form(None),
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(Role.IT_ADMIN)),
 ):
@@ -56,6 +58,17 @@ async def upload_kb_document(
     if divisi is not None and divisi not in Divisi.ALL:
         raise HTTPException(status_code=400, detail=f"Divisi tidak dikenal: {divisi}")
     _assert_can_manage(admin, divisi)
+
+    # 2026-09-01: judul & tipe dokumen -- keduanya opsional (dokumen lama
+    # dan admin yang malas isi tetap fallback ke filename apa adanya di
+    # _build_source_citations()), tapi doc_type kalau DIISI harus dari
+    # daftar tertutup KbDocType -- teks bebas di sini akan tidak konsisten
+    # dalam sebulan dan tidak bisa dipakai memfilter nanti.
+    display_title = (display_title or "").strip() or None
+    if doc_type == "":
+        doc_type = None
+    if doc_type is not None and doc_type not in KbDocType.ALL:
+        raise HTTPException(status_code=400, detail=f"Tipe dokumen tidak dikenal: {doc_type}")
 
     file_bytes = await file.read()
     pages = extract_pages_from_pdf(io.BytesIO(file_bytes))
@@ -122,9 +135,12 @@ async def upload_kb_document(
 
     doc_id = str(uuid.uuid4())
     chunk_count = index_kb_document(pages=pages, doc_id=doc_id, filename=file.filename,
-                                    divisi=divisi, hash_isi=hash_isi)
+                                    divisi=divisi, hash_isi=hash_isi,
+                                    display_title=display_title, doc_type=doc_type)
 
-    doc_record = KbDocument(id=doc_id, divisi=divisi, filename=file.filename, chunk_count=chunk_count, uploaded_by=admin.id)
+    doc_record = KbDocument(id=doc_id, divisi=divisi, filename=file.filename,
+                            display_title=display_title, doc_type=doc_type,
+                            chunk_count=chunk_count, uploaded_by=admin.id)
     db.add(doc_record)
     db.commit()
     db.refresh(doc_record)

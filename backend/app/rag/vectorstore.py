@@ -312,7 +312,8 @@ def find_kb_duplicate(hash_isi: str, divisi: str | None) -> str | None:
 
 
 def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None,
-                      hash_isi: str | None = None) -> int:
+                      hash_isi: str | None = None, display_title: str | None = None,
+                      doc_type: str | None = None) -> int:
     """Multi-Tenant KB (SRS poin 11) — divisi=None berarti Company Wide, chunk per halaman sama seperti index_document()."""
     collection = get_collection(KB_DIVISI_COLLECTION_NAME)
     divisi_tag = divisi or KB_COMPANY_WIDE_SENTINEL
@@ -329,6 +330,18 @@ def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str
                 meta["content_hash"] = hash_isi
             if page_info["page"] is not None:
                 meta["page"] = page_info["page"]
+            # 2026-09-01: didenormalisasi ke sini alih-alih di-join dari
+            # Postgres saat citation dibangun -- filename sudah dititipkan
+            # dengan cara yang sama sejak awal, dan _build_source_citations()
+            # bekerja dari dict chunk, bukan dari session DB. Konsekuensinya:
+            # kalau admin mengganti display_title/doc_type dokumen yang
+            # sudah terindeks, salinan lama di sini tidak ikut berubah
+            # sampai dokumennya diunggah ulang (replace=true). Sama seperti
+            # filename hari ini -- tidak ada endpoint rename.
+            if display_title:
+                meta["display_title"] = display_title
+            if doc_type:
+                meta["doc_type"] = doc_type
             metadatas.append(meta)
 
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(documents))]
@@ -785,20 +798,98 @@ def retrieve_context(
         # panjang tidak ikut terbuang.
         return len(re.findall(r"\.{4,}", docs[i].page_content)) >= 3
 
+    # ── 2026-09-01: anchor sitasi dipilih dari similarity, bukan peringkat
+    # ensemble ────────────────────────────────────────────────────────────
+    # "first = ranked[0]" DULU selalu dikutip apa pun isinya -- peringkat
+    # ensemble #1, titik. Itu tidak aman: RRF gabungan BM25+vektor bisa
+    # mendorong chunk yang cuma kebetulan cocok secara leksikal ke posisi
+    # #1, dan floor sitasinya ikut dijangkarkan ke chunk yang salah itu.
+    #
+    # Terukur pada KB divisi PTI. User bertanya "jelaskan regulasi
+    # perusahaan yang berlaku" -- JAWABANNYA BENAR (REG-01..04 dari
+    # KB_CompanyWide, chunk itu memang ada di context_chunks), tapi
+    # SITASINYA menunjuk KB_PTI (SOP-01), dokumen yang sama sekali tidak
+    # dibahas jawabannya. Sebabnya: query rewriting menerjemahkan pertanyaan
+    # itu ke "explain applicable company regulations" -- kehilangan overlap
+    # leksikal dengan "regulasi"/"berlaku" yang BM25 andalkan -- dan chunk
+    # KB_CompanyWide yang benar jatuh ke peringkat ensemble #4, DI LUAR
+    # TOP_MATCHES=3 lama. (Pertanyaan versi Indonesia yang tidak
+    # diterjemahkan menaruhnya di peringkat #1 -- lihat [[LLM Switching]]
+    # soal risiko rewriting paksa ke Inggris pada korpus Indonesia; itu
+    # temuan terpisah, tidak diperbaiki di sini.)
+    #
+    # TOP_MATCHES tetap 3 -- itu batas JUMLAH sitasi per jawaban, bukan
+    # jendela kelayakan, dan dua-duanya sengaja dipisah sekarang. Anchor-nya
+    # sekarang chunk dengan SIMILARITY VEKTOR TERTINGGI di antara seluruh
+    # kandidat (bukan cuma 3 teratas ensemble), dan sisanya diperiksa
+    # menyusuri SELURUH hasil (bukan cuma ranked[1:]) sampai kuota
+    # TOP_MATCHES terpenuhi -- urutan pemeriksaannya tetap urutan ensemble,
+    # jadi kesepakatan BM25+vektor tetap jadi prioritas, cuma tidak lagi
+    # jadi PEMBATAS KERAS.
+    #
+    # Kasus BM25-murni (tidak ada chunk berjarak vektor sama sekali) jatuh
+    # balik ke perilaku lama: anchor = peringkat ensemble #1, reference=100 --
+    # lihat test_all_bm25_result_is_cited_but_scores_no_confidence.
+    scored_by_similarity = [(i, s) for i in range(len(docs))
+                            if (s := _similarity(i)) is not None]
+
+    anchor: int | None = None
+    reference = 100.0
+    if ranked and _similarity(ranked[0]) is None:
+        # Peringkat ensemble #1 ditemukan MURNI lewat BM25 -- kecocokan
+        # KATA PERSIS, tanpa vektor sama sekali. Itu sinyal yang sengaja
+        # dipercaya sebagai batas atas mutlak (reference=100) sejak
+        # 2026-08-26 -- lihat test_unscored_rank_one_sets_a_strict_bar --
+        # supaya tetangga topikal yang cuma "lumayan mirip" secara vektor
+        # tidak ikut nebeng sitasi di samping kecocokan presisi. TIDAK
+        # disentuh oleh perbaikan di bawah; itu cuma berlaku untuk kasus
+        # peringkat #1 yang PUNYA distance tapi similaritynya menyesatkan.
+        anchor = ranked[0]
+    elif scored_by_similarity:
+        anchor, reference = max(scored_by_similarity, key=lambda x: x[1])
+    elif ranked:
+        anchor = ranked[0]
+
+    # Memindahkan anchor ke similarity tertinggi TIDAK CUKUP sendirian:
+    # diverifikasi bahwa dua duplikat "PTI-09 belum diterbitkan" (lihat
+    # catatan [!warning] "Some KB pages are indexed twice" di RAG Pipeline --
+    # extract_pages_from_pdf merender ulang halaman yang sama jadi dua
+    # bentuk) SECARA GENUINE punya similarity vektor lebih tinggi daripada
+    # chunk KB_CompanyWide yang benar. Similarity tinggi bukan berarti
+    # BERBEDA -- dua salinan nyaris sama persis dari kalimat yang sama akan
+    # sama-sama menang similarity dan berdua menghabiskan slot TOP_MATCHES
+    # sebelum kandidat ketiga yang genuinely berbeda sempat diperiksa.
+    # Duplikat/nyaris-duplikat karena itu di-skip di jendela pengisi slot --
+    # cukup sidik jari kasar (N karakter pertama setelah dirapikan), bukan
+    # perbandingan isi penuh: yang dicari adalah "chunk yang sama diberi
+    # bentuk render berbeda", bukan kemiripan topik.
+    # Disyaratkan berdampingan dengan (filename, page) yang SAMA -- itu
+    # sinyal sebenarnya dari bug ini: dua chunk dari halaman yang sama
+    # dirender ulang jadi dua bentuk. Dua chunk yang KEBETULAN mirip
+    # teksnya tapi dari halaman berbeda BUKAN duplikat, dan memang tidak
+    # boleh ikut disaring keluar -- keduanya lokasi sitasi yang sah.
+    def _dedup_shape(i: int, n: int = 120) -> str:
+        meta = docs[i].metadata
+        prefix = " ".join(docs[i].page_content.split())[:n].lower()
+        return f"{meta.get('filename')}|{meta.get('page')}|{prefix}"
+
     best_indices: set[int] = set()
-    if ranked:
-        first = ranked[0]
-        best_indices.add(first)
-        reference = _similarity(first)
-        if reference is None:
-            reference = 100.0
+    if anchor is not None:
+        best_indices.add(anchor)
+        cited_shapes = {_dedup_shape(anchor)}
         floor = reference - CITATION_SIMILARITY_GAP
-        for i in ranked[1:]:
-            if _is_toc(i) or not _has_query_id(i):
+        for i in range(len(docs)):
+            if len(best_indices) >= TOP_MATCHES:
+                break
+            if i == anchor or _is_toc(i) or not _has_query_id(i):
+                continue
+            shape = _dedup_shape(i)
+            if shape in cited_shapes:
                 continue
             sim = _similarity(i)
             if sim is None or sim >= floor:
                 best_indices.add(i)
+                cited_shapes.add(shape)
 
     # Confidence dihitung dari chunk yang BENAR-BENAR dikutip (best_indices), bukan semua top_k
     scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]
@@ -821,6 +912,8 @@ def retrieve_context(
         chunks.append({
             "text": d.page_content,
             "filename": meta.get("filename"),
+            "display_title": meta.get("display_title"),  # None kalau bukan KB atau admin tidak mengisi -- _build_source_citations() fallback ke filename
+            "doc_type": meta.get("doc_type"),
             "chunk_index": meta.get("chunk_index"),
             "page": meta.get("page"),
             "source_type": source_type,

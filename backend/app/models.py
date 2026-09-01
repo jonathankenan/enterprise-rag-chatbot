@@ -77,6 +77,18 @@ class Divisi:
     ALL = (WAS, PLP, PPT, PP1, PP2, PP3, PTI, SDI, OTP)
 
 
+class KbDocType:
+    """Daftar tertutup, bukan teks bebas -- supaya konsisten dan bisa dipakai memfilter nanti. "Lainnya" jadi fallback yang eksplisit, bukan default diam-diam."""
+    SOP = "SOP"
+    PEDOMAN = "Pedoman"
+    PERATURAN = "Peraturan"
+    SK = "SK"
+    MEMO = "Memo"
+    LAINNYA = "Lainnya"
+
+    ALL = (SOP, PEDOMAN, PERATURAN, SK, MEMO, LAINNYA)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -236,6 +248,12 @@ class KbDocument(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     divisi = Column(String, nullable=True)  # None = Company Wide
     filename = Column(String, nullable=False)
+    # 2026-09-01: metadata yang diisi admin saat upload, dipisah dari filename
+    # mentah supaya citation di jawaban AI tidak menampilkan nama file teknis
+    # apa adanya (ex. "KB_PDF_PTI.pdf"). Keduanya nullable -- dokumen lama
+    # tanpa metadata ini tetap fallback ke filename, lihat _build_source_citations().
+    display_title = Column(String, nullable=True)
+    doc_type = Column(String, nullable=True)  # salah satu KbDocType.ALL, atau None kalau admin tidak mengisi
     chunk_count = Column(Integer, nullable=False, default=0)
     uploaded_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
