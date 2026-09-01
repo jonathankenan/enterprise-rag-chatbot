@@ -521,6 +521,74 @@ def test_id_match_is_true_for_all_when_query_has_no_identifier():
     assert all(c["id_match"] for c in chunks)
 
 
+# ------------------------------------------- render duplicates (added 2026-09-01)
+# Found live via the citation-content panel on KB_PTI_Pedoman_Operasional.pdf,
+# page 1: pymupdf4llm renders the SOP table TWICE on the same page -- once as
+# a proper `|SOP-01|...|` pipe table (correct), once as flowing prose where
+# the wrapped second line of "Judul Prosedur" ("Produksi") lands AFTER the
+# whole "Ketentuan" cell instead of right after "Penanganan Insiden". Reading
+# order got scrambled, not the words themselves. Confirmed with a real
+# extraction run against the fixture -- `table_strategy` tuning made it worse
+# (`text` strategy shreds the whole page into a bogus per-character table),
+# so the fix lives here: never let the scrambled shape win a citation slot
+# when the well-formed table shape of the same (filename, page) is also a
+# candidate. The existing _dedup_shape() (exact 120-char prefix) does not
+# catch this -- the scrambled version's prefix differs because its word
+# ORDER differs, not just its formatting.
+
+def test_scrambled_table_prose_never_wins_over_the_real_table():
+    scrambled = ("SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                 "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                 "maksimal 3 hari kerja.\n\nSOP-02 Permintaan Akses Permintaan akses ke "
+                 "Core Trading Engine memerlukan persetujuan dua\nSistem tingkat dan "
+                 "otomatis dicabut setelah 90 hari tanpa aktivitas.")
+    real_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                  "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                  "diserahkan maksimal 3 hari kerja.|")
+    docs = [
+        Doc(scrambled, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(real_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="jelaskan SOP-01")
+    cited_texts = [c["text"] for c in chunks if c["is_top_match"]]
+    assert real_table in cited_texts
+    assert scrambled not in cited_texts, "the scrambled render must never be the one shown to the user"
+
+
+def test_render_duplicate_suppression_needs_same_page():
+    """Same scrambled/table pair, but on DIFFERENT pages of the same file --
+    that is two legitimately separate citation locations, not a render
+    duplicate, and must not be filtered."""
+    scrambled = ("SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                 "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                 "maksimal 3 hari kerja.")
+    real_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                  "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                  "diserahkan maksimal 3 hari kerja.|")
+    docs = [
+        Doc(scrambled, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(real_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=9, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="jelaskan SOP-01")
+    assert all(c["is_top_match"] for c in chunks), "different pages are never render duplicates"
+
+
+def test_render_duplicate_suppression_needs_real_word_overlap():
+    """Two unrelated table rows on the same page must not be treated as
+    render duplicates just because one has pipes and the other does not."""
+    unrelated_prose = "Batas persetujuan anggaran Kepala Divisi Rp250.000.000 wajib persetujuan Direksi."
+    unrelated_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                       "|SOP-03|Rilis ke Produksi|Rilis hanya boleh dijalankan Selasa dan Kamis.|")
+    docs = [
+        Doc(unrelated_prose, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(unrelated_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="anggaran dan rilis produksi")
+    assert all(c["is_top_match"] for c in chunks), "genuinely different content must not be suppressed"
+
+
 # ---------------------------------------------------------------- standalone
 if __name__ == "__main__":
     tests = [(n, o) for n, o in sorted(globals().items())

@@ -746,9 +746,59 @@ def retrieve_context(
     # Distance cuma ada di dokumen leg vector (chat/FAQ/KB divisi) -- BM25 tidak punya angka yang sebanding
     distance_by_index = {i: d.metadata["_distance"] for i, d in enumerate(docs) if "_distance" in d.metadata}
 
+    # ── 2026-09-01: sitasi jangan pernah menunjuk render PROSA yang tercampur
+    # kalau render TABEL dari isi yang sama juga ada di antara kandidat ──────
+    # Ditemukan lewat panel "isi yang dikutip" (fitur klik-citation) --
+    # dikonfirmasi diambil LANGSUNG dari fixture: pymupdf4llm merender tabel
+    # SOP-01/02/03 halaman itu DUA KALI (SOP-01 muncul 2x di satu markdown
+    # halaman) -- satu jalur mengenali gridnya dan menghasilkan tabel pipe
+    # yang benar (`|SOP-01|Penanganan Insiden<br>Produksi|...|`), jalur lain
+    # gagal mengenalinya dan menjatuhkan isi yang SAMA sebagai teks mengalir,
+    # di mana baris kedua tiap sel yang membungkus 2 baris ketukar posisi
+    # dengan baris pertama sel SEBELAHNYA ("...dan root Produksi cause
+    # analysis..." -- "Produksi" semestinya nempel ke "Penanganan Insiden").
+    # table_strategy lain (`lines`, `text`) sudah dicoba dan lebih buruk --
+    # `text` bahkan memecah SELURUH halaman jadi tabel palsu satu-huruf.
+    #
+    # Perbaikannya bukan di ekstraksi (di luar kendali kita, itu pymupdf4llm)
+    # atau di chunk_text() (area yang sama pernah regresi E1, tidak disentuh
+    # tanpa eval ulang) -- cukup DI SINI, saat memilih mana yang layak
+    # disitasi: kalau dua chunk dari (filename, page) yang SAMA overlap kata
+    # signifikannya tinggi (satu kumpulan kata nyaris subset kumpulan yang
+    # lain -- diukur begini, bukan prefix sama persis, karena versi prosa
+    # justru TERTUKAR urutannya) dan salah satunya benar-benar berbentuk
+    # tabel pipe sedangkan yang lain tidak, chunk prosa itu ditandai
+    # tersuplai-ganda dan tidak pernah jadi anchor atau pengisi TOP_MATCHES.
+    # Chunk itu TETAP terindeks dan tetap dikirim sebagai konteks ke LLM --
+    # cuma tidak pernah ditampilkan sebagai sumber, karena itulah yang
+    # sekarang terlihat langsung oleh user lewat panel citation.
+    def _has_table_row(text: str) -> bool:
+        return any(_TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln) for ln in text.split("\n"))
+
+    def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> bool:
+        words_a = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text_a)}
+        words_b = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", text_b)}
+        if not words_a or not words_b:
+            return False
+        smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+        return len(smaller & larger) / len(smaller) >= threshold
+
+    suppressed_render_dupes: set[int] = set()
+    for i in range(len(docs)):
+        if not _has_table_row(docs[i].page_content):
+            continue
+        for j in range(len(docs)):
+            if j == i or j in suppressed_render_dupes or _has_table_row(docs[j].page_content):
+                continue
+            mi, mj = docs[i].metadata, docs[j].metadata
+            if mi.get("filename") != mj.get("filename") or mi.get("page") != mj.get("page"):
+                continue
+            if _is_render_duplicate(docs[i].page_content, docs[j].page_content):
+                suppressed_render_dupes.add(j)
+
     # Peringkat diambil dari urutan ensemble (RRF gabungan), bukan distance mentah -- supaya chunk yang cuma ditemukan BM25 tetap bisa terkutip
     TOP_MATCHES = 3
-    ranked = list(range(min(TOP_MATCHES, len(docs))))
+    ranked = [i for i in range(len(docs)) if i not in suppressed_render_dupes][:TOP_MATCHES]
 
     # Relevance floor relatif ke peringkat 1 -- peringkat 2-3 cuma ikut terkutip kalau similarity-nya masih dekat dari peringkat 1
     CITATION_SIMILARITY_GAP = settings.citation_similarity_gap
@@ -831,7 +881,7 @@ def retrieve_context(
     # balik ke perilaku lama: anchor = peringkat ensemble #1, reference=100 --
     # lihat test_all_bm25_result_is_cited_but_scores_no_confidence.
     scored_by_similarity = [(i, s) for i in range(len(docs))
-                            if (s := _similarity(i)) is not None]
+                            if i not in suppressed_render_dupes and (s := _similarity(i)) is not None]
 
     anchor: int | None = None
     reference = 100.0
@@ -868,6 +918,11 @@ def retrieve_context(
     # dirender ulang jadi dua bentuk. Dua chunk yang KEBETULAN mirip
     # teksnya tapi dari halaman berbeda BUKAN duplikat, dan memang tidak
     # boleh ikut disaring keluar -- keduanya lokasi sitasi yang sah.
+    #
+    # Ini prefix PERSIS -- tidak menangkap kasus suppressed_render_dupes di
+    # atas, di mana kata-katanya SAMA tapi URUTANNYA tertukar (versi prosa
+    # yang gagal dikenali sebagai tabel), jadi 120 karakter pertamanya beda.
+    # Dua mekanisme ini saling melengkapi, bukan tumpang tindih.
     def _dedup_shape(i: int, n: int = 120) -> str:
         meta = docs[i].metadata
         prefix = " ".join(docs[i].page_content.split())[:n].lower()
@@ -881,7 +936,7 @@ def retrieve_context(
         for i in range(len(docs)):
             if len(best_indices) >= TOP_MATCHES:
                 break
-            if i == anchor or _is_toc(i) or not _has_query_id(i):
+            if i == anchor or i in suppressed_render_dupes or _is_toc(i) or not _has_query_id(i):
                 continue
             shape = _dedup_shape(i)
             if shape in cited_shapes:
