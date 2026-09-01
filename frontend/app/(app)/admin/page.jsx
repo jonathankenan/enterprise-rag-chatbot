@@ -238,13 +238,10 @@ export default function AdminUsersPage() {
           <button
             onClick={handleToggleCommercialLlm}
             disabled={togglingLlm}
-            style={{
-              padding: "10px 20px", border: "none", borderRadius: 4, cursor: togglingLlm ? "wait" : "pointer",
-              // Merah brand yang sama dengan tombol aksi lain — bukan --idx-danger,
-              // supaya tidak ada dua nuansa merah berbeda di satu halaman.
-              background: systemSettings.commercial_llm_force_stopped ? "var(--idx-success)" : "var(--idx-red)",
-              color: "var(--idx-bg)", fontWeight: "bold",
-            }}
+            // Saat force-stop AKTIF tombolnya jadi "Nyalakan Kembali" (hijau,
+            // aksi memulihkan); saat tidak aktif jadi tombol merah brand.
+            className={systemSettings.commercial_llm_force_stopped ? "btn-success" : "btn-primary"}
+            style={{ padding: "10px 20px", cursor: togglingLlm ? "wait" : "pointer" }}
           >
             {togglingLlm ? "Memproses..." : systemSettings.commercial_llm_force_stopped ? "Nyalakan Kembali" : "Force Stop"}
           </button>
@@ -278,7 +275,8 @@ export default function AdminUsersPage() {
           <button
             onClick={handleSaveExportRoles}
             disabled={savingExportRoles}
-            style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingExportRoles ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
+            className="btn-primary"
+            style={{ padding: "8px 16px", cursor: savingExportRoles ? "wait" : "pointer" }}
           >
             {savingExportRoles ? "Menyimpan..." : "Simpan"}
           </button>
@@ -318,7 +316,8 @@ export default function AdminUsersPage() {
             <button
               onClick={handleSaveRateLimit}
               disabled={savingRateLimit}
-              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRateLimit ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
+              className="btn-primary"
+              style={{ padding: "8px 16px", cursor: savingRateLimit ? "wait" : "pointer" }}
             >
               {savingRateLimit ? "Menyimpan..." : "Simpan"}
             </button>
@@ -350,7 +349,8 @@ export default function AdminUsersPage() {
             <button
               onClick={handleSaveRetention}
               disabled={savingRetention}
-              style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: savingRetention ? "wait" : "pointer", background: "var(--idx-red)", color: "var(--idx-bg)", fontWeight: "bold" }}
+              className="btn-primary"
+              style={{ padding: "8px 16px", cursor: savingRetention ? "wait" : "pointer" }}
             >
               {savingRetention ? "Menyimpan..." : "Simpan Kebijakan"}
             </button>
@@ -358,11 +358,10 @@ export default function AdminUsersPage() {
               onClick={handleApplyRetention}
               disabled={applyingRetention || !systemSettings.chat_retention_days}
               title={!systemSettings.chat_retention_days ? "Simpan kebijakan retensi (isi jumlah hari) terlebih dahulu" : ""}
+              className="btn-ghost"
               style={{
-                padding: "8px 16px", border: "none", borderRadius: 4,
+                padding: "8px 16px",
                 cursor: applyingRetention || !systemSettings.chat_retention_days ? "not-allowed" : "pointer",
-                background: "var(--idx-text-body)", color: "var(--idx-bg)", fontWeight: "bold",
-                opacity: !systemSettings.chat_retention_days ? 0.5 : 1,
               }}
             >
               {applyingRetention ? "Menerapkan..." : "Terapkan Sekarang"}

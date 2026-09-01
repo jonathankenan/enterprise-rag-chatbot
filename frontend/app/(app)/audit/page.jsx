@@ -286,16 +286,10 @@ export default function AuditPage() {
           <button onClick={loadEvents} disabled={loading} style={{ padding: "8px 18px" }}>
             {loading ? "Memuat..." : "Terapkan"}
           </button>
-          <button
-            onClick={() => setFilters(DEFAULT_FILTERS)}
-            style={{ padding: "8px 18px", background: "transparent", color: "var(--idx-text-body)", border: "1px solid var(--idx-border-strong)", borderRadius: 4, fontWeight: 600 }}
-          >
+          <button className="btn-ghost" onClick={() => setFilters(DEFAULT_FILTERS)} style={{ padding: "8px 18px" }}>
             Reset
           </button>
-          <button
-            onClick={handleExport}
-            style={{ padding: "8px 18px", background: "var(--idx-bg)", color: "var(--idx-red)", border: "1px solid var(--idx-red)", borderRadius: 4, fontWeight: 600, marginLeft: "auto" }}
-          >
+          <button className="btn-outline" onClick={handleExport} style={{ padding: "8px 18px", marginLeft: "auto" }}>
             Export CSV
           </button>
         </div>

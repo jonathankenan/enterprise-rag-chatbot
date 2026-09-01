@@ -79,7 +79,7 @@ button:disabled { opacity: 0.55; }
 /* Kelas navigasi dikecualikan EKSPLISIT: tanpa ini aturan di bawah menang
    secara spesifisitas (0-1-1 vs 0-1-0 milik .nav-item) dan seluruh menu
    sidebar ikut jadi tombol merah solid. */
-button:not([style*="background"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle) {
+button:not([style*="background"]):not([class*="btn-"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle) {
   font-weight: 600;
   background: var(--idx-red);
   color: var(--idx-bg);
@@ -88,7 +88,7 @@ button:not([style*="background"]):not(.nav-item):not(.popup-item):not(.chat-row-
   padding: 9px 16px;
   transition: background 0.15s ease;
 }
-button:not([style*="background"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle):not(:disabled):hover {
+button:not([style*="background"]):not([class*="btn-"]):not(.nav-item):not(.popup-item):not(.chat-row-menu-btn):not(.sidebar-toggle):not(:disabled):hover {
   background: var(--idx-red-dark);
 }
 
@@ -310,6 +310,52 @@ h1.page-title {
   padding-bottom: 8px;
   border-bottom: 3px solid var(--idx-red);
 }
+
+/* Sub-judul di dalam kartu/panel. Sengaja HANYA menyetel display + weight:
+   font-size dan warna dibiarkan mewarisi, persis seperti <b> polos yang
+   dipakai "Force-Stop LLM Commercial". Sebelumnya warnanya dipaksa ke
+   --idx-text (#1a1a1a) yang lebih gelap, sehingga terbaca lebih tebal
+   padahal bobotnya sama-sama 700. */
+.card-label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+/* ---------- Varian tombol ----------
+   Tombol dengan kelas btn-* dikecualikan dari aturan otomatis di atas
+   (lihat :not([class*="btn-"])), jadi kelas ini yang menentukan tampilannya
+   — termasuk hover, yang dulu tidak ada pada tombol ber-inline background. */
+.btn-primary,
+.btn-success,
+.btn-outline,
+.btn-ghost,
+.btn-danger-outline {
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 9px 16px;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-primary { background: var(--idx-red); color: #fff; border: 1px solid var(--idx-red); }
+.btn-primary:hover:not(:disabled) { background: var(--idx-red-dark); border-color: var(--idx-red-dark); }
+
+.btn-success { background: var(--idx-success); color: #fff; border: 1px solid var(--idx-success); }
+.btn-success:hover:not(:disabled) { background: #15642e; border-color: #15642e; }
+
+.btn-outline { background: var(--idx-bg); color: var(--idx-red); border: 1px solid var(--idx-red); }
+.btn-outline:hover:not(:disabled) { background: var(--idx-red); color: #fff; }
+
+.btn-ghost { background: transparent; color: var(--idx-text-body); border: 1px solid var(--idx-border-strong); }
+.btn-ghost:hover:not(:disabled) { background: var(--idx-surface-active); color: var(--idx-text); border-color: var(--idx-text-subtle); }
+
+.btn-danger-outline { background: transparent; color: var(--idx-danger); border: 1px solid var(--idx-danger-border); }
+.btn-danger-outline:hover:not(:disabled) { background: var(--idx-danger); color: #fff; border-color: var(--idx-danger); }
+
+/* Dipakai pada <label> pemilih berkas — bukan <button>, tapi tampil sebagai tombol */
+label.btn-outline { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+label.btn-outline.is-disabled { opacity: 0.6; cursor: not-allowed; color: var(--idx-text-subtle); border-color: var(--idx-border-strong); }
+label.btn-outline.is-disabled:hover { background: var(--idx-bg); color: var(--idx-text-subtle); }
 
 /* Judul bagian di dalam halaman (kartu pengaturan, dsb) */
 .section-title {

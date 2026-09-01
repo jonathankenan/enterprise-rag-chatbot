@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "../../../../lib/api";
+import FileInput from "../../../components/FileInput";
 
 const ALL_DIVISI = ["WAS", "PLP", "PPT", "PP1", "PP2", "PP3", "PTI", "SDI", "OTP"];
 
@@ -105,7 +106,7 @@ export default function KbAdminPage() {
       {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
       <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, padding: 16, marginBottom: 20, background: "var(--idx-surface)" }}>
-        <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Upload Dokumen PDF</label>
+        <label className="card-label">Upload Dokumen PDF</label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
           <span style={{ fontSize: 13 }}>Target:</span>
           {isGlobalAdmin ? (
@@ -119,7 +120,7 @@ export default function KbAdminPage() {
             <b>{currentUser.divisi}</b>
           )}
         </div>
-        <input type="file" accept="application/pdf" onChange={handleUpload} disabled={uploading} />
+        <FileInput onChange={handleUpload} disabled={uploading} label="Pilih Berkas PDF" />
         {uploading && <p style={{ fontSize: 13, color: "var(--idx-text-muted)" }}>Mengekstrak & mengindeks...</p>}
       </div>
 

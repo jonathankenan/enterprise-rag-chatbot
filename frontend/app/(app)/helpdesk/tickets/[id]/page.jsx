@@ -129,7 +129,8 @@ export default function TicketChatPage({ params }) {
             {isHandler && isClosed && (
               <button
                 onClick={handleDelete}
-                style={{ padding: "6px 14px", fontSize: 12.5, background: "transparent", color: "var(--idx-danger)", border: "1px solid var(--idx-danger-border)", borderRadius: 4 }}
+                className="btn-danger-outline"
+                style={{ padding: "6px 14px", fontSize: 12.5 }}
               >
                 Hapus Tiket
               </button>
