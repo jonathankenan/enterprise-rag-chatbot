@@ -315,6 +315,30 @@ def test_close_scores_all_survive_the_floor():
     assert [c.filename for c in build_citations(chunks)] == ["A.pdf", "B.pdf", "C.pdf"]
 
 
+def test_dedup_shape_ignores_a_heading_shared_by_every_row():
+    """Regression: found live on 'daftar regulasi yang berlaku di perusahaan'.
+    Four DIFFERENT regulation rows (REG-01..04) each carry the same >120-char
+    intro heading ("### Ketentuan turunan mengenai sanksi administratif
+    dimuat pada REG-08...") because chunk_text() attaches it to every row of
+    the table it introduces. The old fingerprint was just the first 120 raw
+    characters, so all four rows collided on the heading alone and three of
+    four were discarded as "duplicates" of the first -- even though they are
+    four distinct regulations. Restricting the fingerprint to the table row
+    itself (same technique as _is_render_duplicate) tells them apart."""
+    heading = ("### Ketentuan turunan mengenai sanksi administratif dimuat pada "
+               "REG-08, yang masih dalam proses penyusunan lebih dari seratus dua "
+               "puluh karakter panjangnya supaya benar-benar menguji batas prefix.\n\n"
+               "|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n")
+    docs = [
+        Doc(heading + "|REG-01|POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi|Otoritas Jasa<br>Keuangan|1 Maret 2025|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(80)),
+        Doc(heading + "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|Bursa Efek<br>Indonesia|1 Januari 2024|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(78)),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert all(c["is_top_match"] for c in chunks), "two distinct regulations sharing an intro heading must both be citable"
+
+
 def test_rank_two_just_inside_and_just_outside_the_gap():
     """The boundary itself, expressed relative to the configured gap."""
     inside = [Doc(filename="a.pdf", page=1, _distance=dist_for(95)),
@@ -375,6 +399,68 @@ def test_bm25_only_chunk_can_be_cited():
     cited = build_citations(chunks)[0].pages
     assert 7 in cited, "the chunk that actually answered must be citable"
     assert 8 not in cited, "still capped at TOP_MATCHES"
+
+
+# ------------------------------- BM25-only relevance gate (added 2026-09-01)
+# "sim is None -> cited unconditionally" above is safe for identifier queries
+# (_has_query_id already forces an exact code match). For a synthesis query
+# with no identifier, _has_query_id is inert, so that same rule used to let
+# ANY BM25 hit through -- BM25Retriever has no score floor of its own, it
+# just returns its top-k regardless of how weak the match is. Live case:
+# "daftar regulasi yang berlaku di perusahaan" cited a completely unrelated
+# "PTI-03 Daftar Risiko PTI" row that shared exactly one word ("daftar")
+# with the query, found only via the KB-divisi BM25 leg added the same day.
+
+def test_bm25_only_needs_relevance_when_query_has_no_identifier():
+    docs = [
+        Doc("REG-01 POJK tentang Keterbukaan Informasi Otoritas Jasa Keuangan",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(75)),
+        Doc("PTI-03 Daftar Risiko PTI Manajemen Risiko Triwulanan",  # BM25 only, shares just "daftar"
+            filename="PTI.pdf", page=1),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert not any(c["filename"] == "PTI.pdf" and c["is_top_match"] for c in chunks), \
+        "one incidental shared word must not be enough to earn a citation slot"
+
+
+def test_bm25_only_relevance_gate_ignores_stopwords():
+    """Regression: the first version of this gate counted 'yang' (a
+    connector, no topical meaning) as 1 of 4 'content' query words purely
+    because it happened to be 4+ letters -- 25% of the overlap budget for
+    free. A chunk whose only real overlap is a stopword must still fail."""
+    docs = [
+        Doc("REG-01 POJK tentang Keterbukaan Informasi Otoritas Jasa Keuangan",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(75)),
+        Doc("Dokumen ini mengatur tata kerja divisi yang sama sekali berbeda dari topik lain",
+            filename="PTI.pdf", page=1),  # BM25 only, overlaps only on "yang"
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert not any(c["filename"] == "PTI.pdf" and c["is_top_match"] for c in chunks)
+
+
+def test_bm25_only_relevance_gate_admits_real_overlap():
+    """Positive control -- a BM25-only chunk that genuinely shares most of
+    the query's content words must still be citable. The gate targets weak
+    incidental matches, not BM25-only citability itself."""
+    docs = [
+        Doc("Daftar regulasi perusahaan yang berlaku mencakup empat POJK dan Peraturan Bursa",
+            filename="CompanyWide.pdf", page=1),  # BM25 only, but genuinely on-topic
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert chunks[0]["is_top_match"]
+
+
+def test_bm25_only_relevance_gate_is_inert_for_identifier_queries():
+    """An identifier query is already guarded by _has_query_id, which is a
+    stricter, more precise check than generic word overlap -- the new gate
+    must not double-filter and must not reject a legitimate exact-string
+    BM25 match just because the surrounding prose shares few other words."""
+    docs = [
+        Doc("FR-01 spec — the actual answer, nothing else in common with the question",
+            filename="BRD.pdf", page=7),  # BM25 only
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert chunks[0]["is_top_match"]
 
 
 def test_all_bm25_result_is_cited_but_scores_no_confidence():

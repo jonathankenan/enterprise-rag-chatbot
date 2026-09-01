@@ -1064,9 +1064,25 @@ def retrieve_context(
     # atas, di mana kata-katanya SAMA tapi URUTANNYA tertukar (versi prosa
     # yang gagal dikenali sebagai tabel), jadi 120 karakter pertamanya beda.
     # Dua mekanisme ini saling melengkapi, bukan tumpang tindih.
+    #
+    # 2026-09-01: untuk chunk BERBENTUK TABEL, sidik jarinya diambil dari
+    # _table_row_lines() -- BUKAN 120 karakter pertama teks mentah. Ditemukan
+    # langsung lewat query "daftar regulasi...": REG-01, REG-02, REG-03,
+    # REG-04 masing-masing baris tabel SATU BARIS, tapi SEMUANYA didahului
+    # heading pengantar yang SAMA PERSIS ("### Ketentuan turunan mengenai
+    # sanksi administratif dimuat pada REG-08, yang masih dalam proses
+    # penyusunan.\n\n|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|"),
+    # dan heading itu sendiri sudah >120 karakter -- jadi keempat baris yang
+    # BERBEDA REGULASI itu punya prefix 120-karakter yang IDENTIK, dan tiga
+    # dari empat disaring sebagai "duplikat" dari yang keempat. Itu membuka
+    # slot TOP_MATCHES yang lalu terisi chunk yang genuinely tidak relevan.
+    # Sama seperti _is_render_duplicate(), heading yang cuma menempel di
+    # SATU sisi tidak boleh mendominasi sidik jari.
     def _dedup_shape(i: int, n: int = 120) -> str:
         meta = docs[i].metadata
-        prefix = " ".join(docs[i].page_content.split())[:n].lower()
+        text = docs[i].page_content
+        fingerprint_source = _table_row_lines(text) if _has_table_row(text) else text
+        prefix = " ".join(fingerprint_source.split())[:n].lower()
         return f"{meta.get('filename')}|{meta.get('page')}|{prefix}"
 
     # ── 2026-09-01: BM25-only butuh overlap kata nyata kalau TIDAK ada
