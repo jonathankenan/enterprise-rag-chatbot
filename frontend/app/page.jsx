@@ -1,11 +1,9 @@
-import Link from "next/link";
+import { redirect } from "next/navigation";
 
+// Halaman root tidak menampilkan apa pun sendiri: pengguna yang sudah masuk
+// langsung ke chat, dan yang belum masuk otomatis dilempar ke /login oleh
+// shell aplikasi. Landing page terpisah cuma menambah satu klik tanpa
+// memberi informasi baru.
 export default function HomePage() {
-  return (
-    <div style={{ maxWidth: 500, margin: "100px auto", textAlign: "center" }}>
-      <h1>Generic ChatBot AI</h1>
-      <p>Purwarupa Tingkat 1 — RAG + LLM Switching</p>
-      <Link href="/login">Masuk untuk memulai →</Link>
-    </div>
-  );
+  redirect("/chat");
 }

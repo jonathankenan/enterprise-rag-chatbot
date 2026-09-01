@@ -8,7 +8,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "../../../lib/api";
+import { api } from "../../../../lib/api";
+import FileInput from "../../../components/FileInput";
 
 export default function FaqAdminPage() {
   const router = useRouter();
@@ -102,7 +103,7 @@ export default function FaqAdminPage() {
     return (
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
         <h1>Akses Ditolak</h1>
-        <p style={{ color: "#666" }}>Halaman ini hanya untuk role IT Admin.</p>
+        <p style={{ color: "var(--idx-text-muted)" }}>Halaman ini hanya untuk role IT Admin.</p>
         <Link href="/chat">Kembali ke Chat</Link>
       </div>
     );
@@ -111,19 +112,18 @@ export default function FaqAdminPage() {
   return (
     <div style={{ padding: "20px 40px", maxWidth: 900, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h1 style={{ margin: 0 }}>FAQ Helpdesk</h1>
-        <Link href="/helpdesk">← Kembali ke Helpdesk</Link>
+        <h1 className="page-title" style={{ margin: 0 }}>FAQ Helpdesk</h1>
       </div>
-      <p style={{ color: "#666", fontSize: 13, marginTop: -12 }}>
-        Entri di sini otomatis ditarik sebagai konteks jawaban AI di SEMUA chat (SRS poin 10.b) — beda dari dokumen
+      <p style={{ color: "var(--idx-text-muted)", fontSize: 13, marginTop: -12 }}>
+        Entri di sini otomatis ditarik sebagai konteks jawaban AI di SEMUA chat — beda dari dokumen
         upload biasa yang cuma berlaku untuk satu percakapan.
       </p>
 
-      {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
+      {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
-      <form onSubmit={handleCreate} style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, marginBottom: 20, background: "#f9f9f9" }}>
+      <form onSubmit={handleCreate} style={{ border: "1px solid var(--idx-border)", borderRadius: 8, padding: 16, marginBottom: 20, background: "var(--idx-surface)" }}>
         <div style={{ marginBottom: 10 }}>
-          <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Pertanyaan</label>
+          <label className="card-label">Pertanyaan</label>
           <input
             type="text"
             value={question}
@@ -133,7 +133,7 @@ export default function FaqAdminPage() {
           />
         </div>
         <div style={{ marginBottom: 10 }}>
-          <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Jawaban</label>
+          <label className="card-label">Jawaban</label>
           <textarea
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
@@ -145,46 +145,45 @@ export default function FaqAdminPage() {
         <button
           type="submit"
           disabled={submitting}
-          style={{ padding: "8px 16px", border: "none", borderRadius: 4, cursor: submitting ? "wait" : "pointer", background: "#0070f3", color: "white", fontWeight: "bold" }}
+          className="btn-primary"
+          style={{ padding: "8px 16px", cursor: submitting ? "wait" : "pointer" }}
         >
-          {submitting ? "Menyimpan..." : "+ Tambah FAQ"}
+          {submitting ? "Menyimpan..." : "Tambah FAQ"}
         </button>
       </form>
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, marginBottom: 20, background: "#f9f9f9" }}>
-        <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-          Atau Import Banyak Sekaligus dari PDF
-        </label>
-        <p style={{ margin: "0 0 10px", fontSize: 12, color: "#666" }}>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, padding: 16, marginBottom: 20, background: "var(--idx-surface)" }}>
+        <label className="card-label">Atau Import Banyak Sekaligus dari PDF</label>
+        <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--idx-text-muted)" }}>
           PDF berisi daftar tanya-jawab (format "Q: .../A: ...", "Pertanyaan: .../Jawaban: ...", atau baris
           pertanyaan diakhiri "?" diikuti jawabannya). Tiap pasangan yang ketemu jadi 1 FAQ terpisah.
         </p>
-        <input type="file" accept="application/pdf" onChange={handleUploadPdf} disabled={uploading} />
-        {uploading && <p style={{ fontSize: 13, color: "#666" }}>Mengekstrak & mengindeks...</p>}
+        <FileInput onChange={handleUploadPdf} disabled={uploading} label="Pilih Berkas PDF" />
+        {uploading && <p style={{ fontSize: 13, color: "var(--idx-text-muted)" }}>Mengekstrak & mengindeks...</p>}
         {uploadResult && (
-          <p style={{ fontSize: 13, color: "#2e7d32", marginTop: 8 }}>
-            ✅ {uploadResult.count} FAQ berhasil diimpor dari "{uploadResult.filename}".
+          <p style={{ fontSize: 13, color: "var(--idx-success)", marginTop: 8 }}>
+            {uploadResult.count} FAQ berhasil diimpor dari "{uploadResult.filename}".
           </p>
         )}
       </div>
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, overflow: "hidden" }}>
         {faqs.map((f) => (
-          <div key={f.id} style={{ padding: 14, borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div key={f.id} style={{ padding: 14, borderBottom: "1px solid var(--idx-border-light)", display: "flex", justifyContent: "space-between", gap: 12 }}>
             <div>
               <div style={{ fontWeight: 600, fontSize: 14 }}>{f.question}</div>
-              <div style={{ fontSize: 13, color: "#555", marginTop: 4 }}>{f.answer}</div>
+              <div style={{ fontSize: 13, color: "var(--idx-text-body)", marginTop: 4 }}>{f.answer}</div>
             </div>
             <button
               onClick={() => handleDelete(f.id)}
-              style={{ background: "transparent", border: "none", color: "#d32f2f", cursor: "pointer", fontSize: 13, whiteSpace: "nowrap" }}
+              style={{ background: "transparent", border: "none", color: "var(--idx-danger)", cursor: "pointer", fontSize: 13, whiteSpace: "nowrap" }}
             >
               Hapus
             </button>
           </div>
         ))}
         {faqs.length === 0 && (
-          <div style={{ padding: 20, textAlign: "center", color: "#888", fontSize: 13 }}>Belum ada FAQ.</div>
+          <div style={{ padding: 20, textAlign: "center", color: "var(--idx-text-subtle)", fontSize: 13 }}>Belum ada FAQ.</div>
         )}
       </div>
     </div>

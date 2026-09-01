@@ -69,13 +69,13 @@ export default function AzureCallbackPage() {
       {error ? (
         <>
           <h1>Login Azure AD Gagal</h1>
-          <p style={{ color: "#d32f2f", fontSize: 14 }}>{error}</p>
+          <p style={{ color: "var(--idx-danger)", fontSize: 14 }}>{error}</p>
           <Link href="/login">← Kembali ke halaman login</Link>
         </>
       ) : (
         <>
           <h1>Menyelesaikan Login...</h1>
-          <p style={{ color: "#666", fontSize: 14 }}>Memverifikasi identitas Azure AD Anda, mohon tunggu.</p>
+          <p style={{ color: "var(--idx-text-muted)", fontSize: 14 }}>Memverifikasi identitas Azure AD Anda, mohon tunggu.</p>
         </>
       )}
     </div>

@@ -9,7 +9,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "../../../lib/api";
+import { api } from "../../../../lib/api";
+import FileInput from "../../../components/FileInput";
 
 const ALL_DIVISI = ["WAS", "PLP", "PPT", "PP1", "PP2", "PP3", "PTI", "SDI", "OTP"];
 
@@ -86,7 +87,7 @@ export default function KbAdminPage() {
     return (
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto", textAlign: "center" }}>
         <h1>Akses Ditolak</h1>
-        <p style={{ color: "#666" }}>Halaman ini hanya untuk role IT Admin.</p>
+        <p style={{ color: "var(--idx-text-muted)" }}>Halaman ini hanya untuk role IT Admin.</p>
         <Link href="/chat">Kembali ke Chat</Link>
       </div>
     );
@@ -95,19 +96,17 @@ export default function KbAdminPage() {
   return (
     <div style={{ padding: "20px 40px", maxWidth: 900, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h1 style={{ margin: 0 }}>Knowledge Base Divisi</h1>
-        <Link href="/admin">← Kembali ke Manajemen User</Link>
+        <h1 className="page-title" style={{ margin: 0 }}>Knowledge Base Divisi</h1>
       </div>
-      <p style={{ color: "#666", fontSize: 13, marginTop: 0, marginBottom: 16 }}>
+      <p style={{ color: "var(--idx-text-muted)", fontSize: 13, marginTop: 0, marginBottom: 16 }}>
         Dokumen di sini ditarik sebagai konteks jawaban AI cuma untuk user divisi yang sama (+ dokumen Company Wide,
-        bisa diakses semua divisi) — SRS poin 11: "Data yang di-upload oleh masing-masing divisi hanya dapat diakses
-        oleh divisi tersebut". Anda: {isGlobalAdmin ? <b>IT Admin Global</b> : <>IT Admin Divisi <b>{currentUser.divisi}</b></>}
+        bisa diakses semua divisi).
       </p>
 
-      {error && <p style={{ color: "#d32f2f" }}>{error}</p>}
+      {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, marginBottom: 20, background: "#f9f9f9" }}>
-        <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Upload Dokumen PDF</label>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, padding: 16, marginBottom: 20, background: "var(--idx-surface)" }}>
+        <label className="card-label">Upload Dokumen PDF</label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
           <span style={{ fontSize: 13 }}>Target:</span>
           {isGlobalAdmin ? (
@@ -121,14 +120,14 @@ export default function KbAdminPage() {
             <b>{currentUser.divisi}</b>
           )}
         </div>
-        <input type="file" accept="application/pdf" onChange={handleUpload} disabled={uploading} />
-        {uploading && <p style={{ fontSize: 13, color: "#666" }}>Mengekstrak & mengindeks...</p>}
+        <FileInput onChange={handleUpload} disabled={uploading} label="Pilih Berkas PDF" />
+        {uploading && <p style={{ fontSize: 13, color: "var(--idx-text-muted)" }}>Mengekstrak & mengindeks...</p>}
       </div>
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ border: "1px solid var(--idx-border)", borderRadius: 8, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
-            <tr style={{ background: "#f1f1f1", textAlign: "left" }}>
+            <tr style={{ background: "var(--idx-surface-alt)", textAlign: "left" }}>
               <th style={{ padding: 10 }}>Nama File</th>
               <th style={{ padding: 10 }}>Divisi</th>
               <th style={{ padding: 10 }}>Jumlah Chunk</th>
@@ -143,7 +142,7 @@ export default function KbAdminPage() {
               // buat dia (backend akan 403 kalau dipaksa lewat API langsung).
               const canDelete = isGlobalAdmin || d.divisi === currentUser.divisi;
               return (
-                <tr key={d.id} style={{ borderTop: "1px solid #eee" }}>
+                <tr key={d.id} style={{ borderTop: "1px solid var(--idx-border-light)" }}>
                   <td style={{ padding: 10 }}>{d.filename}</td>
                   <td style={{ padding: 10 }}>{d.divisi || "Company Wide"}</td>
                   <td style={{ padding: 10 }}>{d.chunk_count}</td>
@@ -152,7 +151,7 @@ export default function KbAdminPage() {
                     {canDelete && (
                       <button
                         onClick={() => handleDelete(d.id)}
-                        style={{ background: "transparent", border: "none", color: "#d32f2f", cursor: "pointer" }}
+                        style={{ background: "transparent", border: "none", color: "var(--idx-danger)", cursor: "pointer" }}
                       >
                         Hapus
                       </button>
@@ -162,7 +161,7 @@ export default function KbAdminPage() {
               );
             })}
             {docs.length === 0 && (
-              <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: "#888" }}>Belum ada dokumen.</td></tr>
+              <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: "var(--idx-text-subtle)" }}>Belum ada dokumen.</td></tr>
             )}
           </tbody>
         </table>

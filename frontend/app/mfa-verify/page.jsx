@@ -52,8 +52,8 @@ export default function MfaVerifyPage() {
 
   return (
     <div style={{ maxWidth: 360, margin: "80px auto", padding: 24 }}>
-      <h1>Verifikasi Dua Faktor</h1>
-      <p style={{ color: "#666", fontSize: 14 }}>
+      <h1 className="page-title">Verifikasi Dua Faktor</h1>
+      <p style={{ color: "var(--idx-text-muted)", fontSize: 14 }}>
         Masukkan kode 6 digit dari aplikasi authenticator Anda.
       </p>
       <form onSubmit={handleVerify}>
@@ -68,7 +68,7 @@ export default function MfaVerifyPage() {
           maxLength={6}
           style={{ width: "100%", padding: 8, marginBottom: 12, fontSize: 18, textAlign: "center", letterSpacing: 4 }}
         />
-        {error && <p style={{ color: "red" }}>{error}</p>}
+        {error && <p style={{ color: "var(--idx-danger)" }}>{error}</p>}
         <button type="submit" disabled={submitting} style={{ width: "100%", padding: 10 }}>
           {submitting ? "Memverifikasi..." : "Verifikasi"}
         </button>
