@@ -529,14 +529,33 @@ def _identifier_search_pattern(ident: str) -> re.Pattern:
 # di sini -- pola yang sama dipakai di seluruh penjagaan lain sesi ini.
 _DIVISI_CONTEXT_WORDS = r"(?:divisi|division|bagian|unit)"
 
+# 2026-09-09: satu sub-kasus dari celah di atas TERNYATA gampang ditutup
+# tanpa membuka lagi false-positive "was"/"PPT"/"OTP" yang jadi alasan
+# syarat kata penunjuk itu ada: kode divisi yang menempel LANGSUNG ke
+# identifier bergaya katalog ("SOP-02 WAS", "WAS SOP-02") sudah punya
+# penunjuk implisit -- "SOP-02" sendiri, bukan kata umum yang kebetulan
+# sama ejaannya. "was busy" dan "kode OTP" tidak pernah didampingi
+# identifier semacam ini, jadi menambahkan pola ini tidak menghidupkan
+# lagi false-positive yang tadinya disingkirkan. Regex identifier di sini
+# sengaja disalin persis dari _IDENTIFIER_RE (bukan dipakai langsung)
+# karena _IDENTIFIER_RE dirancang untuk fullmatch() satu token hasil
+# tokenizer, sedangkan di sini perlu dicocokkan sebagai potongan pola yang
+# lebih besar lewat re.search().
+_CATALOG_ID_ADJACENT = r"[a-z]{2,}(?:-[a-z]+)*-\d+(?:\.\d+)*"
+
 
 def extract_query_divisi(text: str, known_divisi: set[str]) -> set[str]:
     """Kode divisi (huruf besar, mis. {"PTI", "SDI"}) yang query ini sebut
-    berdampingan dengan kata penunjuk divisi. known_divisi harus huruf besar."""
+    berdampingan dengan kata penunjuk divisi, ATAU menempel langsung ke
+    identifier katalog (mis. "SOP-02 WAS") -- lihat catatan di atas.
+    known_divisi harus huruf besar."""
     found = set()
     for code in known_divisi:
         esc = re.escape(code)
-        pat = rf"\b{_DIVISI_CONTEXT_WORDS}\s+{esc}\b|\b{esc}\s+{_DIVISI_CONTEXT_WORDS}\b"
+        pat = (
+            rf"\b{_DIVISI_CONTEXT_WORDS}\s+{esc}\b|\b{esc}\s+{_DIVISI_CONTEXT_WORDS}\b"
+            rf"|\b{_CATALOG_ID_ADJACENT}\s+{esc}\b|\b{esc}\s+{_CATALOG_ID_ADJACENT}\b"
+        )
         if re.search(pat, text, re.I):
             found.add(code.upper())
     return found

@@ -91,3 +91,44 @@ def test_kode_tidak_dikenal_diabaikan():
 def test_teks_kosong_aman():
     assert extract_query_divisi("", KODE) == set()
     assert extract_query_divisi("halo apa kabar", KODE) == set()
+
+
+# --------------------------------------------------------------------------
+# 2026-09-09: kode divisi menempel identifier katalog -- tanpa kata
+# penunjuk sama sekali, tapi identifiernya sendiri sudah jadi penunjuk
+# implisit yang cukup kuat.
+# --------------------------------------------------------------------------
+
+def test_kode_divisi_menempel_identifier_terdeteksi():
+    assert extract_query_divisi("apa isi SOP-02 WAS", KODE) == {"WAS"}
+    assert extract_query_divisi("WAS SOP-02 jelaskan", KODE) == {"WAS"}
+
+
+def test_kode_divisi_menempel_identifier_case_insensitive():
+    assert extract_query_divisi("sop-02 was", KODE) == {"WAS"}
+
+
+def test_identifier_tanpa_kode_divisi_tetap_kosong():
+    # Regresi: identifier sendirian (tanpa kode divisi apa pun bersanding)
+    # tidak boleh memicu apa pun.
+    assert extract_query_divisi("apa isi SOP-02", KODE) == set()
+
+
+def test_was_sebagai_kata_inggris_masih_bisa_terpicu_kalau_menempel_identifier():
+    """
+    Batas desain yang disadari (mirip test_kata_umum_tetap_terpicu_kalau_
+    didampingi_penunjuk di atas): begitu "was" menempel LANGSUNG ke sesuatu
+    yang berbentuk identifier katalog ("SOP-02 was ..."), pola ini tetap
+    terpicu -- konsisten dengan cara pola kata-penunjuk sudah case-
+    insensitive di seluruh fungsi ini (lihat test_case_insensitive). Risiko
+    residual: kalimat Inggris asli semacam "FR-01 was mentioned before" ikut
+    kena. Diterima sadar karena persis sama alasannya dengan trade-off di
+    atas fungsi ini -- false-refusal jauh lebih murah daripada false-answer,
+    dan kalimat begini jarang muncul berdampingan LANGSUNG dengan identifier.
+    """
+    assert extract_query_divisi("SOP-02 was mentioned before", KODE) == {"WAS"}
+
+
+def test_was_sebagai_kata_inggris_tanpa_identifier_bersanding_tetap_aman():
+    # Selama TIDAK menempel identifier, false-positif lama tetap tertutup.
+    assert extract_query_divisi("kemarin saya was busy sekali membahas SOP-02", KODE) == set()
