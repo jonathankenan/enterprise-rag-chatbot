@@ -1142,22 +1142,67 @@ def retrieve_context(
         best_indices.add(anchor)
         cited_shapes = {_dedup_shape(anchor)}
         floor = reference - CITATION_SIMILARITY_GAP
-        for i in range(len(docs)):
-            if len(best_indices) >= TOP_MATCHES:
-                break
+
+        def _try_add(i: int) -> None:
             if i == anchor or i in suppressed_render_dupes or _is_toc(i) or not _has_query_id(i):
-                continue
+                return
             shape = _dedup_shape(i)
             if shape in cited_shapes:
-                continue
+                return
             sim = _similarity(i)
             if sim is None:
                 if not _bm25_only_matches_query(i):
-                    continue
+                    return
             elif sim < floor:
-                continue
+                return
             best_indices.add(i)
             cited_shapes.add(shape)
+
+        # ── 2026-09-09: dokumen yang SAMA dengan anchor diprioritaskan
+        # PENUH sebelum dokumen lain dipertimbangkan ────────────────────
+        # Ditemukan 1 September, sengaja tidak ditambal saat itu: query
+        # sintesis ("daftar regulasi yang berlaku di perusahaan") punya 4
+        # baris regulasi yang sama-sama valid di SATU dokumen (Company
+        # Wide), tapi TOP_MATCHES=3 cuma cukup untuk anchor + 2. Urutan
+        # ensemble (RRF gabungan vektor+BM25) menentukan mana yang menang
+        # slot terakhir -- dan sesekali itu berarti chunk dari dokumen
+        # LAIN (skor lebih lemah, tapi kebetulan lolos floor & lebih
+        # dulu di urutan ensemble) merebut slot dari baris regulasi
+        # ke-4 yang sebenarnya sama validnya, cuma peringkatnya lebih
+        # rendah.
+        #
+        # Percobaan pertama (menaikkan TOP_MATCHES) ditolak: itu juga
+        # menambah jumlah chunk yang di rata-rata jadi confidence score
+        # untuk pertanyaan SEDERHANA yang cuma punya 1 sumber kuat --
+        # persis masalah yang TOP_MATCHES=3 sendiri dibuat untuk
+        # menutup (2026-08-24). Menambah jumlah SLOT tidak menyelesaikan
+        # masalah PRIORITAS.
+        #
+        # Perbaikannya: dalam budget TOP_MATCHES yang SAMA, habiskan dulu
+        # kandidat dari dokumen anchor (semua lolos floor & gate yang
+        # sama seperti sebelumnya -- tidak ada penjagaan yang dilonggarkan)
+        # sebelum dokumen lain mendapat giliran. Untuk sintesis multi-
+        # dokumen yang genuinely butuh 2 dokumen (kasus FR-12,
+        # test_query_without_identifier_leaves_the_gate_inert), ini tidak
+        # berdampak -- tidak ada kandidat SATU DOKUMEN lain yang bersaing
+        # jadi tahap kedua tetap langsung mengisi slot yang tersisa.
+        #
+        # anchor_filename bisa None (chunk FAQ/chat_document tanpa nama
+        # file) -- di situ dua tahap ini digabung jadi satu (perilaku lama
+        # persis), karena "dokumen yang sama" tidak well-defined tanpa
+        # filename.
+        anchor_filename = docs[anchor].metadata.get("filename")
+        if anchor_filename is not None:
+            for i in range(len(docs)):
+                if len(best_indices) >= TOP_MATCHES:
+                    break
+                if docs[i].metadata.get("filename") == anchor_filename:
+                    _try_add(i)
+        for i in range(len(docs)):
+            if len(best_indices) >= TOP_MATCHES:
+                break
+            if anchor_filename is None or docs[i].metadata.get("filename") != anchor_filename:
+                _try_add(i)
 
     # Confidence dihitung dari chunk yang BENAR-BENAR dikutip (best_indices), bukan semua top_k
     scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]

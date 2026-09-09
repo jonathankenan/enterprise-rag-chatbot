@@ -28,6 +28,17 @@ from collections import Counter
 
 import httpx
 
+# 2026-09-09: console Windows default-nya cp1252, yang tidak punya glyph
+# untuk "≥" (dipakai sumber PDF apa adanya, mis. "Faithfulness >= 98.5%").
+# Baris print di run_model() dulu menyamarkannya jadi "?" lewat
+# .encode("ascii", "replace") supaya tidak crash -- efeknya jawaban yang
+# BENAR ("≥ 98.5%") kelihatan aneh/salah di log ("? 98.5%"). Paksa stdout
+# ke UTF-8 di sini sekali saja supaya karakter aslinya tampil apa adanya.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from app.config import settings
 from app.llm.router import build_prompt
 from app.rag.vectorstore import (
@@ -50,12 +61,23 @@ def _norm(text: str) -> str:
     Perbaikan itu sendiri lalu melahirkan bug kedua: desimal nol ikut
     direkatkan, jadi "$35.00" berubah jadi "3500" dan pola \\b35\\b tidak
     pernah cocok. Nilai mata uang di Project NEXUS memang ditulis lengkap
-    dengan sennya. Jadi ".00"/",0" di ujung angka dibuang LEBIH DULU:
+    dengan sennya. Jadi ".00"/",00" (DUA nol -- sen) di ujung angka dibuang
+    LEBIH DULU:
 
-        "$35.00" -> "35"      "45.0"  -> "45"
+        "$35.00" -> "35"
         "1.000"  -> "1000"    (nol ribuan TIDAK ikut terbuang)
+
+    2026-09-09: sengaja HANYA dua nol (`{2}`, bukan `{1,2}` seperti versi
+    sebelumnya). Satu nol di ujung ("90.0", "45.0") itu desimal presisi-1
+    yang SAH, bukan sen -- kalau ikut dibuang, "Context Precision >= 90.0%"
+    jadi "90" dan pola \\b900\\b (dari A6) tidak pernah cocok, padahal
+    jawaban modelnya benar persis seperti sumbernya. F1 ("99.90%" ->
+    "9990") tidak kena masalah ini karena nol di sana TIDAK ada tepat
+    setelah pemisah dsimal (".", "0" dulu baru pemisah lalu 9), jadi
+    memang tidak pernah cocok dengan pola pemangkasan di atas -- hanya
+    kasus SATU nol tunggal tepat di ujung yang perlu dikecualikan.
     """
-    t = re.sub(r"(?<=\d)[.,]0{1,2}\b", "", text.lower())
+    t = re.sub(r"(?<=\d)[.,]0{2}\b", "", text.lower())
     t = re.sub(r"(?<=\d)[.,\s](?=\d)", "", t)
     return re.sub(r"\s+", " ", t)
 
@@ -77,6 +99,7 @@ def _refuses(*forbidden):
     informasi" -- penolakan yang benar-benar sah -- karena awalan "mem-"
     tidak ada di daftar. Penolakan qwen2.5:7b di B1 dihitung salah gara-gara
     itu.
+
     """
     deny = r"(tidak (ada|ter\w+|men\w+|mem\w+|di\w+)|belum|bukan|no such|does not|not (found|available|specif|contain))"
     def check(r):
@@ -114,8 +137,19 @@ CASES = [
      "DOC-FEE-2026 document owner", _refuses(r"owner\w*\s*(nya)?\s*(adalah|is)\s+\w+")),
 
     # --- C. batas field ---
+    # 2026-09-09: pola digit-dekat-"prioritas" dulu ketipu oleh digit di ID
+    # requirement itu sendiri -- "Prioritas NFR-PERF-03 tidak disebutkan"
+    # (refusal yang BENAR) kena tandai salah karena "03" di "NFR-PERF-03"
+    # ada persis di jendela 30 karakter setelah "prioritas". Percobaan
+    # pertama menambal dengan (?<!-)\d cuma menolak digit yang PERSIS
+    # setelah "-", padahal ID-nya dua digit ("03"): digit kedua ("3")
+    # didahului digit PERTAMA ("0"), bukan "-", jadi tetap lolos. Yang
+    # benar: kecualikan digit yang didahului KARAKTER ID APA PUN (huruf,
+    # digit lain, atau "-") -- (?<![a-z0-9-]) -- supaya seluruh rentetan
+    # digit dalam "nfr-perf-03" ikut terkecualikan, bukan cuma yang
+    # nempel "-".
     ("C1", "field", "berapa prioritas NFR-PERF-03?",
-     "Priority of NFR-PERF-03", _refuses(r"(must|should|could) have", r"prioritas\w*[^.]{0,30}\d")),
+     "Priority of NFR-PERF-03", _refuses(r"(must|should|could) have", r"prioritas\w*[^.]{0,30}(?<![a-z0-9-])\d")),
     ("C2", "field", "apa Impact dan Probability untuk RSK-02?",
      "Risk RSK-02 impact probability", _has(r"high")),
     ("C3", "field", "apa prioritas FR-11?",
@@ -144,9 +178,14 @@ CASES = [
     ("E2", "sintesis", "sebutkan semua dokumen sumber beserta update frequency-nya",
      "document source inventory update frequency access level",
      _has(r"month", r"quarter", r"bi-?weekly", r"annual")),
+    # 2026-09-09: "Automated Loan Approvals" lazim diterjemahkan sebagai
+    # "persetujuan KREDIT" dalam konteks perbankan Indonesia, bukan cuma
+    # "pinjaman" -- qwen2.5:7b menjawab lengkap dan akurat (4/4 item,
+    # termasuk angka $1,000 dan Plaid) tapi ditandai salah gara-gara pilihan
+    # kata ini saja.
     ("E3", "sintesis", "apa saja yang out-of-scope di Phase 1?",
      "out of scope capabilities phase 1 boundaries",
-     _has(r"(loan|pinjaman)", r"(wire|transfer)", r"(voice|ivr|suara)", r"(third.?party|plaid|aggregat)")),
+     _has(r"(loan|pinjaman|kredit)", r"(wire|transfer)", r"(voice|ivr|suara)", r"(third.?party|plaid|aggregat)")),
 
     # --- F. presisi, rawan dibulatkan ---
     ("F1", "presisi", "berapa target uptime SLA dan batas minimum yang diizinkan?",
@@ -215,7 +254,7 @@ async def run_model(model: str, chat_id: str, runs: int, think) -> dict:
     if failures:
         print("\n  jawaban salah terakhir:")
         for cid, bad in failures:
-            print(f"     {cid}: " + bad.encode("ascii", "replace").decode())
+            print(f"     {cid}: {bad}")
     return {"model": model, "score": total, "possible": possible}
 
 
