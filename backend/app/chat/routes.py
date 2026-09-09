@@ -109,7 +109,12 @@ def get_messages(chat_id: str, db: Session = Depends(get_db), user: User = Depen
     return [
         MessageResponse(
             id=m.id, sender=m.sender, content=_display_content(m),
-            llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
+            llm_used=m.llm_used, confidence_score=m.confidence_score,
+            # m.sources None utk pesan lama (sebelum kolom ini ada) atau
+            # pesan dari user (cuma pesan assistant yang pernah diisi) --
+            # perlakukan sebagai "tidak ada sitasi", bukan error.
+            sources=json.loads(m.sources) if m.sources else [],
+            created_at=m.created_at,
         )
         for m in chat.messages
     ]
@@ -291,7 +296,7 @@ async def send_message(
         db.add(user_msg)
         ai_msg = Message(
             chat_id=chat.id, sender=SenderType.assistant,
-            content=GUARDRAIL_REFUSAL_MESSAGE, llm_used="blocked",
+            content=GUARDRAIL_REFUSAL_MESSAGE, llm_used="blocked", sources="[]",
         )
         db.add(ai_msg)
         db.commit()
@@ -574,6 +579,7 @@ async def send_message(
         )
 
     stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)  # teks baru hasil generate, deteksi PII-nya dihitung sendiri di sini
+    citations = _build_source_citations(context_chunks)
 
     ai_msg = Message(
         chat_id=chat.id,
@@ -582,6 +588,11 @@ async def send_message(
         pii_mapping=ai_pii_mapping,
         llm_used=result.llm_used,
         confidence_score=result.confidence_score,
+        # 2026-09-09: simpan sitasi di baris pesannya sendiri -- sebelum
+        # ini cuma dikirim sekali di respons ini, jadi refresh halaman atau
+        # login ulang (yang cuma memuat lewat GET /messages) kehilangan
+        # badge "Referensi"-nya meski jawabannya masih ada.
+        sources=json.dumps([c.model_dump() for c in citations]),
     )
     db.add(ai_msg)
     db.commit()
@@ -608,7 +619,7 @@ async def send_message(
         is_sensitive=result.is_sensitive,
         confidence_score=result.confidence_score,
         pii_detected=result.pii_detected,
-        sources=_build_source_citations(context_chunks),
+        sources=citations,
         new_title=new_title,
         message_id=ai_msg.id,
         escalation_offered=escalation_offered,

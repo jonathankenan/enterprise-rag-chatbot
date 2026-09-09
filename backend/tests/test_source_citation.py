@@ -235,6 +235,36 @@ def test_empty_context_yields_no_citations():
     assert build_citations([]) == []
 
 
+def test_citations_survive_the_json_round_trip_used_for_persistence():
+    """
+    2026-09-09: sitasi dulu cuma dikirim SEKALI di respons kirim-pesan, tidak
+    pernah disimpan -- refresh halaman atau login ulang (GET /messages)
+    kehilangan badge "Referensi" meski jawabannya masih ada. Fix-nya: simpan
+    di Message.sources lewat json.dumps([c.model_dump() for c in citations])
+    (chat/routes.py) dan baca balik lewat json.loads(...) + SourceCitation(**d)
+    (get_messages()). Test ini memastikan round-trip itu tidak diam-diam
+    membuang atau mengubah data -- yang paling rawan: CitationChunk bersarang
+    (list[CitationChunk] di dalam SourceCitation) dan nomor halaman.
+    """
+    import json
+    SourceCitation = _ns["SourceCitation"]
+
+    original = build_citations([
+        chunk(filename="A.pdf", page=1, text="isi halaman satu"),
+        chunk(filename="A.pdf", page=2, text="isi halaman dua"),
+        chunk(source_type="faq", text="jawaban FAQ"),
+    ])
+    assert len(original) == 2, "satu entri per dokumen A.pdf, satu entri FAQ"
+
+    dumped = json.dumps([c.model_dump() for c in original])
+    restored = [SourceCitation(**d) for d in json.loads(dumped)]
+
+    assert [c.model_dump() for c in restored] == [c.model_dump() for c in original]
+    assert restored[0].pages == [1, 2]
+    assert [ch.text for ch in restored[0].chunks] == ["isi halaman satu", "isi halaman dua"]
+    assert restored[1].source_type == "faq"
+
+
 def test_page_zero_is_recorded_not_skipped():
     """Guards `if page is not None` against regressing to `if page`."""
     got = build_citations([chunk(filename="Z.pdf", page=0)])
