@@ -31,6 +31,7 @@ function ChatPanel() {
   const [uploading, setUploading] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [llmProvider, setLlmProvider] = useState("on-prem");
+  const [expandedSource, setExpandedSource] = useState(null); // "${messageIndex}-${sourceIndex}" citation yang sedang dibuka -- lihat blok Referensi di bawah
   const [loginInfo, setLoginInfo] = useState(null); // SRS ISR-001.g
   const fileRef = useRef(null);
   const bottomRef = useRef(null);
@@ -232,11 +233,62 @@ function ChatPanel() {
                     )}
                   </div>
                 )}
-                {m.sources && m.sources.length > 0 && (
-                  <div style={{ fontSize: 11, color: "var(--idx-text-body)", marginTop: 2 }}>
-                    Referensi: {m.sources.map((s) => s.label).join(", ")}
-                  </div>
-                )}
+                {m.sources && m.sources.length > 0 && (() => {
+                  const expandedIdx = expandedSource && expandedSource.startsWith(`${i}-`)
+                    ? Number(expandedSource.slice(String(i).length + 1))
+                    : null;
+                  const expandedObj = expandedIdx !== null ? m.sources[expandedIdx] : null;
+                  return (
+                    <>
+                      <div style={{ fontSize: 11, color: "var(--idx-text-body)", marginTop: 2 }}>
+                        Referensi:{" "}
+                        {m.sources.map((s, si) => {
+                          const hasChunks = s.chunks && s.chunks.length > 0;
+                          const key = `${i}-${si}`;
+                          return (
+                            <span key={si}>
+                              {si > 0 && ", "}
+                              <button
+                                type="button"
+                                onClick={() => hasChunks && setExpandedSource(expandedSource === key ? null : key)}
+                                disabled={!hasChunks}
+                                title={hasChunks ? "Lihat isi yang dikutip" : undefined}
+                                style={{
+                                  background: "none", border: "none", padding: 0, font: "inherit",
+                                  color: hasChunks ? "var(--idx-red)" : "inherit",
+                                  cursor: hasChunks ? "pointer" : "default",
+                                  textDecoration: hasChunks ? "underline" : "none",
+                                }}
+                              >
+                                {s.label}
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                      {expandedObj && (
+                        <div style={{
+                          marginTop: 6, padding: "10px 12px", maxWidth: "82%",
+                          background: "var(--idx-surface-alt)", border: "1px solid var(--idx-border)",
+                          borderRadius: 8, fontSize: 12.5,
+                        }}>
+                          {/* Isi apa adanya yang sudah dikirim retrieve_context() -- sudah lolos filter divisi,
+                              tidak ada endpoint/permintaan baru di sini, cuma menampilkan yang sudah ada di respons. */}
+                          {expandedObj.chunks.map((c, ci) => (
+                            <div key={ci} style={{ marginBottom: ci < expandedObj.chunks.length - 1 ? 10 : 0 }}>
+                              {c.page !== null && c.page !== undefined && (
+                                <div style={{ fontWeight: 700, fontSize: 11, color: "var(--idx-text-subtle)", marginBottom: 3 }}>
+                                  Hal. {c.page}
+                                </div>
+                              )}
+                              <div style={{ whiteSpace: "pre-wrap", color: "var(--idx-text-body)" }}>{c.text}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
                 {m.pii_detected && (
                   <div style={{ fontSize: 11, color: "var(--idx-warning)", marginTop: 2, fontWeight: 500 }}>
                     Data pribadi terdeteksi pada pesan ini — disamarkan otomatis sebelum diproses AI.

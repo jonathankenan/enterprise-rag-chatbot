@@ -1,3 +1,4 @@
+import hashlib
 import re
 import chromadb
 from chromadb.utils import embedding_functions
@@ -123,6 +124,20 @@ TABLE_ROW_MIN_ROWS = 2
 
 def _table_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def table_header_of(text: str) -> str | None:
+    """
+    Baris header tabel markdown di chunk ini, atau None kalau bukan chunk
+    tabel. Dipakai sebagai IDENTITAS tabel: semua chunk baris yang berasal
+    dari tabel yang sama membawa baris header yang sama persis.
+    """
+    lines = text.split("\n")
+    for i in range(len(lines) - 1):
+        if (_TABLE_ROW_RE.match(lines[i]) and not _TABLE_SEP_RE.match(lines[i])
+                and _TABLE_SEP_RE.match(lines[i + 1])):
+            return lines[i].strip()
+    return None
 
 
 def count_table_body_rows(text: str) -> int:
@@ -264,7 +279,41 @@ KB_DIVISI_COLLECTION_NAME = "kb_divisi"
 KB_COMPANY_WIDE_SENTINEL = "company_wide"  # ChromaDB metadata tidak bisa nyimpen None
 
 
-def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None) -> int:
+def content_hash(file_bytes: bytes) -> str:
+    """Sidik jari isi berkas, dipakai menolak unggahan ganda ke KB."""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def find_kb_duplicate(hash_isi: str, divisi: str | None) -> str | None:
+    """
+    doc_id dokumen yang isinya PERSIS SAMA dan berada di divisi yang sama,
+    atau None kalau belum ada.
+
+    2026-08-31: dokumen yang sama terindeks dua kali (sekali lewat UI, sekali
+    lewat script uji) dan akibatnya tidak terlihat sama sekali dari luar --
+    tidak ada error, tidak ada peringatan. Yang berubah cuma daya ambil:
+    retrieval mengambil top_k=10, tapi karena tiap chunk punya kembaran, yang
+    benar-benar sampai ke model CUMA 5 chunk berbeda. Baris "Jumlah pegawai
+    tetap" ada di peringkat 5-6 dan persis terpotong di situ; pertanyaannya
+    dijawab "tidak tersedia" padahal datanya ada.
+
+    Dicek per DIVISI, bukan global: berkas yang sama sengaja diunggah ke dua
+    divisi adalah hal yang sah (mis. kebijakan yang berlaku di keduanya), dan
+    retrieval memang memisahkannya lewat filter divisi.
+    """
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    hasil = collection.get(
+        where={"$and": [{"content_hash": hash_isi},
+                        {"divisi": divisi or KB_COMPANY_WIDE_SENTINEL}]},
+        include=["metadatas"], limit=1,
+    )
+    metas = hasil.get("metadatas") or []
+    return metas[0].get("doc_id") if metas else None
+
+
+def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str | None,
+                      hash_isi: str | None = None, display_title: str | None = None,
+                      doc_type: str | None = None) -> int:
     """Multi-Tenant KB (SRS poin 11) — divisi=None berarti Company Wide, chunk per halaman sama seperti index_document()."""
     collection = get_collection(KB_DIVISI_COLLECTION_NAME)
     divisi_tag = divisi or KB_COMPANY_WIDE_SENTINEL
@@ -274,8 +323,25 @@ def index_kb_document(pages: list[dict], doc_id: str, filename: str, divisi: str
         for c in chunk_text(page_info["text"]):
             documents.append(c)
             meta = {"doc_id": doc_id, "filename": filename, "chunk_index": len(documents) - 1, "divisi": divisi_tag}
+            # Disimpan di metadata Chroma, bukan kolom Postgres, supaya
+            # pemeriksaan duplikat tidak butuh perubahan skema -- dan karena
+            # yang benar-benar rusak akibat duplikat memang indeksnya.
+            if hash_isi:
+                meta["content_hash"] = hash_isi
             if page_info["page"] is not None:
                 meta["page"] = page_info["page"]
+            # 2026-09-01: didenormalisasi ke sini alih-alih di-join dari
+            # Postgres saat citation dibangun -- filename sudah dititipkan
+            # dengan cara yang sama sejak awal, dan _build_source_citations()
+            # bekerja dari dict chunk, bukan dari session DB. Konsekuensinya:
+            # kalau admin mengganti display_title/doc_type dokumen yang
+            # sudah terindeks, salinan lama di sini tidak ikut berubah
+            # sampai dokumennya diunggah ulang (replace=true). Sama seperti
+            # filename hari ini -- tidak ada endpoint rename.
+            if display_title:
+                meta["display_title"] = display_title
+            if doc_type:
+                meta["doc_type"] = doc_type
             metadatas.append(meta)
 
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(documents))]
@@ -393,15 +459,106 @@ def custom_bm25_tokenizer(text: str) -> list[str]:
 _IDENTIFIER_RE = re.compile(r"[a-z]{2,}(?:-[a-z]+)*-\d+(?:\.\d+)*")
 
 
+def _canonical_identifier(ident: str) -> str:
+    """
+    Padatkan nol di depan tiap kelompok angka setelah tanda hubung, supaya
+    "sop-2" dan "sop-02" dianggap identifier yang SAMA.
+
+    2026-08-31: dokumen menulis "SOP-02" (dipadatkan dua digit). Ditanya
+    "apa isi SOP 2" (tanpa tanda hubung -- bukan identifier sama sekali di
+    mata _IDENTIFIER_RE) retrieval semantik biasa kebetulan berhasil. Ditanya
+    persis "SOP-2" (tanda hubung, TIDAK dipadatkan) -- bentuk yang justru
+    lebih wajar diketik orang -- saringan identifier mencocokkan STRING
+    PERSIS, "sop-2" != "sop-02", tidak ada chunk yang cocok, dan pertanyaan
+    tentang item yang sebetulnya ADA malah ditolak sebagai "tidak ditemukan".
+
+    "-2026" (tahun di DOC-FEE-2026) sengaja TIDAK tersentuh: nol di depan
+    cuma dibuang kalau digit pertamanya memang '0'.
+    """
+    return re.sub(r"-0+(\d)", r"-\1", ident)
+
+
 def extract_query_identifiers(text: str) -> set[str]:
-    """Identifier item yang disebut sebuah query, sudah lowercase."""
-    return {t for t in custom_bm25_tokenizer(text) if _IDENTIFIER_RE.fullmatch(t)}
+    """Identifier item yang disebut sebuah query, sudah lowercase & kanonis."""
+    return {_canonical_identifier(t) for t in custom_bm25_tokenizer(text) if _IDENTIFIER_RE.fullmatch(t)}
 
 
 def text_mentions_identifier(text: str, identifiers: set[str]) -> bool:
     if not identifiers:
         return True
-    return bool(identifiers & set(custom_bm25_tokenizer(text)))
+    doc_tokens = {_canonical_identifier(t) for t in custom_bm25_tokenizer(text)}
+    return bool(identifiers & doc_tokens)
+
+
+def _identifier_search_pattern(ident: str) -> re.Pattern:
+    """
+    Regex yang mencocokkan identifier KANONIS ini di teks apa pun, berapa
+    pun nol di depan angkanya dipadatkan penulis dokumen -- arah sebaliknya
+    dari _canonical_identifier: ident "sop-2" (kanonis) tetap harus ketemu
+    "SOP-02" di teks asli. Dipakai identifier_only_in_example(), yang
+    mencari POSISI kemunculan di teks mentah (bukan membandingkan token),
+    jadi tidak bisa memakai _canonical_identifier di sisi teks seperti
+    text_mentions_identifier.
+    """
+    parts = re.split(r"(\d+)", ident)
+    pat = "".join(rf"0*{re.escape(p)}" if p.isdigit() else re.escape(p) for p in parts)
+    return re.compile(rf"\b{pat}\b", re.I)
+
+
+# Kode divisi yang disebut BERDAMPINGAN dengan kata penunjuk divisi.
+#
+# 2026-08-31: filter divisi di KbDivisiRetriever bekerja benar -- dokumen
+# divisi lain tidak pernah sampai ke prompt. Tapi baris tabel yang lolos
+# filter TIDAK menyebut nama divisinya sendiri (mis. "Batas persetujuan
+# anggaran Kepala Divisi | Rp250.000.000" -- tidak ada kata "PTI" di
+# situ), dan build_prompt() cuma mengirim c["text"], tidak pernah
+# filename/divisi. Ditanya "berapa batas anggaran divisi SDI" oleh user
+# PTI, satu-satunya angka di konteks (milik PTI) ditempelkan ke nama SDI --
+# bukan kebocoran data (SDI tidak pernah terambil), tapi pelabelan yang
+# keliru dan meyakinkan.
+#
+# Disyaratkan berdampingan dengan "divisi/division/bagian/unit", BUKAN
+# kemunculan token telanjang di mana pun: beberapa kode divisi bertabrakan
+# dengan kata umum -- WAS ("was" dalam bahasa Inggris), PPT (format berkas
+# PowerPoint), OTP (kode verifikasi 2FA). Token telanjang akan memblokir
+# kalimat wajar seperti "kirim file PPT" atau "masukkan kode OTP".
+#
+# Trade-off yang diterima sadar: mention divisi TANPA kata penunjuk
+# ("apa SLA SDI", tanpa kata "divisi") tidak tertangkap pola ini. Itu
+# celah nyata, tapi false-refusal jauh lebih murah daripada false-answer
+# di sini -- pola yang sama dipakai di seluruh penjagaan lain sesi ini.
+_DIVISI_CONTEXT_WORDS = r"(?:divisi|division|bagian|unit)"
+
+# 2026-09-09: satu sub-kasus dari celah di atas TERNYATA gampang ditutup
+# tanpa membuka lagi false-positive "was"/"PPT"/"OTP" yang jadi alasan
+# syarat kata penunjuk itu ada: kode divisi yang menempel LANGSUNG ke
+# identifier bergaya katalog ("SOP-02 WAS", "WAS SOP-02") sudah punya
+# penunjuk implisit -- "SOP-02" sendiri, bukan kata umum yang kebetulan
+# sama ejaannya. "was busy" dan "kode OTP" tidak pernah didampingi
+# identifier semacam ini, jadi menambahkan pola ini tidak menghidupkan
+# lagi false-positive yang tadinya disingkirkan. Regex identifier di sini
+# sengaja disalin persis dari _IDENTIFIER_RE (bukan dipakai langsung)
+# karena _IDENTIFIER_RE dirancang untuk fullmatch() satu token hasil
+# tokenizer, sedangkan di sini perlu dicocokkan sebagai potongan pola yang
+# lebih besar lewat re.search().
+_CATALOG_ID_ADJACENT = r"[a-z]{2,}(?:-[a-z]+)*-\d+(?:\.\d+)*"
+
+
+def extract_query_divisi(text: str, known_divisi: set[str]) -> set[str]:
+    """Kode divisi (huruf besar, mis. {"PTI", "SDI"}) yang query ini sebut
+    berdampingan dengan kata penunjuk divisi, ATAU menempel langsung ke
+    identifier katalog (mis. "SOP-02 WAS") -- lihat catatan di atas.
+    known_divisi harus huruf besar."""
+    found = set()
+    for code in known_divisi:
+        esc = re.escape(code)
+        pat = (
+            rf"\b{_DIVISI_CONTEXT_WORDS}\s+{esc}\b|\b{esc}\s+{_DIVISI_CONTEXT_WORDS}\b"
+            rf"|\b{_CATALOG_ID_ADJACENT}\s+{esc}\b|\b{esc}\s+{_CATALOG_ID_ADJACENT}\b"
+        )
+        if re.search(pat, text, re.I):
+            found.add(code.upper())
+    return found
 
 
 # Wilayah "contoh": blok kode berpagar, kode sebaris, dan pasangan
@@ -461,7 +618,7 @@ def identifier_only_in_example(text: str, identifiers: set[str]) -> bool:
     lowered = text.lower()
     ketemu = False
     for ident in identifiers:
-        for m in re.finditer(re.escape(ident), lowered):
+        for m in _identifier_search_pattern(ident).finditer(lowered):
             ketemu = True
             if not any(a <= m.start() < b for a, b in spans):
                 return False   # ada kemunculan di luar contoh
@@ -489,6 +646,49 @@ def get_bm25_retriever(chat_id: str, collection_name: str = "kb_general", top_k:
     )
     return retriever
 
+
+def get_kb_divisi_bm25_retriever(allowed_divisi: list[str], top_k: int = 10):
+    """2026-09-01: leg BM25 buat koleksi kb_divisi -- sebelumnya TIDAK ADA sama
+    sekali. get_bm25_retriever() di atas cuma mengindeks chunk bertag
+    `chat_id`, dan chunk kb_divisi tidak pernah punya field itu (lihat
+    index_kb_document()), jadi KbDivisiRetriever (murni vektor) adalah
+    SATU-SATUNYA jalur retrieval untuk seluruh KB divisi -- tanpa pencocokan
+    leksikal sama sekali.
+
+    Ditemukan lewat panel citation (fitur klik-citation, 2026-09-01): query
+    "jelaskan SOP-01" -- string identifier PERSIS -- top-match-nya malah baris
+    "Jumlah pegawai tetap: 84" yang tidak ada hubungannya sama sekali. Bukan
+    kasus render-duplikat (lihat suppressed_render_dupes di atas); anchor-nya
+    dari awal salah karena tidak ada sinyal leksikal yang bisa menandingi
+    kemiripan vektor yang keliru punya all-MiniLM-L6-v2 pada query pendek
+    Indonesia (kelemahan yang sudah dicatat sejak 2026-08-26 utk dokumen
+    chat, ternyata kb_divisi malah tidak dapat mitigasi BM25 itu sama
+    sekali).
+
+    Dibangun ulang dari `collection.get()` tiap panggilan, sama seperti
+    get_bm25_retriever() -- BM25Retriever tidak reusable lintas query karena
+    korpusnya (allowed_divisi) berbeda per user. Filter divisi diterapkan DI
+    SINI, bukan di ensemble, supaya leg ini juga tidak pernah bocor lintas
+    divisi (SRS hal. 14) -- sama seperti KbDivisiRetriever.
+    """
+    collection = get_collection(KB_DIVISI_COLLECTION_NAME)
+    if collection.count() == 0:
+        return None
+    results = collection.get(where={"divisi": {"$in": allowed_divisi}}, include=["documents", "metadatas"])
+    docs_list = results.get("documents") or []
+    metas_list = results.get("metadatas") or []
+
+    lc_docs = [LCDocument(page_content=d, metadata=m or {}) for d, m in zip(docs_list, metas_list)]
+    if not lc_docs:
+        return None
+
+    retriever = BM25Retriever.from_documents(
+        documents=lc_docs,
+        preprocess_func=custom_bm25_tokenizer,
+    )
+    retriever.k = top_k  # get_bm25_retriever() di atas tidak menyetel ini (masih pakai default k=4 langchain) -- tidak disentuh di sini, di luar cakupan perbaikan hari ini
+    return retriever
+
 def _distance_to_similarity_percent(distance: float) -> float:
     """Konversi L2-squared distance -> cosine similarity, valid karena embedding model menghasilkan vektor ternormalisasi."""
     return max(0.0, min(1.0, 1 - (distance / 2)))
@@ -500,18 +700,163 @@ _WEIGHT_PROFILES = {
     Intent.FAQ_LOOKUP: (0.15, 0.55, 0.15),      # pertanyaan umum -> leg FAQ dominan
     Intent.GENERAL_CHAT: (0.3, 0.25, 0.25),     # tidak jelas arahnya -> bobot rata
 }
-_BM25_SHARE = 0.3  # porsi tetap buat leg BM25, tidak berubah oleh weight_hint
+_BM25_SHARE = 0.3  # porsi TOTAL buat leg BM25 (satu atau dua), tidak berubah oleh weight_hint
 
 
-def _resolve_weights(weight_hint: str | None, has_bm25: bool) -> list[float]:
-    """Skalakan bobot 3-leg dasar (menjaga rasio antar-leg) supaya BM25 selalu dapat porsi tetap kalau ada."""
+def _resolve_weights(weight_hint: str | None, bm25_legs: int = 0) -> list[float]:
+    """Skalakan bobot 3-leg dasar (menjaga rasio antar-leg) supaya BM25 selalu dapat porsi tetap kalau ada.
+
+    2026-09-01: bm25_legs menggantikan has_bm25 (bool) -- sejak leg BM25
+    kb_divisi ditambahkan, bisa ada 0, 1 (cuma dokumen chat, atau cuma KB
+    divisi), atau 2 leg BM25 aktif berbarengan. _BM25_SHARE tetap porsi
+    TOTAL, dibagi rata kalau lebih dari satu leg aktif -- bm25_legs=1 tetap
+    berperilaku identik dengan has_bm25=True sebelumnya (satu-satunya kasus
+    yang sudah ada sebelum hari ini).
+    """
     base = _WEIGHT_PROFILES.get(weight_hint, _DEFAULT_WEIGHTS)
-    if not has_bm25:
+    if bm25_legs <= 0:
         return list(base)
     total = sum(base)
     remaining = 1.0 - _BM25_SHARE
     scaled = [round(w / total * remaining, 4) for w in base]
-    return scaled + [_BM25_SHARE]
+    per_leg = round(_BM25_SHARE / bm25_legs, 4)
+    return scaled + [per_leg] * bm25_legs
+
+
+# Berapa baris dari satu tabel harus muncul di hasil sebelum sisanya ikut
+# ditarik. Satu baris saja BUKAN sinyal tabelnya relevan -- itu justru pola
+# pertanyaan presisi, dan menariknya jadi seluruh tabel malah mengembalikan
+# baris tetangga yang susah payah dibuang.
+TABLE_EXPANSION_MIN_HITS = 2
+# Pagar supaya tabel raksasa tidak menelan seluruh jendela konteks (dipotong
+# di 15.000 karakter oleh build_prompt).
+TABLE_EXPANSION_MAX_ROWS = 30
+
+
+def _expand_table_rows(docs: list, chat_id: str, collection_name: str) -> list:
+    """Lengkapi baris tabel yang sudah terwakili di hasil. Lihat pemanggilnya."""
+    from collections import defaultdict
+
+    hits: dict[str, int] = defaultdict(int)
+    for d in docs:
+        if count_table_body_rows(d.page_content) == 1:
+            header = table_header_of(d.page_content)
+            if header:
+                hits[header] += 1
+    wanted = {h for h, n in hits.items() if n >= TABLE_EXPANSION_MIN_HITS}
+    if not wanted:
+        return docs
+
+    collection = get_collection(collection_name)
+    stored = collection.get(where={"chat_id": chat_id}, include=["documents", "metadatas"])
+    seen = {d.page_content for d in docs}
+    extra = []
+    for text, meta in zip(stored.get("documents") or [], stored.get("metadatas") or []):
+        if text in seen or count_table_body_rows(text) != 1:
+            continue
+        header = table_header_of(text)
+        if header not in wanted or hits[header] >= TABLE_EXPANSION_MAX_ROWS:
+            continue
+        hits[header] += 1
+        # Sengaja TANPA "_distance": baris ini tidak lolos pencarian, dia
+        # ditarik karena tabelnya relevan. Membubuhkan skor palsu akan
+        # mencemari confidence dan pemilihan citation.
+        extra.append(LCDocument(page_content=text, metadata=dict(meta or {})))
+    return docs + extra
+
+
+def _has_table_row(text: str) -> bool:
+    return any(_TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln) for ln in text.split("\n"))
+
+
+def _table_row_lines(text: str) -> str:
+    """Baris tabel SAJA dari sebuah chunk (buang heading/prosa yang
+    mengapitnya) -- dipakai _is_render_duplicate() supaya heading pengantar
+    yang cuma menempel di SATU render (mis. render tabel yang benar biasanya
+    didahului judul bagian, "### Ketentuan pengadaan...") tidak mengencerkan
+    rasio overlap. Kalau tidak ada baris tabel sama sekali, kembalikan teks
+    apa adanya (sisi prosa memang harus dibandingkan utuh, dia bukan yang
+    dipersempit)."""
+    lines = [ln for ln in text.split("\n") if _TABLE_ROW_RE.match(ln) and not _TABLE_SEP_RE.match(ln)]
+    return "\n".join(lines) if lines else text
+
+
+def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> bool:
+    """True kalau dua potongan teks pada dasarnya sama isinya, cuma dirender
+    pymupdf4llm dalam dua bentuk berbeda (satu tabel pipe yang benar, satu
+    prosa yang kata-katanya tercampur) -- lihat catatan panjang di
+    retrieve_context(). Diukur dari overlap kata SIGNIFIKAN (>=4 huruf),
+    bukan urutan -- versi prosa yang tercampur urutan katanya tetap harus
+    terdeteksi. Dihoist ke level modul 2026-09-01 supaya reanchor_citable_chunks()
+    bisa memakainya juga, bukan cuma retrieve_context().
+
+    Sisi manapun yang berbentuk tabel dipersempit dulu ke _table_row_lines()
+    sebelum dibandingkan. Tanpa ini, diukur langsung pada kasus nyata
+    (chunk "Ketentuan pengadaan..." + baris SOP-01 vs versi prosanya):
+    overlap cuma 65% -- di bawah ambang, duplikatnya lolos tersitasi
+    berdampingan -- karena heading pengantar yang cuma ada di render tabel
+    (bukan di render prosanya) ikut dihitung sebagai kata unik. Dipersempit
+    ke baris tabelnya saja, rasio yang sama naik ke 81%."""
+    table_a, table_b = _table_row_lines(text_a), _table_row_lines(text_b)
+    words_a = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", table_a)}
+    words_b = {w.lower() for w in re.findall(r"[a-zA-Z]{4,}", table_b)}
+    if not words_a or not words_b:
+        return False
+    smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    return len(smaller & larger) / len(smaller) >= threshold
+
+
+# Batas JUMLAH sitasi per jawaban -- dipakai retrieve_context() (seleksi awal)
+# dan reanchor_citable_chunks() (seleksi ulang setelah penyempitan identifier
+# di chat/routes.py). Dihoist ke level modul 2026-09-01 supaya dua tempat itu
+# tidak diam-diam melenceng satu sama lain.
+TOP_MATCHES = 3
+
+
+def reanchor_citable_chunks(chunks: list[dict], limit: int = TOP_MATCHES) -> None:
+    """2026-09-01: dipanggil chat/routes.py SETELAH context_chunks dipersempit
+    jadi id_chunks (lihat penjagaan identifier) -- is_top_match yang melekat
+    di tiap dict dihitung retrieve_context() SEBELUM penyempitan itu, jadi
+    bisa menunjuk chunk yang sudah tidak ada lagi di daftar (dibuang karena
+    bukan identifier yang ditanya), atau -- kasus nyata yang ditemukan lewat
+    panel citation -- menunjuk chunk yang KEBETULAN mirip bentuknya (baris
+    tabel kode LAIN) tapi salah kode: "jelaskan SOP-01" menyitasi baris
+    SOP-02 karena baris itu menang similarity keseluruhan, padahal id_match-
+    nya False sejak awal (bukan render-duplikat, sekadar baris tabel lain
+    yang bentuknya serupa).
+
+    Mengubah is_top_match IN-PLACE, bukan mengembalikan list baru -- dict
+    yang sama juga dikirim sebagai context ke LLM, jadi identitasnya harus
+    tetap sama persis.
+
+    Prioritas: chunk yang SUDAH lolos seleksi retrieve_context() (similarity
+    floor, render-dedup, larangan Daftar Isi) didahulukan kalau masih ada di
+    antara kandidat yang tersisa -- itu seleksi yang lebih ketat daripada
+    sekadar urutan. Kalau tidak ada satu pun yang selamat dari penyempitan
+    (kasus di atas), jatuh balik ke urutan `chunks` apa adanya -- yang di
+    jalur identifier SUDAH diurutkan chat/routes.py supaya baris tabel
+    presisi (table_body_rows==1) didahulukan dari prosa.
+
+    Render-dedup dijalankan LAGI di sini (bukan cuma diwariskan dari
+    retrieve_context()): id_chunks bisa memuat render-duplikat yang di
+    retrieve_context() dulu SAMA-SAMA tidak jadi anchor (jadi tidak ada info
+    is_top_match yang bisa diwariskan) tapi keduanya lolos filter id_match
+    (menyebut identifier yang sama) -- baris tabel bersih dan versi
+    prosanya yang tercampur. Tanpa ini keduanya bisa lolos jadi citable
+    berdampingan, dan versi prosa yang tercampur tetap terlihat user di
+    panel citation walau versi bersihnya ikut tercantum.
+    """
+    survivors = [c for c in chunks if not any(
+        c is not other and c.get("filename") == other.get("filename")
+        and c.get("page") == other.get("page")
+        and _has_table_row(other.get("text", "")) and not _has_table_row(c.get("text", ""))
+        and _is_render_duplicate(c.get("text", ""), other.get("text", ""))
+        for other in chunks
+    )]
+    already = [c for c in survivors if c.get("is_top_match")]
+    keep_ids = {id(c) for c in (already or survivors)[:limit]}
+    for c in chunks:
+        c["is_top_match"] = id(c) in keep_ids
 
 
 def retrieve_context(
@@ -524,23 +869,96 @@ def retrieve_context(
     allowed_divisi = [KB_COMPANY_WIDE_SENTINEL] + ([user_divisi] if user_divisi else [])
     kb_retriever = KbDivisiRetriever(allowed_divisi=allowed_divisi, top_k=top_k)
     bm25_retriever = get_bm25_retriever(chat_id=chat_id, collection_name=collection_name, top_k=top_k)
+    # 2026-09-01: leg BM25 KEDUA, khusus kb_divisi -- lihat catatan panjang
+    # di get_kb_divisi_bm25_retriever(). Tanpa ini, KB divisi cuma punya
+    # jalur vektor, dan query pendek ber-identifier ("jelaskan SOP-01") bisa
+    # kalah bersaing similarity melawan chunk yang topiknya tidak nyambung.
+    kb_bm25_retriever = get_kb_divisi_bm25_retriever(allowed_divisi=allowed_divisi, top_k=top_k)
 
     retrievers = [chroma_retriever, faq_retriever, kb_retriever]
-    weights = _resolve_weights(weight_hint, has_bm25=bm25_retriever is not None)
-    if bm25_retriever:
-        retrievers.append(bm25_retriever)
+    bm25_legs = [r for r in (bm25_retriever, kb_bm25_retriever) if r is not None]
+    weights = _resolve_weights(weight_hint, bm25_legs=len(bm25_legs))
+    retrievers.extend(bm25_legs)
 
     ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
     docs = ensemble.invoke(search_query)
 
     docs = docs[:top_k]
 
+    # ── 2026-08-31: lengkapi baris tabel untuk pertanyaan sintesis ──────────
+    # Ditanya "functional requirement", jawaban cuma memuat 5 dari 12 FR dan
+    # menyajikannya seolah lengkap. Chunk tabel FR utuh ADA di indeks (12
+    # baris, 2913 karakter) tapi tidak masuk 20 besar sama sekali.
+    #
+    # Penyebabnya bukan peringkat, melainkan batas model embedding:
+    # all-MiniLM-L6-v2 punya max_seq_length 256 token (~1.024 karakter). Chunk
+    # 2.913 karakter DIPOTONG -- dua pertiga isinya tidak pernah ikut
+    # membentuk vektornya, dan sisanya jadi rata-rata 12 topik sehingga tumpul
+    # untuk kueri pendek. Sementara 12 chunk satu-baris masing-masing pendek,
+    # fokus, dan semuanya memuat header yang sama, jadi mereka menyapu bersih
+    # peringkat atas. Menaikkan top_k TIDAK menolong: chunk utuhnya tidak
+    # pernah masuk peringkat berapa pun.
+    #
+    # Jadi kelengkapan tidak bisa digantungkan pada chunk raksasa. Yang dipakai
+    # adalah sinyal yang sudah ada: kalau beberapa baris dari tabel yang SAMA
+    # ikut terambil, tabel itu jelas relevan -- sisanya tinggal dilengkapi
+    # secara deterministik.
+    #
+    # Aturannya jadi simetris dengan penjagaan identifier di chat/routes.py:
+    #   kueri menyebut identifier  -> SATU baris   (yang paling spesifik)
+    #   kueri sintesis             -> SEMUA baris  (yang paling lengkap)
+    #
+    # Batasan yang diketahui: cuma melengkapi dari dokumen chat ini
+    # (kb_general + chat_id). Tabel di KB divisi belum ikut.
+    if not extract_query_identifiers(search_query):
+        docs = _expand_table_rows(docs, chat_id, collection_name)
+
     # Distance cuma ada di dokumen leg vector (chat/FAQ/KB divisi) -- BM25 tidak punya angka yang sebanding
     distance_by_index = {i: d.metadata["_distance"] for i, d in enumerate(docs) if "_distance" in d.metadata}
 
+    # ── 2026-09-01: sitasi jangan pernah menunjuk render PROSA yang tercampur
+    # kalau render TABEL dari isi yang sama juga ada di antara kandidat ──────
+    # Ditemukan lewat panel "isi yang dikutip" (fitur klik-citation) --
+    # dikonfirmasi diambil LANGSUNG dari fixture: pymupdf4llm merender tabel
+    # SOP-01/02/03 halaman itu DUA KALI (SOP-01 muncul 2x di satu markdown
+    # halaman) -- satu jalur mengenali gridnya dan menghasilkan tabel pipe
+    # yang benar (`|SOP-01|Penanganan Insiden<br>Produksi|...|`), jalur lain
+    # gagal mengenalinya dan menjatuhkan isi yang SAMA sebagai teks mengalir,
+    # di mana baris kedua tiap sel yang membungkus 2 baris ketukar posisi
+    # dengan baris pertama sel SEBELAHNYA ("...dan root Produksi cause
+    # analysis..." -- "Produksi" semestinya nempel ke "Penanganan Insiden").
+    # table_strategy lain (`lines`, `text`) sudah dicoba dan lebih buruk --
+    # `text` bahkan memecah SELURUH halaman jadi tabel palsu satu-huruf.
+    #
+    # Perbaikannya bukan di ekstraksi (di luar kendali kita, itu pymupdf4llm)
+    # atau di chunk_text() (area yang sama pernah regresi E1, tidak disentuh
+    # tanpa eval ulang) -- cukup DI SINI, saat memilih mana yang layak
+    # disitasi: kalau dua chunk dari (filename, page) yang SAMA overlap kata
+    # signifikannya tinggi (satu kumpulan kata nyaris subset kumpulan yang
+    # lain -- diukur begini, bukan prefix sama persis, karena versi prosa
+    # justru TERTUKAR urutannya) dan salah satunya benar-benar berbentuk
+    # tabel pipe sedangkan yang lain tidak, chunk prosa itu ditandai
+    # tersuplai-ganda dan tidak pernah jadi anchor atau pengisi TOP_MATCHES.
+    # Chunk itu TETAP terindeks dan tetap dikirim sebagai konteks ke LLM --
+    # cuma tidak pernah ditampilkan sebagai sumber, karena itulah yang
+    # sekarang terlihat langsung oleh user lewat panel citation.
+    # (_has_table_row/_is_render_duplicate ada di level modul -- lihat di
+    # atas -- supaya reanchor_citable_chunks() bisa memakai logika yang sama.)
+    suppressed_render_dupes: set[int] = set()
+    for i in range(len(docs)):
+        if not _has_table_row(docs[i].page_content):
+            continue
+        for j in range(len(docs)):
+            if j == i or j in suppressed_render_dupes or _has_table_row(docs[j].page_content):
+                continue
+            mi, mj = docs[i].metadata, docs[j].metadata
+            if mi.get("filename") != mj.get("filename") or mi.get("page") != mj.get("page"):
+                continue
+            if _is_render_duplicate(docs[i].page_content, docs[j].page_content):
+                suppressed_render_dupes.add(j)
+
     # Peringkat diambil dari urutan ensemble (RRF gabungan), bukan distance mentah -- supaya chunk yang cuma ditemukan BM25 tetap bisa terkutip
-    TOP_MATCHES = 3
-    ranked = list(range(min(TOP_MATCHES, len(docs))))
+    ranked = [i for i in range(len(docs)) if i not in suppressed_render_dupes][:TOP_MATCHES]
 
     # Relevance floor relatif ke peringkat 1 -- peringkat 2-3 cuma ikut terkutip kalau similarity-nya masih dekat dari peringkat 1
     CITATION_SIMILARITY_GAP = settings.citation_similarity_gap
@@ -590,20 +1008,220 @@ def retrieve_context(
         # panjang tidak ikut terbuang.
         return len(re.findall(r"\.{4,}", docs[i].page_content)) >= 3
 
+    # ── 2026-09-01: anchor sitasi dipilih dari similarity, bukan peringkat
+    # ensemble ────────────────────────────────────────────────────────────
+    # "first = ranked[0]" DULU selalu dikutip apa pun isinya -- peringkat
+    # ensemble #1, titik. Itu tidak aman: RRF gabungan BM25+vektor bisa
+    # mendorong chunk yang cuma kebetulan cocok secara leksikal ke posisi
+    # #1, dan floor sitasinya ikut dijangkarkan ke chunk yang salah itu.
+    #
+    # Terukur pada KB divisi PTI. User bertanya "jelaskan regulasi
+    # perusahaan yang berlaku" -- JAWABANNYA BENAR (REG-01..04 dari
+    # KB_CompanyWide, chunk itu memang ada di context_chunks), tapi
+    # SITASINYA menunjuk KB_PTI (SOP-01), dokumen yang sama sekali tidak
+    # dibahas jawabannya. Sebabnya: query rewriting menerjemahkan pertanyaan
+    # itu ke "explain applicable company regulations" -- kehilangan overlap
+    # leksikal dengan "regulasi"/"berlaku" yang BM25 andalkan -- dan chunk
+    # KB_CompanyWide yang benar jatuh ke peringkat ensemble #4, DI LUAR
+    # TOP_MATCHES=3 lama. (Pertanyaan versi Indonesia yang tidak
+    # diterjemahkan menaruhnya di peringkat #1 -- lihat [[LLM Switching]]
+    # soal risiko rewriting paksa ke Inggris pada korpus Indonesia; itu
+    # temuan terpisah, tidak diperbaiki di sini.)
+    #
+    # TOP_MATCHES tetap 3 -- itu batas JUMLAH sitasi per jawaban, bukan
+    # jendela kelayakan, dan dua-duanya sengaja dipisah sekarang. Anchor-nya
+    # sekarang chunk dengan SIMILARITY VEKTOR TERTINGGI di antara seluruh
+    # kandidat (bukan cuma 3 teratas ensemble), dan sisanya diperiksa
+    # menyusuri SELURUH hasil (bukan cuma ranked[1:]) sampai kuota
+    # TOP_MATCHES terpenuhi -- urutan pemeriksaannya tetap urutan ensemble,
+    # jadi kesepakatan BM25+vektor tetap jadi prioritas, cuma tidak lagi
+    # jadi PEMBATAS KERAS.
+    #
+    # Kasus BM25-murni (tidak ada chunk berjarak vektor sama sekali) jatuh
+    # balik ke perilaku lama: anchor = peringkat ensemble #1, reference=100 --
+    # lihat test_all_bm25_result_is_cited_but_scores_no_confidence.
+    scored_by_similarity = [(i, s) for i in range(len(docs))
+                            if i not in suppressed_render_dupes and (s := _similarity(i)) is not None]
+
+    anchor: int | None = None
+    reference = 100.0
+    if ranked and _similarity(ranked[0]) is None:
+        # Peringkat ensemble #1 ditemukan MURNI lewat BM25 -- kecocokan
+        # KATA PERSIS, tanpa vektor sama sekali. Itu sinyal yang sengaja
+        # dipercaya sebagai batas atas mutlak (reference=100) sejak
+        # 2026-08-26 -- lihat test_unscored_rank_one_sets_a_strict_bar --
+        # supaya tetangga topikal yang cuma "lumayan mirip" secara vektor
+        # tidak ikut nebeng sitasi di samping kecocokan presisi. TIDAK
+        # disentuh oleh perbaikan di bawah; itu cuma berlaku untuk kasus
+        # peringkat #1 yang PUNYA distance tapi similaritynya menyesatkan.
+        anchor = ranked[0]
+    elif scored_by_similarity:
+        anchor, reference = max(scored_by_similarity, key=lambda x: x[1])
+    elif ranked:
+        anchor = ranked[0]
+
+    # Memindahkan anchor ke similarity tertinggi TIDAK CUKUP sendirian:
+    # diverifikasi bahwa dua duplikat "PTI-09 belum diterbitkan" (lihat
+    # catatan [!warning] "Some KB pages are indexed twice" di RAG Pipeline --
+    # extract_pages_from_pdf merender ulang halaman yang sama jadi dua
+    # bentuk) SECARA GENUINE punya similarity vektor lebih tinggi daripada
+    # chunk KB_CompanyWide yang benar. Similarity tinggi bukan berarti
+    # BERBEDA -- dua salinan nyaris sama persis dari kalimat yang sama akan
+    # sama-sama menang similarity dan berdua menghabiskan slot TOP_MATCHES
+    # sebelum kandidat ketiga yang genuinely berbeda sempat diperiksa.
+    # Duplikat/nyaris-duplikat karena itu di-skip di jendela pengisi slot --
+    # cukup sidik jari kasar (N karakter pertama setelah dirapikan), bukan
+    # perbandingan isi penuh: yang dicari adalah "chunk yang sama diberi
+    # bentuk render berbeda", bukan kemiripan topik.
+    # Disyaratkan berdampingan dengan (filename, page) yang SAMA -- itu
+    # sinyal sebenarnya dari bug ini: dua chunk dari halaman yang sama
+    # dirender ulang jadi dua bentuk. Dua chunk yang KEBETULAN mirip
+    # teksnya tapi dari halaman berbeda BUKAN duplikat, dan memang tidak
+    # boleh ikut disaring keluar -- keduanya lokasi sitasi yang sah.
+    #
+    # Ini prefix PERSIS -- tidak menangkap kasus suppressed_render_dupes di
+    # atas, di mana kata-katanya SAMA tapi URUTANNYA tertukar (versi prosa
+    # yang gagal dikenali sebagai tabel), jadi 120 karakter pertamanya beda.
+    # Dua mekanisme ini saling melengkapi, bukan tumpang tindih.
+    #
+    # 2026-09-01: untuk chunk BERBENTUK TABEL, sidik jarinya diambil dari
+    # _table_row_lines() -- BUKAN 120 karakter pertama teks mentah. Ditemukan
+    # langsung lewat query "daftar regulasi...": REG-01, REG-02, REG-03,
+    # REG-04 masing-masing baris tabel SATU BARIS, tapi SEMUANYA didahului
+    # heading pengantar yang SAMA PERSIS ("### Ketentuan turunan mengenai
+    # sanksi administratif dimuat pada REG-08, yang masih dalam proses
+    # penyusunan.\n\n|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|"),
+    # dan heading itu sendiri sudah >120 karakter -- jadi keempat baris yang
+    # BERBEDA REGULASI itu punya prefix 120-karakter yang IDENTIK, dan tiga
+    # dari empat disaring sebagai "duplikat" dari yang keempat. Itu membuka
+    # slot TOP_MATCHES yang lalu terisi chunk yang genuinely tidak relevan.
+    # Sama seperti _is_render_duplicate(), heading yang cuma menempel di
+    # SATU sisi tidak boleh mendominasi sidik jari.
+    def _dedup_shape(i: int, n: int = 120) -> str:
+        meta = docs[i].metadata
+        text = docs[i].page_content
+        fingerprint_source = _table_row_lines(text) if _has_table_row(text) else text
+        prefix = " ".join(fingerprint_source.split())[:n].lower()
+        return f"{meta.get('filename')}|{meta.get('page')}|{prefix}"
+
+    # ── 2026-09-01: BM25-only butuh overlap kata nyata kalau TIDAK ada
+    # identifier di query ──────────────────────────────────────────────────
+    # "sim is None -> lolos tanpa syarat" (baris di bawah) sengaja dibuat
+    # 2026-08-25 supaya kecocokan STRING PERSIS lewat BM25 (mis. identifier)
+    # tidak kalah cuma karena tidak punya jarak vektor. Untuk query
+    # BER-IDENTIFIER itu aman: _has_query_id() di atas sudah memaksa chunk
+    # benar-benar menyebut KODE yang ditanya, jadi "lolos tanpa syarat" itu
+    # sebenarnya "lolos karena sudah lolos pemeriksaan yang lebih ketat".
+    #
+    # Untuk query SINTESIS (query_ids kosong, "daftar regulasi yang berlaku
+    # di perusahaan") _has_query_id() SENGAJA pasif (selalu True -- supaya
+    # kasus multi-dokumen macam FR-12 tidak ikut tersaring), jadi "sim is
+    # None -> lolos" jadi jalan bebas hambatan TANPA penjagaan topikal sama
+    # sekali. BM25Retriever sendiri tidak punya ambang skor -- dia
+    # mengembalikan top-k apa adanya sekalipun skornya nyaris nol.
+    #
+    # Ditemukan lewat fitur klik-citation, dikonfirmasi lewat leg BM25
+    # kb_divisi yang baru ditambahkan hari ini: query di atas menyitasi
+    # baris "PTI-03 Daftar Risiko PTI" (BM25-only, cuma berbagi kata
+    # "daftar") dan bahkan chunk JUDUL halaman PTI yang sama sekali tidak
+    # menyebut regulasi. Vektor tidak pernah mengembalikan chunk itu untuk
+    # query ini -- murni BM25 kebetulan cocok satu kata.
+    #
+    # Dijaga dengan overlap kata SIGNIFIKAN (>=4 huruf) terhadap query
+    # sendiri: BM25-only tanpa identifier di query wajib berbagi separuh
+    # dari kata signifikan query, bukan cuma satu kata kebetulan sama.
+    # 0.5 BELUM diukur lewat eval nyata (GPU/Ollama tidak terjangkau sesi
+    # ini) -- beri tahu siapa pun yang menaikkan/menurunkan ini untuk
+    # mengukur dulu, bukan menebak, seperti CITATION_SIMILARITY_GAP.
+    #
+    # _QUERY_STOPWORDS: diukur ulang setelah percobaan pertama TANPA daftar
+    # ini meloloskan "PTI-03 Daftar Risiko PTI" karena "yang" (kata sambung,
+    # 4 huruf, lolos filter panjang) dihitung sebagai 1 dari 4 kata "isi"
+    # query -- 25% dari kuota overlap tanpa makna topikal sama sekali. Daftar
+    # kecil ini sengaja SEMPIT (kata sambung/depan yang jelas tidak
+    # bermakna), bukan daftar stopword NLP umum -- kata seperti "wajib",
+    # "tidak", "harus" tetap dihitung karena membawa makna di teks kepatuhan.
+    _QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
+                        "oleh", "agar", "maka", "jika", "kalau", "serta",
+                        "dapat", "telah", "sudah", "untuk", "dengan"}
+    _QUERY_OVERLAP_MIN_RATIO = 0.5
+
+    def _content_words(text: str) -> set[str]:
+        return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
+
+    _query_words = _content_words(search_query)
+
+    def _bm25_only_matches_query(i: int) -> bool:
+        if query_ids or not _query_words:
+            return True  # sudah dijaga _has_query_id(), atau tidak ada apa pun buat dibandingkan
+        return len(_query_words & _content_words(docs[i].page_content)) / len(_query_words) >= _QUERY_OVERLAP_MIN_RATIO
+
     best_indices: set[int] = set()
-    if ranked:
-        first = ranked[0]
-        best_indices.add(first)
-        reference = _similarity(first)
-        if reference is None:
-            reference = 100.0
+    if anchor is not None:
+        best_indices.add(anchor)
+        cited_shapes = {_dedup_shape(anchor)}
         floor = reference - CITATION_SIMILARITY_GAP
-        for i in ranked[1:]:
-            if _is_toc(i) or not _has_query_id(i):
-                continue
+
+        def _try_add(i: int) -> None:
+            if i == anchor or i in suppressed_render_dupes or _is_toc(i) or not _has_query_id(i):
+                return
+            shape = _dedup_shape(i)
+            if shape in cited_shapes:
+                return
             sim = _similarity(i)
-            if sim is None or sim >= floor:
-                best_indices.add(i)
+            if sim is None:
+                if not _bm25_only_matches_query(i):
+                    return
+            elif sim < floor:
+                return
+            best_indices.add(i)
+            cited_shapes.add(shape)
+
+        # ── 2026-09-09: dokumen yang SAMA dengan anchor diprioritaskan
+        # PENUH sebelum dokumen lain dipertimbangkan ────────────────────
+        # Ditemukan 1 September, sengaja tidak ditambal saat itu: query
+        # sintesis ("daftar regulasi yang berlaku di perusahaan") punya 4
+        # baris regulasi yang sama-sama valid di SATU dokumen (Company
+        # Wide), tapi TOP_MATCHES=3 cuma cukup untuk anchor + 2. Urutan
+        # ensemble (RRF gabungan vektor+BM25) menentukan mana yang menang
+        # slot terakhir -- dan sesekali itu berarti chunk dari dokumen
+        # LAIN (skor lebih lemah, tapi kebetulan lolos floor & lebih
+        # dulu di urutan ensemble) merebut slot dari baris regulasi
+        # ke-4 yang sebenarnya sama validnya, cuma peringkatnya lebih
+        # rendah.
+        #
+        # Percobaan pertama (menaikkan TOP_MATCHES) ditolak: itu juga
+        # menambah jumlah chunk yang di rata-rata jadi confidence score
+        # untuk pertanyaan SEDERHANA yang cuma punya 1 sumber kuat --
+        # persis masalah yang TOP_MATCHES=3 sendiri dibuat untuk
+        # menutup (2026-08-24). Menambah jumlah SLOT tidak menyelesaikan
+        # masalah PRIORITAS.
+        #
+        # Perbaikannya: dalam budget TOP_MATCHES yang SAMA, habiskan dulu
+        # kandidat dari dokumen anchor (semua lolos floor & gate yang
+        # sama seperti sebelumnya -- tidak ada penjagaan yang dilonggarkan)
+        # sebelum dokumen lain mendapat giliran. Untuk sintesis multi-
+        # dokumen yang genuinely butuh 2 dokumen (kasus FR-12,
+        # test_query_without_identifier_leaves_the_gate_inert), ini tidak
+        # berdampak -- tidak ada kandidat SATU DOKUMEN lain yang bersaing
+        # jadi tahap kedua tetap langsung mengisi slot yang tersisa.
+        #
+        # anchor_filename bisa None (chunk FAQ/chat_document tanpa nama
+        # file) -- di situ dua tahap ini digabung jadi satu (perilaku lama
+        # persis), karena "dokumen yang sama" tidak well-defined tanpa
+        # filename.
+        anchor_filename = docs[anchor].metadata.get("filename")
+        if anchor_filename is not None:
+            for i in range(len(docs)):
+                if len(best_indices) >= TOP_MATCHES:
+                    break
+                if docs[i].metadata.get("filename") == anchor_filename:
+                    _try_add(i)
+        for i in range(len(docs)):
+            if len(best_indices) >= TOP_MATCHES:
+                break
+            if anchor_filename is None or docs[i].metadata.get("filename") != anchor_filename:
+                _try_add(i)
 
     # Confidence dihitung dari chunk yang BENAR-BENAR dikutip (best_indices), bukan semua top_k
     scored = [distance_by_index[i] for i in sorted(best_indices) if i in distance_by_index]
@@ -626,6 +1244,8 @@ def retrieve_context(
         chunks.append({
             "text": d.page_content,
             "filename": meta.get("filename"),
+            "display_title": meta.get("display_title"),  # None kalau bukan KB atau admin tidak mengisi -- _build_source_citations() fallback ke filename
+            "doc_type": meta.get("doc_type"),
             "chunk_index": meta.get("chunk_index"),
             "page": meta.get("page"),
             "source_type": source_type,

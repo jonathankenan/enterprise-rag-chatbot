@@ -13,6 +13,7 @@ import { api } from "../../../../lib/api";
 import FileInput from "../../../components/FileInput";
 
 const ALL_DIVISI = ["WAS", "PLP", "PPT", "PP1", "PP2", "PP3", "PTI", "SDI", "OTP"];
+const KB_DOC_TYPES = ["SOP", "Pedoman", "Peraturan", "SK", "Memo", "Lainnya"]; // harus sama dengan KbDocType.ALL di backend/app/models.py
 
 export default function KbAdminPage() {
   const router = useRouter();
@@ -20,6 +21,8 @@ export default function KbAdminPage() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [docs, setDocs] = useState([]);
   const [uploadDivisi, setUploadDivisi] = useState("");
+  const [uploadTitle, setUploadTitle] = useState("");
+  const [uploadDocType, setUploadDocType] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
 
@@ -62,8 +65,13 @@ export default function KbAdminPage() {
     setUploading(true);
     setError("");
     try {
-      await api.uploadKbDocument(file, uploadDivisi || null);
+      await api.uploadKbDocument(file, uploadDivisi || null, {
+        displayTitle: uploadTitle.trim() || undefined,
+        docType: uploadDocType || undefined,
+      });
       await loadDocs();
+      setUploadTitle("");
+      setUploadDocType("");
     } catch (err) {
       setError(err.message || "Gagal mengunggah dokumen");
     } finally {
@@ -120,6 +128,24 @@ export default function KbAdminPage() {
             <b>{currentUser.divisi}</b>
           )}
         </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+          <input
+            type="text"
+            value={uploadTitle}
+            onChange={(e) => setUploadTitle(e.target.value)}
+            placeholder="Judul dokumen (opsional, ex. Pedoman Operasional PTI 2025)"
+            style={{ padding: 6, flex: "1 1 260px", minWidth: 220 }}
+          />
+          <select value={uploadDocType} onChange={(e) => setUploadDocType(e.target.value)} style={{ padding: 6 }}>
+            <option value="">Tipe dokumen (opsional)</option>
+            {KB_DOC_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </div>
+        <p style={{ fontSize: 12, color: "var(--idx-text-subtle)", marginTop: 0, marginBottom: 10 }}>
+          Dikosongkan berarti citation jawaban AI menampilkan nama file apa adanya. Diisi supaya tampil rapi, ex. "Pedoman Operasional PTI 2025 (SOP)" alih-alih "KB_PDF_PTI.pdf".
+        </p>
         <FileInput onChange={handleUpload} disabled={uploading} label="Pilih Berkas PDF" />
         {uploading && <p style={{ fontSize: 13, color: "var(--idx-text-muted)" }}>Mengekstrak & mengindeks...</p>}
       </div>
@@ -128,7 +154,8 @@ export default function KbAdminPage() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ background: "var(--idx-surface-alt)", textAlign: "left" }}>
-              <th style={{ padding: 10 }}>Nama File</th>
+              <th style={{ padding: 10 }}>Judul</th>
+              <th style={{ padding: 10 }}>Tipe</th>
               <th style={{ padding: 10 }}>Divisi</th>
               <th style={{ padding: 10 }}>Jumlah Chunk</th>
               <th style={{ padding: 10 }}>Diunggah</th>
@@ -143,7 +170,13 @@ export default function KbAdminPage() {
               const canDelete = isGlobalAdmin || d.divisi === currentUser.divisi;
               return (
                 <tr key={d.id} style={{ borderTop: "1px solid var(--idx-border-light)" }}>
-                  <td style={{ padding: 10 }}>{d.filename}</td>
+                  <td style={{ padding: 10 }}>
+                    {d.display_title || d.filename}
+                    {d.display_title && (
+                      <div style={{ fontSize: 11, color: "var(--idx-text-subtle)" }}>{d.filename}</div>
+                    )}
+                  </td>
+                  <td style={{ padding: 10 }}>{d.doc_type || "—"}</td>
                   <td style={{ padding: 10 }}>{d.divisi || "Company Wide"}</td>
                   <td style={{ padding: 10 }}>{d.chunk_count}</td>
                   <td style={{ padding: 10 }}>{new Date(d.created_at.endsWith("Z") ? d.created_at : d.created_at + "Z").toLocaleString()}</td>
@@ -161,7 +194,7 @@ export default function KbAdminPage() {
               );
             })}
             {docs.length === 0 && (
-              <tr><td colSpan={5} style={{ padding: 20, textAlign: "center", color: "var(--idx-text-subtle)" }}>Belum ada dokumen.</td></tr>
+              <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--idx-text-subtle)" }}>Belum ada dokumen.</td></tr>
             )}
           </tbody>
         </table>

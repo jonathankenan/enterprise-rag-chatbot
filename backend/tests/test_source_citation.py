@@ -4,10 +4,10 @@ Tests for SRS FCR-003 poin 12.a — source citation.
 Run from the repo root:      python backend/tests/test_source_citation.py
 (or with pytest:             pytest backend/tests/test_source_citation.py)
 
-No Postgres, no Ollama, no API keys, no Chroma required. The two units under
-test are pure functions, so we load them straight out of the source files by
-AST and exec them in a clean namespace — what runs here is verbatim the code
-that ships, not a copy that can drift.
+No Postgres, no Ollama, no API keys, and no Chroma data. The two units under
+test are pure functions: the tail of retrieve_context() is sliced out by AST
+and exec'd over a namespace seeded from the real module, so what runs here is
+verbatim the code that ships, not a copy that can drift.
 
   * _build_source_citations()  — backend/app/chat/routes.py
   * the top-match / confidence tail of retrieve_context()
@@ -48,6 +48,7 @@ def _assignment(source: str, name: str) -> str:
 # ---------------------------------------------------------------- load units
 _ns: dict = {}
 exec("from pydantic import BaseModel", _ns)
+exec(_segment(SCHEMAS_SRC, "CitationChunk"), _ns)
 exec(_segment(SCHEMAS_SRC, "SourceCitation"), _ns)
 exec(_segment(ROUTES_SRC, "_build_source_citations"), _ns)
 build_citations = _ns["_build_source_citations"]
@@ -56,28 +57,28 @@ _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
 _tail = "\n".join(l[4:] if l.startswith("    ") else l for l in _tail.split("\n"))
 _helper = _segment(VECTOR_SRC, "_distance_to_similarity_percent")
-# The tail gained a lexical gate on 2026-08-26 (_has_query_id/_is_toc), so it
-# now also closes over `re`, the tokenizer, the identifier regex and the two
-# identifier helpers. Loaded the same way as everything else here — from the
-# shipping source, not a copy.
-_lexical = "\n".join([
-    _segment(VECTOR_SRC, "custom_bm25_tokenizer"),
-    _assignment(VECTOR_SRC, "_IDENTIFIER_RE"),
-    _segment(VECTOR_SRC, "extract_query_identifiers"),
-    _segment(VECTOR_SRC, "text_mentions_identifier"),
-    # 2026-08-26: chunk juga ditandai id_in_example, jadi tail-nya sekarang
-    # ikut menutup identifier_only_in_example beserta pola wilayah contohnya.
-    _assignment(VECTOR_SRC, "_FENCED_RE"),
-    _assignment(VECTOR_SRC, "_INLINE_CODE_RE"),
-    _assignment(VECTOR_SRC, "_JSON_PAIR_RE"),
-    _segment(VECTOR_SRC, "_example_spans"),
-    _segment(VECTOR_SRC, "identifier_only_in_example"),
-    # 2026-08-31: chunk juga ditandai table_body_rows (tabel diindeks utuh DAN
-    # per baris, lihat chunk_text), jadi tail-nya ikut menutup penghitungnya.
-    _assignment(VECTOR_SRC, "_TABLE_ROW_RE"),
-    _assignment(VECTOR_SRC, "_TABLE_SEP_RE"),
-    _segment(VECTOR_SRC, "count_table_body_rows"),
-])
+# The tail closes over several module-level helpers (the lexical identifier
+# gate, the example detector, the table-row counter, the synthesis expansion).
+# Listing them by hand broke these tests four separate times: every new helper
+# `retrieve_context` touched had to be registered here or ~19 tests failed with
+# a bare NameError, which reads like broken logic rather than a stale list.
+#
+# So the namespace is seeded from the REAL module instead. Same property the
+# hand-written list was after -- what runs is the shipping code, not a copy --
+# but the dependency list now maintains itself.
+#
+# Importing app.rag.vectorstore is safe here: it touches no database and no
+# network at import time. It does load chromadb/langchain, which is why this
+# file no longer claims to need nothing installed.
+import app.rag.vectorstore as _vs
+
+
+# Chroma is never reached: _expand_table_rows() is the tail's only caller of
+# get_collection(), and an empty store makes it a no-op. These tests are about
+# citation selection; expansion has its own tests in test_table_chunking.py.
+class _EmptyCollection:
+    def get(self, *a, **k):
+        return {"documents": [], "metadatas": []}
 
 
 def _config_default(name: str):
@@ -102,9 +103,13 @@ def select(docs, top_k=10, search_query=""):
     its own, exactly as they did before the gate existed. Pass a real query to
     test the gate itself.
     """
-    ns = {"docs": list(docs), "top_k": top_k, "settings": _Settings,
-          "search_query": search_query, "re": __import__("re")}
-    exec(_lexical, ns)
+    ns = dict(vars(_vs))
+    # chat_id/collection_name adalah PARAMETER retrieve_context, bukan helper
+    # modul -- tail memakainya sejak ekspansi baris tabel ditambahkan.
+    ns.update({"docs": list(docs), "top_k": top_k, "settings": _Settings,
+               "chat_id": "test-chat", "collection_name": "kb_general",
+               "search_query": search_query,
+               "get_collection": lambda *a, **k: _EmptyCollection()})
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
     return ns["__r__"]
@@ -124,8 +129,24 @@ def dist_for(sim_pct: float) -> float:
 
 
 class Doc:
-    """Stand-in for a langchain Document."""
-    def __init__(self, text="...", **meta):
+    """
+    Stand-in for a langchain Document.
+
+    text defaults to a per-instance UNIQUE placeholder, not a fixed "...".
+    2026-09-01: citation selection started deduping candidates by page_content
+    shape (see _dedup_shape in retrieve_context) so two near-identical chunks
+    can't both win a citation slot. Every existing fixture that left text at
+    its old fixed default would collide under that check and look like
+    duplicates of each other -- not what those tests are about. A test that
+    genuinely wants duplicate/near-duplicate text still can, by passing
+    text= explicitly with the same string on two Docs.
+    """
+    _counter = 0
+
+    def __init__(self, text=None, **meta):
+        if text is None:
+            Doc._counter += 1
+            text = f"chunk placeholder #{Doc._counter}"
         self.page_content = text
         self.metadata = meta
 
@@ -214,6 +235,36 @@ def test_empty_context_yields_no_citations():
     assert build_citations([]) == []
 
 
+def test_citations_survive_the_json_round_trip_used_for_persistence():
+    """
+    2026-09-09: sitasi dulu cuma dikirim SEKALI di respons kirim-pesan, tidak
+    pernah disimpan -- refresh halaman atau login ulang (GET /messages)
+    kehilangan badge "Referensi" meski jawabannya masih ada. Fix-nya: simpan
+    di Message.sources lewat json.dumps([c.model_dump() for c in citations])
+    (chat/routes.py) dan baca balik lewat json.loads(...) + SourceCitation(**d)
+    (get_messages()). Test ini memastikan round-trip itu tidak diam-diam
+    membuang atau mengubah data -- yang paling rawan: CitationChunk bersarang
+    (list[CitationChunk] di dalam SourceCitation) dan nomor halaman.
+    """
+    import json
+    SourceCitation = _ns["SourceCitation"]
+
+    original = build_citations([
+        chunk(filename="A.pdf", page=1, text="isi halaman satu"),
+        chunk(filename="A.pdf", page=2, text="isi halaman dua"),
+        chunk(source_type="faq", text="jawaban FAQ"),
+    ])
+    assert len(original) == 2, "satu entri per dokumen A.pdf, satu entri FAQ"
+
+    dumped = json.dumps([c.model_dump() for c in original])
+    restored = [SourceCitation(**d) for d in json.loads(dumped)]
+
+    assert [c.model_dump() for c in restored] == [c.model_dump() for c in original]
+    assert restored[0].pages == [1, 2]
+    assert [ch.text for ch in restored[0].chunks] == ["isi halaman satu", "isi halaman dua"]
+    assert restored[1].source_type == "faq"
+
+
 def test_page_zero_is_recorded_not_skipped():
     """Guards `if page is not None` against regressing to `if page`."""
     got = build_citations([chunk(filename="Z.pdf", page=0)])
@@ -294,6 +345,72 @@ def test_close_scores_all_survive_the_floor():
     assert [c.filename for c in build_citations(chunks)] == ["A.pdf", "B.pdf", "C.pdf"]
 
 
+def test_dedup_shape_ignores_a_heading_shared_by_every_row():
+    """Regression: found live on 'daftar regulasi yang berlaku di perusahaan'.
+    Four DIFFERENT regulation rows (REG-01..04) each carry the same >120-char
+    intro heading ("### Ketentuan turunan mengenai sanksi administratif
+    dimuat pada REG-08...") because chunk_text() attaches it to every row of
+    the table it introduces. The old fingerprint was just the first 120 raw
+    characters, so all four rows collided on the heading alone and three of
+    four were discarded as "duplicates" of the first -- even though they are
+    four distinct regulations. Restricting the fingerprint to the table row
+    itself (same technique as _is_render_duplicate) tells them apart."""
+    heading = ("### Ketentuan turunan mengenai sanksi administratif dimuat pada "
+               "REG-08, yang masih dalam proses penyusunan lebih dari seratus dua "
+               "puluh karakter panjangnya supaya benar-benar menguji batas prefix.\n\n"
+               "|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n")
+    docs = [
+        Doc(heading + "|REG-01|POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi|Otoritas Jasa<br>Keuangan|1 Maret 2025|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(80)),
+        Doc(heading + "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|Bursa Efek<br>Indonesia|1 Januari 2024|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(78)),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert all(c["is_top_match"] for c in chunks), "two distinct regulations sharing an intro heading must both be citable"
+
+
+def test_same_document_candidates_fill_slots_before_a_weaker_cross_document_match():
+    """Regression for the residual gap flagged (but deliberately unpatched)
+    2026-09-01: with the dedup_shape fix above in place, four DIFFERENT
+    regulation rows in the SAME document are correctly told apart -- but
+    TOP_MATCHES=3 only has room for the anchor + 2 more, and a weaker chunk
+    from a DIFFERENT, wrong document could still win the last slot if it
+    happened to sit earlier in ensemble order than one of the other three
+    genuinely-relevant same-document rows. Live case: "daftar regulasi yang
+    berlaku di perusahaan" cited a PTI division chunk instead of a fourth
+    Company Wide regulation.
+
+    Fix: candidates from the anchor's own document are exhausted first,
+    within the same TOP_MATCHES budget -- not a bigger budget, just the
+    right priority inside it."""
+    heading = ("### Ketentuan turunan mengenai sanksi administratif dimuat pada "
+               "REG-08, yang masih dalam proses penyusunan lebih dari seratus dua "
+               "puluh karakter panjangnya supaya benar-benar menguji batas prefix.\n\n"
+               "|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n")
+    docs = [
+        # Ensemble order deliberately interleaves the wrong-document chunk
+        # BETWEEN two same-document rows, so a naive single-pass fill loop
+        # would admit it before reaching the third and fourth REG rows.
+        Doc(heading + "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|Bursa Efek<br>Indonesia|1 Januari 2024|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(82)),
+        Doc("Pedoman Operasional Divisi Pengembangan Teknologi Informasi — dokumen internal PTI, "
+            "tidak berlaku bagi divisi lain.",
+            filename="PTI_Pedoman.pdf", page=1, _distance=dist_for(75)),  # wrong document, weaker match
+        Doc(heading + "|REG-01|POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi|Otoritas Jasa<br>Keuangan|1 Maret 2025|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(80)),
+        Doc(heading + "|REG-04|POJK Nomor 11/POJK.03/2022 tentang Penyelenggaraan|Otoritas Jasa<br>Keuangan|1 Juli 2022|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(78)),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    cited = build_citations(chunks)
+    assert len(cited) == 1, "all citable rows are the same document, so they collapse into one citation entry"
+    assert cited[0].filename == "CompanyWide.pdf"
+    assert "PTI_Pedoman.pdf" not in [c["filename"] for c in chunks if c["is_top_match"]], \
+        "the weaker wrong-document chunk must not take a slot while a same-document row is still available"
+    assert sum(1 for c in chunks if c["filename"] == "CompanyWide.pdf" and c["is_top_match"]) == 3, \
+        "all three citation slots (anchor + 2) go to the same document before any other document gets a turn"
+
+
 def test_rank_two_just_inside_and_just_outside_the_gap():
     """The boundary itself, expressed relative to the configured gap."""
     inside = [Doc(filename="a.pdf", page=1, _distance=dist_for(95)),
@@ -354,6 +471,68 @@ def test_bm25_only_chunk_can_be_cited():
     cited = build_citations(chunks)[0].pages
     assert 7 in cited, "the chunk that actually answered must be citable"
     assert 8 not in cited, "still capped at TOP_MATCHES"
+
+
+# ------------------------------- BM25-only relevance gate (added 2026-09-01)
+# "sim is None -> cited unconditionally" above is safe for identifier queries
+# (_has_query_id already forces an exact code match). For a synthesis query
+# with no identifier, _has_query_id is inert, so that same rule used to let
+# ANY BM25 hit through -- BM25Retriever has no score floor of its own, it
+# just returns its top-k regardless of how weak the match is. Live case:
+# "daftar regulasi yang berlaku di perusahaan" cited a completely unrelated
+# "PTI-03 Daftar Risiko PTI" row that shared exactly one word ("daftar")
+# with the query, found only via the KB-divisi BM25 leg added the same day.
+
+def test_bm25_only_needs_relevance_when_query_has_no_identifier():
+    docs = [
+        Doc("REG-01 POJK tentang Keterbukaan Informasi Otoritas Jasa Keuangan",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(75)),
+        Doc("PTI-03 Daftar Risiko PTI Manajemen Risiko Triwulanan",  # BM25 only, shares just "daftar"
+            filename="PTI.pdf", page=1),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert not any(c["filename"] == "PTI.pdf" and c["is_top_match"] for c in chunks), \
+        "one incidental shared word must not be enough to earn a citation slot"
+
+
+def test_bm25_only_relevance_gate_ignores_stopwords():
+    """Regression: the first version of this gate counted 'yang' (a
+    connector, no topical meaning) as 1 of 4 'content' query words purely
+    because it happened to be 4+ letters -- 25% of the overlap budget for
+    free. A chunk whose only real overlap is a stopword must still fail."""
+    docs = [
+        Doc("REG-01 POJK tentang Keterbukaan Informasi Otoritas Jasa Keuangan",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(75)),
+        Doc("Dokumen ini mengatur tata kerja divisi yang sama sekali berbeda dari topik lain",
+            filename="PTI.pdf", page=1),  # BM25 only, overlaps only on "yang"
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert not any(c["filename"] == "PTI.pdf" and c["is_top_match"] for c in chunks)
+
+
+def test_bm25_only_relevance_gate_admits_real_overlap():
+    """Positive control -- a BM25-only chunk that genuinely shares most of
+    the query's content words must still be citable. The gate targets weak
+    incidental matches, not BM25-only citability itself."""
+    docs = [
+        Doc("Daftar regulasi perusahaan yang berlaku mencakup empat POJK dan Peraturan Bursa",
+            filename="CompanyWide.pdf", page=1),  # BM25 only, but genuinely on-topic
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    assert chunks[0]["is_top_match"]
+
+
+def test_bm25_only_relevance_gate_is_inert_for_identifier_queries():
+    """An identifier query is already guarded by _has_query_id, which is a
+    stricter, more precise check than generic word overlap -- the new gate
+    must not double-filter and must not reject a legitimate exact-string
+    BM25 match just because the surrounding prose shares few other words."""
+    docs = [
+        Doc("FR-01 spec — the actual answer, nothing else in common with the question",
+            filename="BRD.pdf", page=7),  # BM25 only
+    ]
+    chunks, _ = select(docs, search_query="Requirement FR-01 specifics")
+    assert chunks[0]["is_top_match"]
 
 
 def test_all_bm25_result_is_cited_but_scores_no_confidence():
@@ -456,14 +635,20 @@ def test_query_without_identifier_leaves_the_gate_inert():
 
 # ------------------------------------ identifier extraction (added 2026-08-26)
 _lex_ns: dict = {"re": __import__("re")}
-exec(_lexical, _lex_ns)
+_lex_ns.update(vars(_vs))
 extract_ids = _lex_ns["extract_query_identifiers"]
 
 
 def test_identifier_recognises_requirement_style_ids():
+    # 2026-08-31: identifiers come out CANONICAL (leading zeros stripped from
+    # each hyphenated digit group) -- "NFR-PERF-03" extracts as "nfr-perf-3",
+    # not "nfr-perf-03". See _canonical_identifier: a document writing
+    # "SOP-02" was unreachable by a query typed as "SOP-2", a more natural
+    # spelling than the padded form, so the two must compare equal. "2026" in
+    # DOC-FEE-2026 is untouched -- only touched when the leading digit is '0'.
     assert extract_ids("Requirement FR-14 specifics") == {"fr-14"}
-    assert extract_ids("Priority of NFR-PERF-03") == {"nfr-perf-03"}
-    assert extract_ids("mitigation for RSK-02") == {"rsk-02"}
+    assert extract_ids("Priority of NFR-PERF-03") == {"nfr-perf-3"}
+    assert extract_ids("mitigation for RSK-02") == {"rsk-2"}
     assert extract_ids("update frequency of DOC-FEE-2026") == {"doc-fee-2026"}
 
 
@@ -492,6 +677,163 @@ def test_id_match_is_true_for_all_when_query_has_no_identifier():
             Doc("unrelated text", filename="Fees.pdf", page=3, _distance=dist_for(80))]
     chunks, _ = select(docs, search_query="overdraft fee policy summary")
     assert all(c["id_match"] for c in chunks)
+
+
+# ------------------------------------------- render duplicates (added 2026-09-01)
+# Found live via the citation-content panel on KB_PTI_Pedoman_Operasional.pdf,
+# page 1: pymupdf4llm renders the SOP table TWICE on the same page -- once as
+# a proper `|SOP-01|...|` pipe table (correct), once as flowing prose where
+# the wrapped second line of "Judul Prosedur" ("Produksi") lands AFTER the
+# whole "Ketentuan" cell instead of right after "Penanganan Insiden". Reading
+# order got scrambled, not the words themselves. Confirmed with a real
+# extraction run against the fixture -- `table_strategy` tuning made it worse
+# (`text` strategy shreds the whole page into a bogus per-character table),
+# so the fix lives here: never let the scrambled shape win a citation slot
+# when the well-formed table shape of the same (filename, page) is also a
+# candidate. The existing _dedup_shape() (exact 120-char prefix) does not
+# catch this -- the scrambled version's prefix differs because its word
+# ORDER differs, not just its formatting.
+
+def test_scrambled_table_prose_never_wins_over_the_real_table():
+    scrambled = ("SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                 "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                 "maksimal 3 hari kerja.\n\nSOP-02 Permintaan Akses Permintaan akses ke "
+                 "Core Trading Engine memerlukan persetujuan dua\nSistem tingkat dan "
+                 "otomatis dicabut setelah 90 hari tanpa aktivitas.")
+    real_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                  "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                  "diserahkan maksimal 3 hari kerja.|")
+    docs = [
+        Doc(scrambled, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(real_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="jelaskan SOP-01")
+    cited_texts = [c["text"] for c in chunks if c["is_top_match"]]
+    assert real_table in cited_texts
+    assert scrambled not in cited_texts, "the scrambled render must never be the one shown to the user"
+
+
+def test_render_duplicate_suppression_needs_same_page():
+    """Same scrambled/table pair, but on DIFFERENT pages of the same file --
+    that is two legitimately separate citation locations, not a render
+    duplicate, and must not be filtered."""
+    scrambled = ("SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                 "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                 "maksimal 3 hari kerja.")
+    real_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                  "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                  "diserahkan maksimal 3 hari kerja.|")
+    docs = [
+        Doc(scrambled, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(real_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=9, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="jelaskan SOP-01")
+    assert all(c["is_top_match"] for c in chunks), "different pages are never render duplicates"
+
+
+def test_render_duplicate_suppression_needs_real_word_overlap():
+    """Two unrelated table rows on the same page must not be treated as
+    render duplicates just because one has pipes and the other does not."""
+    unrelated_prose = "Batas persetujuan anggaran Kepala Divisi Rp250.000.000 wajib persetujuan Direksi."
+    unrelated_table = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                       "|SOP-03|Rilis ke Produksi|Rilis hanya boleh dijalankan Selasa dan Kamis.|")
+    docs = [
+        Doc(unrelated_prose, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(90)),
+        Doc(unrelated_table, filename="KB_PTI_Pedoman_Operasional.pdf", page=1, _distance=dist_for(88)),
+    ]
+    chunks, _ = select(docs, search_query="anggaran dan rilis produksi")
+    assert all(c["is_top_match"] for c in chunks), "genuinely different content must not be suppressed"
+
+
+def test_render_duplicate_detection_ignores_a_heading_that_only_the_table_side_has():
+    """Regression: caught by re-running this exact pair straight off the real
+    fixture (KB_PTI_Pedoman_Operasional.pdf, page 1). The clean render is
+    preceded by a section heading ("### Ketentuan pengadaan...") that the
+    scrambled render never has -- that heading alone dropped the word-overlap
+    ratio to 65%, under the 0.75 threshold, so the scrambled duplicate still
+    won a citation slot alongside the clean one. Comparing only the TABLE
+    ROW lines (not the heading) brings it to 81%."""
+    real_table_with_heading = (
+        "### Ketentuan pengadaan lintas divisi mengacu pada PTI-09, yang belum "
+        "diterbitkan pada saat dokumen ini disusun.\n\n"
+        "|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+        "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+        "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+        "diserahkan maksimal 3 hari kerja.|")
+    real_scrambled_full_page = (
+        "SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+        "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+        "maksimal 3 hari kerja.\n\nSOP-02 Permintaan Akses Permintaan akses ke "
+        "Core Trading Engine memerlukan persetujuan dua\nSistem tingkat dan "
+        "otomatis dicabut setelah 90 hari tanpa aktivitas.\n\nSOP-03 Rilis ke "
+        "Produksi Rilis hanya boleh dijalankan Selasa dan Kamis pukul "
+        "19.00-22.00 WIB, di\nluar itu wajib emergency change request.\n\n"
+        "## 3. Inventaris Dokumen Internal\n\n**ID** **Nama Dokumen** "
+        "**Pemilik** **Frekuensi**\n**Dokumen** **Pembaruan**")
+    assert _vs._is_render_duplicate(real_table_with_heading, real_scrambled_full_page)
+
+
+# --------------------------------------- reanchor_citable_chunks (added 2026-09-01)
+# chat/routes.py narrows context_chunks to id_chunks for identifier queries
+# (only chunks that actually mention the identifier survive, row-preferred).
+# is_top_match on each dict was computed by retrieve_context() BEFORE that
+# narrowing, so it can point at a chunk that just got dropped, or -- the live
+# case this covers -- at a same-shaped chunk for a DIFFERENT code that won on
+# raw similarity ("jelaskan SOP-01" citing the SOP-02 row).
+
+def test_reanchors_when_the_original_top_match_was_dropped():
+    """The chunk retrieve_context() marked as the anchor didn't mention this
+    identifier at all (a same-shaped row for a different code) and was
+    filtered out of id_chunks before reanchor runs. The real match, further
+    down the id-narrowed list, must become citable instead of nothing at
+    all being cited."""
+    wrong_code_row = {"text": "|SOP-02|Permintaan Akses|...|", "filename": "f.pdf",
+                       "page": 1, "source_type": "kb_divisi", "is_top_match": True}
+    right_code_row = {"text": "|SOP-01|Penanganan Insiden|...|", "filename": "f.pdf",
+                      "page": 1, "source_type": "kb_divisi", "is_top_match": False}
+    id_chunks = [right_code_row]  # wrong_code_row already dropped by the id_match filter upstream
+    _vs.reanchor_citable_chunks(id_chunks)
+    assert right_code_row["is_top_match"] is True
+
+
+def test_reanchor_keeps_a_survivor_that_was_already_top_match():
+    """If the original selection happens to still be valid after narrowing,
+    reanchor should not second-guess it."""
+    a = {"text": "a", "is_top_match": True}
+    b = {"text": "b", "is_top_match": False}
+    chunks = [a, b]
+    _vs.reanchor_citable_chunks(chunks)
+    assert a["is_top_match"] is True
+    assert b["is_top_match"] is False
+
+
+def test_reanchor_also_suppresses_render_duplicates_among_survivors():
+    """Both the scrambled prose and the clean table row mention SOP-01 (both
+    pass the id_match filter upstream), so both can land in id_chunks
+    together -- reanchor must still never let the scrambled one be citable
+    alongside the clean one, same rule as retrieve_context()'s own dedup."""
+    scrambled = {"text": "SOP-01 Penanganan Insiden Insiden severity-1 wajib dieskalasi ke Kepala "
+                          "Divisi dalam 15 menit dan root\nProduksi cause analysis diserahkan "
+                          "maksimal 3 hari kerja.",
+                 "filename": "f.pdf", "page": 1, "is_top_match": False}
+    clean = {"text": "|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                     "|SOP-01|Penanganan Insiden<br>Produksi|Insiden severity-1 wajib "
+                     "dieskalasi ke Kepala Divisi dalam 15 menit dan root<br>cause analysis "
+                     "diserahkan maksimal 3 hari kerja.|",
+             "filename": "f.pdf", "page": 1, "is_top_match": False}
+    id_chunks = [clean, scrambled]  # row-preference already put the clean one first
+    _vs.reanchor_citable_chunks(id_chunks)
+    assert clean["is_top_match"] is True
+    assert scrambled["is_top_match"] is False
+
+
+def test_reanchor_respects_the_limit():
+    chunks = [{"text": str(i), "is_top_match": False} for i in range(5)]
+    _vs.reanchor_citable_chunks(chunks, limit=2)
+    assert sum(c["is_top_match"] for c in chunks) == 2
+    assert [c["is_top_match"] for c in chunks[:2]] == [True, True], "falls back to list order, table-row-preference already applied by the caller"
 
 
 # ---------------------------------------------------------------- standalone

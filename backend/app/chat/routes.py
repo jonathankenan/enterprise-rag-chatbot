@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Chat, Message, SenderType, User, SystemSettings, Role
-from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation
+from app.models import Chat, Message, SenderType, User, SystemSettings, Role, Divisi
+from app.schemas import ChatCreate, ChatResponse, ChatRenameRequest, MessageCreate, MessageResponse, ChatReplyResponse, SourceCitation, CitationChunk
 from app.auth.utils import get_current_user
 from app.guardrail.filters import is_prompt_blocked, get_blocked_category
 from app.guardrail.prompt_injection import (
@@ -18,7 +18,7 @@ from app.guardrail.prompt_injection import (
 from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
-from app.rag.vectorstore import retrieve_context
+from app.rag.vectorstore import retrieve_context, reanchor_citable_chunks
 from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
 from app.llm.router import route_and_generate, LLMResult
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
@@ -109,7 +109,12 @@ def get_messages(chat_id: str, db: Session = Depends(get_db), user: User = Depen
     return [
         MessageResponse(
             id=m.id, sender=m.sender, content=_display_content(m),
-            llm_used=m.llm_used, confidence_score=m.confidence_score, created_at=m.created_at,
+            llm_used=m.llm_used, confidence_score=m.confidence_score,
+            # m.sources None utk pesan lama (sebelum kolom ini ada) atau
+            # pesan dari user (cuma pesan assistant yang pernah diisi) --
+            # perlakukan sebagai "tidak ada sitasi", bukan error.
+            sources=json.loads(m.sources) if m.sources else [],
+            created_at=m.created_at,
         )
         for m in chat.messages
     ]
@@ -162,10 +167,14 @@ def rename_chat(
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
     """SRS poin 12.a — dedup context_chunks jadi satu entri per dokumen/FAQ unik, kumpulkan semua nomor halaman jadi label "file.pdf (hal. 2, 5)"."""
     order: list[str] = []          # key insertion order, buat urutan citation stabil
-    labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file
+    labels: dict[str, str] = {}    # key -> "FAQ Helpdesk" atau nama file/judul
     filenames: dict[str, str | None] = {}
+    display_titles: dict[str, str | None] = {}
+    doc_types: dict[str, str | None] = {}
     source_types: dict[str, str] = {}
     pages: dict[str, set[int]] = {}
+    chunk_texts: dict[str, list[tuple]] = {}   # key -> [(page, text)], urutan kemunculan
+    chunk_seen_shapes: dict[str, set[str]] = {}  # dedup potongan yang sama dirender dua bentuk (lihat catatan _dedup_shape di vectorstore.py)
 
     for chunk in context_chunks:
         # cuma chunk is_top_match (3 similarity terbaik) yang layak jadi sumber -- default True supaya get_all_session_chunks() ("ringkas semua") tetap kutip semuanya
@@ -176,22 +185,48 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         if source_type == "faq":
             key = "faq"
             filename = None
+            display_title = None
+            doc_type = None
             label = "FAQ Helpdesk"
         else:
             filename = chunk.get("filename") or "Dokumen tanpa nama"
+            # 2026-09-01: judul yang diisi admin saat upload dipakai sebagai
+            # label kalau ada -- filename mentah (ex. "KB_PDF_PTI.pdf") cuma
+            # fallback utk dokumen lama/yang tidak diisi. doc_type ikut
+            # ditempel di label kalau ada, biar "Pedoman Operasional PTI
+            # 2025 (SOP)" alih-alih nama file teknis.
+            display_title = chunk.get("display_title")
+            doc_type = chunk.get("doc_type")
             key = f"{source_type}:{filename}"  # source_type ikut key -- filename sama tapi source_type beda tetap dianggap 2 sumber
-            label = filename
+            label = display_title or filename
+            if doc_type:
+                label = f"{label} ({doc_type})"
 
         if key not in labels:
             order.append(key)
             labels[key] = label
             filenames[key] = filename
+            display_titles[key] = display_title
+            doc_types[key] = doc_type
             source_types[key] = source_type
             pages[key] = set()
+            chunk_texts[key] = []
+            chunk_seen_shapes[key] = set()
 
         page = chunk.get("page")
         if page is not None:
             pages[key].add(page)
+
+        # Cuplikan isi yang benar-benar dikutip -- dasar citation yang bisa
+        # "dipencet" tanpa endpoint baru: teksnya sudah lolos filter divisi
+        # di retrieve_context(), tinggal dikirim apa adanya. Shape (halaman +
+        # 80 karakter pertama) dipakai membuang duplikat render (lihat
+        # _dedup_shape di vectorstore.py) supaya user tidak melihat "isi
+        # yang sama" dua kali di panel yang sama.
+        shape = f"{page}|{' '.join(chunk.get('text', '').split())[:80].lower()}"
+        if shape not in chunk_seen_shapes[key]:
+            chunk_seen_shapes[key].add(shape)
+            chunk_texts[key].append((page, chunk.get("text", "")))
 
     citations = []
     for key in order:
@@ -199,8 +234,11 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         label = labels[key]
         if sorted_pages:
             label = f"{label} (hal. {', '.join(str(p) for p in sorted_pages)})"
+        ordered_chunks = sorted(chunk_texts[key], key=lambda pt: (pt[0] is None, pt[0]))
         citations.append(SourceCitation(
-            label=label, filename=filenames[key], source_type=source_types[key], pages=sorted_pages,
+            label=label, filename=filenames[key], display_title=display_titles[key],
+            doc_type=doc_types[key], source_type=source_types[key], pages=sorted_pages,
+            chunks=[CitationChunk(page=p, text=t) for p, t in ordered_chunks],
         ))
     return citations
 
@@ -258,7 +296,7 @@ async def send_message(
         db.add(user_msg)
         ai_msg = Message(
             chat_id=chat.id, sender=SenderType.assistant,
-            content=GUARDRAIL_REFUSAL_MESSAGE, llm_used="blocked",
+            content=GUARDRAIL_REFUSAL_MESSAGE, llm_used="blocked", sources="[]",
         )
         db.add(ai_msg)
         db.commit()
@@ -296,6 +334,13 @@ async def send_message(
     # Diisi kalau identifier yang ditanya ADA di korpus, tapi setiap
     # kemunculannya cuma di dalam cuplikan contoh — lihat penjagaan di bawah.
     identifier_in_example: list[str] | None = None
+    # Diisi kalau query menyebut divisi yang BUKAN divisi user (dan bukan
+    # Company Wide) — lihat penjagaan divisi di bawah.
+    divisi_asing: list[str] | None = None
+    # True kalau pertanyaannya menyebut identifier item korpus (SOP-02,
+    # FR-01, dst.). Pertanyaan tentang item yang TERKATALOG tidak pernah
+    # boleh dijawab dari pengetahuan umum — lihat build_prompt().
+    answer_must_be_grounded = False
 
     intent = classify_intent(payload.content)
     if intent in SKIP_RETRIEVAL_INTENTS:
@@ -328,6 +373,27 @@ async def send_message(
             )
             session_has_document = has_session_document(chat_id=chat.id)
 
+            # ── 2026-08-31: penjagaan divisi asing, DETERMINISTIK ────────────
+            # Filter divisi di KbDivisiRetriever sudah benar -- dokumen SDI
+            # tidak pernah sampai ke prompt kalau penanya PTI. Tapi baris
+            # tabel yang lolos filter tidak menyebut nama divisinya sendiri
+            # ("Batas persetujuan anggaran Kepala Divisi | Rp250.000.000",
+            # tanpa kata "PTI" di mana pun), dan build_prompt() cuma
+            # mengirim teks chunk, tidak pernah filename/divisi.
+            #
+            # Akibatnya: ditanya "berapa batas anggaran divisi SDI" oleh user
+            # PTI, satu-satunya angka di konteks (milik PTI, karena SDI
+            # memang tidak pernah terambil) ditempelkan ke nama SDI. BUKAN
+            # kebocoran data -- isi SDI yang sebenarnya tidak pernah bocor --
+            # tapi pelabelan keliru yang meyakinkan dengan angka spesifik.
+            #
+            # Diperiksa DI SINI, sebelum penjagaan identifier: kalau divisi
+            # yang ditanya memang tidak bisa diakses, tidak ada gunanya
+            # memeriksa identifier di dalamnya sama sekali.
+            from app.rag.vectorstore import extract_query_divisi
+            divisi_disebut = extract_query_divisi(search_query, set(Divisi.ALL))
+            divisi_asing = sorted(divisi_disebut - {user.divisi} if user.divisi else divisi_disebut)
+
             # ── 2026-08-26: penjagaan identifier, DETERMINISTIK ──────────────
             # Dua kegagalan nyata yang tidak bisa ditutup instruksi prompt,
             # sudah dicoba dua kali (instruksi 6, lalu GROUNDING_RULE di ujung
@@ -347,58 +413,102 @@ async def send_message(
             # bahwa item yang ditanya benar-benar ada di konteks. Itu
             # pemeriksaan yang bisa dilakukan kode secara pasti, jadi tidak
             # perlu dititipkan ke model 7B.
-            query_ids = extract_query_identifiers(search_query)
-            if query_ids:
-                id_chunks = [c for c in context_chunks if c.get("id_match")]
-                if not id_chunks:
-                    # Tidak satu pun chunk menyebut identifier ini. Bukan
-                    # "retrieval-nya lemah" -- korpusnya memang tidak memuatnya.
-                    identifier_missing = sorted(i.upper() for i in query_ids)
-                else:
-                    # Kunci konteks ke chunk yang benar-benar membahas item
-                    # yang ditanya. Tabel tetangga tidak lagi ikut terkirim,
-                    # jadi tidak ada nilai field yang bisa disalin.
-                    #
-                    # Kasus sintesis multi-dokumen (FR-12) tidak dirugikan:
-                    # pertanyaan sintesis tidak menyebut identifier tunggal
-                    # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
-                    # kosong dan cabang ini tidak aktif sama sekali.
-                    # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
-                    # per baris. Karena query ini menyebut identifier, yang
-                    # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
-                    # membawa serta baris tetangga yang nilainya bisa disalin,
-                    # dan itu justru bug yang sedang ditutup.
-                    #
-                    # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
-                    # naratif tentang item yang sama tetap berguna.
-                    baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
-                    if baris:
-                        id_chunks = baris + [
-                            c for c in id_chunks if not c.get("table_body_rows")
-                        ]
+            # Identifier di dalam divisi tidak berarti apa pun kalau
+            # divisinya sendiri tidak bisa diakses -- lihat penjagaan di
+            # atas. Diperiksa cuma kalau divisi_asing kosong.
+            if not divisi_asing:
+                query_ids = extract_query_identifiers(search_query)
+                if query_ids:
+                    # Pertanyaan menyebut item terkatalog -> jawabannya WAJIB
+                    # bersumber dari konteks. Tanpa ini instruksi prompt yang
+                    # aktif justru menyuruh model mengisi dari pengetahuan
+                    # umum, dan satu kalimat SOP-02 yang asli dikembangkan
+                    # jadi SOP karangan lengkap. Lihat build_prompt().
+                    answer_must_be_grounded = True
 
-                    context_chunks = id_chunks
+                    id_chunks = [c for c in context_chunks if c.get("id_match")]
+                    if not id_chunks:
+                        # Tidak satu pun chunk menyebut identifier ini. Bukan
+                        # "retrieval-nya lemah" -- korpusnya memang tidak memuatnya.
+                        identifier_missing = sorted(i.upper() for i in query_ids)
+                    else:
+                        # Kunci konteks ke chunk yang benar-benar membahas item
+                        # yang ditanya. Tabel tetangga tidak lagi ikut terkirim,
+                        # jadi tidak ada nilai field yang bisa disalin.
+                        #
+                        # Kasus sintesis multi-dokumen (FR-12) tidak dirugikan:
+                        # pertanyaan sintesis tidak menyebut identifier tunggal
+                        # ("bandingkan benefit Platinum dan Gold"), jadi query_ids
+                        # kosong dan cabang ini tidak aktif sama sekali.
+                        # Tabel diindeks dalam DUA bentuk (chunk_text): utuh dan
+                        # per baris. Karena query ini menyebut identifier, yang
+                        # dibutuhkan cuma barisnya sendiri — chunk tabel utuh
+                        # membawa serta baris tetangga yang nilainya bisa disalin,
+                        # dan itu justru bug yang sedang ditutup.
+                        #
+                        # Prosa (0 baris tabel) tetap dipertahankan: penjelasan
+                        # naratif tentang item yang sama tetap berguna.
+                        baris = [c for c in id_chunks if c.get("table_body_rows") == 1]
+                        if baris:
+                            id_chunks = baris + [
+                                c for c in id_chunks if not c.get("table_body_rows")
+                            ]
 
-                    # ── identifier yang cuma hidup di dalam contoh ──────────
-                    # Kegagalan ketiga, beda dari dua di atas. Ditanya
-                    # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
-                    # dokumen sungguhan, lengkap dengan "skor 0.892
-                    # menunjukkan kesamaan tinggi antara kueri Anda dan
-                    # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
-                    # tempelan di dalam CONTOH respons API (hal. 9), dan
-                    # 0.892 angka mati yang diketik penulis dokumen.
-                    #
-                    # Saringan id_match di atas tidak bisa menangkapnya:
-                    # dia menanyakan "apakah string ini muncul", dan memang
-                    # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
-                    #
-                    # Ini terjadi di Groq — model komersial yang jauh lebih
-                    # besar dari on-prem mana pun yang kita pakai — jadi
-                    # menaikkan ukuran model bukan jawabannya.
-                    if all(c.get("id_in_example") for c in id_chunks):
-                        identifier_in_example = sorted(i.upper() for i in query_ids)
+                        context_chunks = id_chunks
 
-    if identifier_missing:
+                        # 2026-09-01: is_top_match tiap chunk dihitung
+                        # retrieve_context() SEBELUM penyempitan id_chunks di
+                        # atas -- bisa menunjuk chunk yang barusan dibuang
+                        # (bukan identifier ini) atau chunk berbentuk serupa
+                        # tapi kode berbeda. Sitasi harus dipilih ulang dari
+                        # id_chunks yang sudah diurutkan (baris presisi
+                        # dulu), bukan dari seleksi lama. Lihat
+                        # reanchor_citable_chunks().
+                        reanchor_citable_chunks(context_chunks)
+
+                        # ── identifier yang cuma hidup di dalam contoh ──────────
+                        # Kegagalan ketiga, beda dari dua di atas. Ditanya
+                        # "jelaskan DOC-FEE-2026", sistem menjawab seolah itu
+                        # dokumen sungguhan, lengkap dengan "skor 0.892
+                        # menunjukkan kesamaan tinggi antara kueri Anda dan
+                        # dokumen ini". DOC-FEE-2026 sebenarnya cuma nama
+                        # tempelan di dalam CONTOH respons API (hal. 9), dan
+                        # 0.892 angka mati yang diketik penulis dokumen.
+                        #
+                        # Saringan id_match di atas tidak bisa menangkapnya:
+                        # dia menanyakan "apakah string ini muncul", dan memang
+                        # muncul. Yang kurang adalah MUNCUL SEBAGAI APA.
+                        #
+                        # Ini terjadi di Groq — model komersial yang jauh lebih
+                        # besar dari on-prem mana pun yang kita pakai — jadi
+                        # menaikkan ukuran model bukan jawabannya.
+                        if all(c.get("id_in_example") for c in id_chunks):
+                            identifier_in_example = sorted(i.upper() for i in query_ids)
+
+    if divisi_asing:
+        # Jawab tanpa memanggil LLM sama sekali, dan sebelum penjagaan
+        # identifier — kalau divisinya sendiri tidak bisa diakses, tidak ada
+        # gunanya memeriksa identifier di dalamnya. context_chunks dikosongkan
+        # meski isinya (kalau ada) semuanya milik divisi user sendiri —
+        # bukan itu yang ditanyakan, jadi mengutipnya cuma menyesatkan.
+        context_chunks = []
+        retrieval_confidence = None
+        daftar = ", ".join(divisi_asing)
+        milik = f"divisi {user.divisi} dan Company Wide" if user.divisi else "Company Wide"
+        result = LLMResult(
+            reply=(
+                f"Saya hanya bisa mengakses informasi {milik}. Divisi {daftar} "
+                "tidak dapat diakses dari akun ini, jadi saya tidak bisa menjawab "
+                "pertanyaan itu. Hubungi admin divisi terkait atau IT admin kalau "
+                "Anda memang berwenang melihatnya."
+            ),
+            llm_used="guardrail (divisi tidak dapat diakses)",
+            is_sensitive=False,
+            confidence_score=None,
+            pii_detected=bool(user_pii_entities),
+            pii_entities=user_pii_entities or [],
+        )
+    elif identifier_missing:
         # Jawab tanpa memanggil LLM sama sekali. Menyerahkan penolakan ini ke
         # model justru sudah terbukti gagal dua kali, dan tidak ada yang perlu
         # digenerasi: pertanyaannya menyebut item yang tidak ada di dokumen.
@@ -428,6 +538,7 @@ async def send_message(
                 session_has_document=session_has_document,
                 retrieval_confidence=retrieval_confidence,
                 identifier_in_example=identifier_in_example,
+                answer_must_be_grounded=answer_must_be_grounded,
             )
         except CommercialLLMError as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -468,6 +579,7 @@ async def send_message(
         )
 
     stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)  # teks baru hasil generate, deteksi PII-nya dihitung sendiri di sini
+    citations = _build_source_citations(context_chunks)
 
     ai_msg = Message(
         chat_id=chat.id,
@@ -476,6 +588,11 @@ async def send_message(
         pii_mapping=ai_pii_mapping,
         llm_used=result.llm_used,
         confidence_score=result.confidence_score,
+        # 2026-09-09: simpan sitasi di baris pesannya sendiri -- sebelum
+        # ini cuma dikirim sekali di respons ini, jadi refresh halaman atau
+        # login ulang (yang cuma memuat lewat GET /messages) kehilangan
+        # badge "Referensi"-nya meski jawabannya masih ada.
+        sources=json.dumps([c.model_dump() for c in citations]),
     )
     db.add(ai_msg)
     db.commit()
@@ -502,7 +619,7 @@ async def send_message(
         is_sensitive=result.is_sensitive,
         confidence_score=result.confidence_score,
         pii_detected=result.pii_detected,
-        sources=_build_source_citations(context_chunks),
+        sources=citations,
         new_title=new_title,
         message_id=ai_msg.id,
         escalation_offered=escalation_offered,

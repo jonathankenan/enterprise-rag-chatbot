@@ -77,6 +77,18 @@ class Divisi:
     ALL = (WAS, PLP, PPT, PP1, PP2, PP3, PTI, SDI, OTP)
 
 
+class KbDocType:
+    """Daftar tertutup, bukan teks bebas -- supaya konsisten dan bisa dipakai memfilter nanti. "Lainnya" jadi fallback yang eksplisit, bukan default diam-diam."""
+    SOP = "SOP"
+    PEDOMAN = "Pedoman"
+    PERATURAN = "Peraturan"
+    SK = "SK"
+    MEMO = "Memo"
+    LAINNYA = "Lainnya"
+
+    ALL = (SOP, PEDOMAN, PERATURAN, SK, MEMO, LAINNYA)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -126,6 +138,14 @@ class Message(Base):
     pii_mapping = Column(EncryptedText, nullable=True)  # placeholder -> nilai asli, JSON; wajib EncryptedText juga (nilai PII asli)
     llm_used = Column(String, nullable=True)      # "on-prem" | "commercial"
     confidence_score = Column(Integer, nullable=True)
+    # 2026-09-09: sitasi sumber (list[SourceCitation], lihat schemas.py),
+    # disimpan sebagai JSON mentah -- BUKAN EncryptedText, isinya cuma nama
+    # file/nomor halaman/cuplikan yang sudah lolos filter divisi, bukan PII.
+    # Sebelum ini sources cuma dikirim sekali di respons kirim-pesan
+    # (ChatReplyResponse), tidak pernah disimpan -- reload halaman atau
+    # login ulang manggil GET /messages, yang tidak pernah tahu sources itu
+    # ada, jadi badge "Referensi" hilang padahal jawabannya masih ada.
+    sources = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     chat = relationship("Chat", back_populates="messages")
@@ -236,6 +256,12 @@ class KbDocument(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     divisi = Column(String, nullable=True)  # None = Company Wide
     filename = Column(String, nullable=False)
+    # 2026-09-01: metadata yang diisi admin saat upload, dipisah dari filename
+    # mentah supaya citation di jawaban AI tidak menampilkan nama file teknis
+    # apa adanya (ex. "KB_PDF_PTI.pdf"). Keduanya nullable -- dokumen lama
+    # tanpa metadata ini tetap fallback ke filename, lihat _build_source_citations().
+    display_title = Column(String, nullable=True)
+    doc_type = Column(String, nullable=True)  # salah satu KbDocType.ALL, atau None kalau admin tidak mengisi
     chunk_count = Column(Integer, nullable=False, default=0)
     uploaded_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

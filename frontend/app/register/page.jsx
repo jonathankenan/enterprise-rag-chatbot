@@ -7,18 +7,14 @@ import { api } from "../../lib/api";
 import { getPasswordError } from "../../lib/validation";
 import { AuthShell, AuthTitle, AuthField, AuthPasswordField, AuthSubmit } from "../components/AuthLayout";
 import { IconMail, IconLock } from "../components/Icons";
+import { ROLE_LABELS } from "../../lib/roles";
 
 // Semua role KECUALI IT Admin — samakan dengan Role.SELF_REGISTERABLE di
 // backend/app/models.py, yang juga menolak it_admin kalau dipaksa lewat API.
 const SELF_ROLES = [
-  { value: "designer", label: "Designer" },
-  { value: "mlops", label: "MLOps" },
-  { value: "consumer_internal", label: "Consumer Internal BEI" },
-  { value: "consumer_eipo", label: "Consumer Internet (E-IPO)" },
-  { value: "business_user_designer", label: "Business User Designer" },
-  { value: "compliance", label: "Compliance User" },
-  { value: "auditor", label: "Auditor View" },
-];
+  "designer", "mlops", "consumer_internal", "consumer_eipo",
+  "business_user_designer", "compliance", "auditor",
+].map((value) => ({ value, label: ROLE_LABELS[value] }));
 
 // Samakan dengan Divisi.ALL di backend/app/models.py
 const DIVISI = ["WAS", "PLP", "PPT", "PP1", "PP2", "PP3", "PTI", "SDI", "OTP"];

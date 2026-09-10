@@ -9,6 +9,7 @@ import { api } from "../../lib/api";
 import IdxLogo from "./IdxLogo";
 import { IconNewChat, IconAudit, IconUsers, IconBook, IconHeadset, IconArchive, IconChats, IconPanel } from "./Icons";
 import { useShell } from "./ShellContext";
+import { roleLabel } from "../../lib/roles";
 import { useDialog } from "./Dialog";
 
 const AUDIT_VIEWERS = ["it_admin", "compliance", "auditor"]; // samakan dgn Role.AUDIT_VIEWERS di backend
@@ -357,7 +358,7 @@ export default function Sidebar() {
               {currentUser?.full_name || currentUser?.email || "—"}
             </span>
             <span style={{ display: "block", fontSize: 11.5, color: "var(--idx-text-subtle)" }}>
-              {currentUser?.role}{currentUser?.divisi ? ` · ${currentUser.divisi}` : ""}
+              {roleLabel(currentUser?.role)}{currentUser?.divisi ? ` · ${currentUser.divisi}` : ""}
             </span>
           </span>}
         </button>
