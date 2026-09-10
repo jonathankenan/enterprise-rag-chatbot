@@ -806,6 +806,77 @@ def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> b
     return len(smaller & larger) / len(smaller) >= threshold
 
 
+# Kata sambung/depan yang tidak membawa makna topikal. Daftar ini sengaja
+# SEMPIT, bukan daftar stopword NLP umum -- kata seperti "wajib", "tidak",
+# "harus" tetap dihitung karena membawa makna di teks kepatuhan. Diukur:
+# tanpa daftar ini, "yang" (kata sambung, 4 huruf, lolos filter panjang)
+# menyumbang 25% kuota overlap sebuah query 4 kata tanpa makna topikal apa pun.
+#
+# Dihoist ke level modul 2026-09-10: sebelumnya lokal di retrieve_context()
+# untuk saringan BM25-only, sekarang dipakai juga oleh answer_uses_context()
+# yang dipanggil chat/routes.py SETELAH jawaban selesai dibuat.
+_QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
+                    "oleh", "agar", "maka", "jika", "kalau", "serta",
+                    "dapat", "telah", "sudah", "untuk", "dengan"}
+
+
+def _content_words(text: str) -> set[str]:
+    """Kata latin >=4 huruf, lowercase, tanpa stopword -- satuan pembanding overlap."""
+    return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
+
+
+# ── 2026-09-10: sitasi hanya boleh muncul kalau jawabannya MEMANG memakai konteks ──
+# Sitasi dan confidence selama ini mengukur apa yang DITEMUKAN retrieval, bukan
+# apa yang DIPAKAI jawaban -- keduanya tidak pernah melihat teks jawaban sama
+# sekali. Untuk jawaban grounded dua hal itu kebetulan berimpit, jadi tidak
+# pernah kelihatan. Begitu jawaban lewat jalur "general knowledge"
+# (build_prompt instruksi 2 versi longgar), keduanya berpisah total.
+#
+# Kasus nyata yang memicu ini: "coba develop lagi tentang keindahan indonesia"
+# dijawab dengan esai pariwisata + kode HTML, lalu DILAMPIRI sitasi "Ketentuan
+# Umum BEI (Peraturan) hal. 1" beserta kutipan tabel REG dan badge keyakinan
+# 78%. Tidak satu kata pun jawaban itu berasal dari dokumennya. Di aplikasi
+# yang punya modul audit & compliance, itu klaim provenance palsu -- cacat yang
+# jauh lebih telak daripada sekadar jawaban di luar topik.
+#
+# Arah rasio SENGAJA jawaban-sebagai-penyebut, bukan konteks: chunk konteks
+# panjang dan jawaban pendek, jadi irisan/|konteks| selalu mungil untuk jawaban
+# apa pun dan tidak memisahkan apa-apa.
+#
+# Jebakan FR-12 yang dulu memaksa kita membatalkan saringan overlap QUERY tidak
+# berlaku di sini: yang dibandingkan JAWABAN lawan konteks, bukan query lawan
+# konteks. Dua chunk setopik tanpa irisan kata literal tetap boleh masuk
+# konteks; yang diperiksa cuma apakah jawaban akhirnya menyebut ulang isinya.
+#
+# Diukur pada teks nyata dari sesi chat yang melaporkan bug ini (irisan/|jawaban|):
+#     esai Bali + HTML ......... 0.04   <- harus ditolak
+#     penolakan "tidak memuat" . 0.25   <- harus ditolak (penolakan bukan sitasi)
+#     sapaan + sebut REG-02 .... 0.19   <- ditolak, cuma scaffolding percakapan
+#     jawaban REG-08+REG-01..04  0.71   <- harus diterima
+#     "1+1 ... REG-01 adalah" .. 0.73   <- harus diterima
+# 0.35 duduk di tengah jurang antara 0.25 dan 0.71, dengan margin lebar ke dua
+# arah. JANGAN geser angka ini tanpa mengukur ulang seperti di atas.
+ANSWER_GROUNDING_MIN_RATIO = 0.35
+
+
+def answer_uses_context(answer: str, chunks: list[dict], min_ratio: float = ANSWER_GROUNDING_MIN_RATIO) -> bool:
+    """True kalau jawaban benar-benar menyebut ulang isi konteks, bukan cuma kebetulan sezaman dengannya.
+
+    Dibandingkan terhadap SELURUH chunk konteks, bukan cuma yang is_top_match:
+    jawaban yang mengambil dari chunk tidak-tersitasi tetap jawaban grounded,
+    dan menahan sitasinya cuma bikin user kehilangan rujukan tanpa alasan.
+    """
+    answer_words = _content_words(answer)
+    if not answer_words or not chunks:
+        return False
+    context_words: set[str] = set()
+    for c in chunks:
+        context_words |= _content_words(c.get("text", ""))
+    if not context_words:
+        return False
+    return len(answer_words & context_words) / len(answer_words) >= min_ratio
+
+
 # Batas JUMLAH sitasi per jawaban -- dipakai retrieve_context() (seleksi awal)
 # dan reanchor_citable_chunks() (seleksi ulang setelah penyempitan identifier
 # di chat/routes.py). Dihoist ke level modul 2026-09-01 supaya dua tempat itu
@@ -1134,20 +1205,12 @@ def retrieve_context(
     # ini) -- beri tahu siapa pun yang menaikkan/menurunkan ini untuk
     # mengukur dulu, bukan menebak, seperti CITATION_SIMILARITY_GAP.
     #
-    # _QUERY_STOPWORDS: diukur ulang setelah percobaan pertama TANPA daftar
-    # ini meloloskan "PTI-03 Daftar Risiko PTI" karena "yang" (kata sambung,
-    # 4 huruf, lolos filter panjang) dihitung sebagai 1 dari 4 kata "isi"
-    # query -- 25% dari kuota overlap tanpa makna topikal sama sekali. Daftar
-    # kecil ini sengaja SEMPIT (kata sambung/depan yang jelas tidak
-    # bermakna), bukan daftar stopword NLP umum -- kata seperti "wajib",
-    # "tidak", "harus" tetap dihitung karena membawa makna di teks kepatuhan.
-    _QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
-                        "oleh", "agar", "maka", "jika", "kalau", "serta",
-                        "dapat", "telah", "sudah", "untuk", "dengan"}
+    # _QUERY_STOPWORDS dan _content_words() sekarang di level modul (lihat
+    # catatan di sana) -- dipakai bersama oleh saringan ini dan oleh
+    # answer_uses_context(). Ambang di bawah tetap milik saringan ini sendiri:
+    # ini overlap QUERY lawan chunk, beda urusan dari overlap JAWABAN lawan
+    # konteks, jadi kedua angka sengaja tidak dipaksa sama.
     _QUERY_OVERLAP_MIN_RATIO = 0.5
-
-    def _content_words(text: str) -> set[str]:
-        return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
 
     _query_words = _content_words(search_query)
 

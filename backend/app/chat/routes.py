@@ -1,5 +1,6 @@
 """Titik integrasi: autentikasi/guardrail/audit log/database + retrieval RAG/LLM switching (F1-05)."""
 import json
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -18,7 +19,7 @@ from app.guardrail.prompt_injection import (
 from app.guardrail.pii_detector import detect_pii_entities, mask_pii, demask
 from app.guardrail.audit_log import log_guardrail_event, EventType
 from app.guardrail.rate_limiter import check_chat_rate_limit
-from app.rag.vectorstore import retrieve_context, reanchor_citable_chunks
+from app.rag.vectorstore import retrieve_context, reanchor_citable_chunks, answer_uses_context
 from app.guardrail.intent_classifier import classify_intent, SKIP_RETRIEVAL_INTENTS, Intent
 from app.llm.router import route_and_generate, LLMResult
 from app.llm.commercial_llm import call_commercial_llm, CommercialLLMError
@@ -164,6 +165,24 @@ def rename_chat(
     return chat
 
 
+# 2026-09-10: pymupdf4llm menulis pemisah baris DI DALAM sel tabel sebagai
+# tag <br> literal, dan panel sitasi menampilkan teks chunk apa adanya -- jadi
+# user melihat "Bursa Efek<br>Indonesia" dan "Berlaku<br>Sejak" persis di
+# bagian yang paling sering dipamerkan. Diganti spasi, BUKAN newline: newline
+# akan memecah baris pipe-table jadi beberapa baris dan merusak bentuk
+# tabelnya di panel.
+#
+# Dibersihkan saat TAMPIL, bukan saat indexing: memperbaikinya di
+# index_kb_document() memang menyeluruh (konteks LLM ikut bersih) tapi menuntut
+# re-index seluruh dokumen KB, dan model sendiri sudah menangani <br> dengan
+# baik. Tidak sepadan dilakukan menjelang demo.
+_BR_TAG_RE = re.compile(r"<br\s*/?>", re.I)
+
+
+def _clean_chunk_text(text: str) -> str:
+    return _BR_TAG_RE.sub(" ", text)
+
+
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
     """SRS poin 12.a — dedup context_chunks jadi satu entri per dokumen/FAQ unik, kumpulkan semua nomor halaman jadi label "file.pdf (hal. 2, 5)"."""
     order: list[str] = []          # key insertion order, buat urutan citation stabil
@@ -223,10 +242,11 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         # 80 karakter pertama) dipakai membuang duplikat render (lihat
         # _dedup_shape di vectorstore.py) supaya user tidak melihat "isi
         # yang sama" dua kali di panel yang sama.
-        shape = f"{page}|{' '.join(chunk.get('text', '').split())[:80].lower()}"
+        chunk_text_bersih = _clean_chunk_text(chunk.get("text", ""))
+        shape = f"{page}|{' '.join(chunk_text_bersih.split())[:80].lower()}"
         if shape not in chunk_seen_shapes[key]:
             chunk_seen_shapes[key].add(shape)
-            chunk_texts[key].append((page, chunk.get("text", "")))
+            chunk_texts[key].append((page, chunk_text_bersih))
 
     citations = []
     for key in order:
@@ -579,7 +599,24 @@ async def send_message(
         )
 
     stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)  # teks baru hasil generate, deteksi PII-nya dihitung sendiri di sini
-    citations = _build_source_citations(context_chunks)
+
+    # ── 2026-09-10: sitasi & confidence cuma untuk jawaban yang benar-benar grounded ──
+    # _build_source_citations() dulu dipanggil tanpa syarat, dan confidence
+    # diteruskan apa adanya dari retrieval. Akibatnya jawaban jalur "general
+    # knowledge" (esai/kode yang tidak menyentuh dokumen sama sekali) tetap
+    # tampil dengan label sumber, nomor halaman, kutipan chunk, DAN badge
+    # keyakinan -- empat sinyal yang semuanya mengklaim jawaban itu berasal
+    # dari dokumen. Lihat catatan answer_uses_context() di vectorstore.py.
+    #
+    # confidence ikut dikosongkan, bukan cuma sitasinya: angka itu rata-rata
+    # kemiripan chunk terhadap QUERY, jadi menyesatkan dengan cara yang persis
+    # sama begitu jawabannya ternyata tidak memakai chunk tersebut. None di
+    # sini juga konsisten dengan jalur general chat yang memang sudah selalu
+    # None, termasuk efeknya ke escalation_offered di bawah (tidak pernah
+    # memicu tawaran eskalasi -- perilaku yang sudah ada, bukan yang baru).
+    grounded_in_context = answer_uses_context(result.reply, context_chunks)
+    citations = _build_source_citations(context_chunks) if grounded_in_context else []
+    confidence_score = result.confidence_score if grounded_in_context else None
 
     ai_msg = Message(
         chat_id=chat.id,
@@ -587,7 +624,7 @@ async def send_message(
         content=stored_ai_content,
         pii_mapping=ai_pii_mapping,
         llm_used=result.llm_used,
-        confidence_score=result.confidence_score,
+        confidence_score=confidence_score,
         # 2026-09-09: simpan sitasi di baris pesannya sendiri -- sebelum
         # ini cuma dikirim sekali di respons ini, jadi refresh halaman atau
         # login ulang (yang cuma memuat lewat GET /messages) kehilangan
@@ -599,8 +636,8 @@ async def send_message(
 
     # SRS poin 7: sistem MENAWARKAN eskalasi (bukan auto-create tiket); confidence None (general chat) sengaja tidak pernah memicu ini
     escalation_offered = (
-        result.confidence_score is not None
-        and result.confidence_score < settings.escalation_confidence_threshold
+        confidence_score is not None
+        and confidence_score < settings.escalation_confidence_threshold
     )
 
     new_title = None
@@ -617,7 +654,7 @@ async def send_message(
         reply=result.reply,
         llm_used=result.llm_used,
         is_sensitive=result.is_sensitive,
-        confidence_score=result.confidence_score,
+        confidence_score=confidence_score,
         pii_detected=result.pii_detected,
         sources=citations,
         new_title=new_title,

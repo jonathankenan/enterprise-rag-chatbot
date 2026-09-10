@@ -48,8 +48,14 @@ def _assignment(source: str, name: str) -> str:
 # ---------------------------------------------------------------- load units
 _ns: dict = {}
 exec("from pydantic import BaseModel", _ns)
+exec("import re", _ns)
 exec(_segment(SCHEMAS_SRC, "CitationChunk"), _ns)
 exec(_segment(SCHEMAS_SRC, "SourceCitation"), _ns)
+# _build_source_citations() membersihkan tag <br> milik pymupdf4llm sebelum
+# teks chunk masuk ke panel sitasi -- keduanya ikut di-exec supaya yang diuji
+# tetap kode yang dikirim, bukan salinannya.
+exec(_assignment(ROUTES_SRC, "_BR_TAG_RE"), _ns)
+exec(_segment(ROUTES_SRC, "_clean_chunk_text"), _ns)
 exec(_segment(ROUTES_SRC, "_build_source_citations"), _ns)
 build_citations = _ns["_build_source_citations"]
 
@@ -834,6 +840,95 @@ def test_reanchor_respects_the_limit():
     _vs.reanchor_citable_chunks(chunks, limit=2)
     assert sum(c["is_top_match"] for c in chunks) == 2
     assert [c["is_top_match"] for c in chunks[:2]] == [True, True], "falls back to list order, table-row-preference already applied by the caller"
+
+
+# --------------------------------------------- grounding gate untuk sitasi
+# 2026-09-10. Sitasi & confidence dulu mengukur apa yang DITEMUKAN retrieval,
+# bukan apa yang DIPAKAI jawaban. Dilaporkan dari sesi nyata: "coba develop
+# lagi tentang keindahan indonesia" dijawab esai pariwisata + kode HTML, lalu
+# dilampiri sitasi "Ketentuan Umum BEI (Peraturan) hal. 1" dan keyakinan 78%.
+
+_REG_CONTEXT = [{"text":
+    "### Ketentuan turunan mengenai sanksi administratif dimuat pada REG-08, "
+    "yang masih dalam proses penyusunan.\n\n"
+    "|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n"
+    "|REG-01|POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi|Otoritas Jasa<br>Keuangan|1 Maret<br>2025|\n"
+    "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|Bursa Efek<br>Indonesia|1 Januari<br>2024|"}]
+
+
+def test_ungrounded_essay_does_not_count_as_using_the_context():
+    """Kasus yang memicu perbaikan ini -- rasio terukur 0.04."""
+    esai = ("Indonesia, negara kepulauan terbesar di dunia, memiliki keindahan alam "
+            "yang luar biasa. Mulai dari pantai indah di Pulau Bali, hingga hutan "
+            "hujan tropis di Pulau Sumatera. Kebudayaan Indonesia yang beragam "
+            "menambah keunikan negara ini, dari adat istiadat sampai seni tari.")
+    assert _vs.answer_uses_context(esai, _REG_CONTEXT) is False
+
+
+def test_answer_restating_the_document_counts_as_grounded():
+    """Rasio terukur 0.71 -- jawaban asli dari sesi yang sama."""
+    jawaban = ("REG-01 adalah POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi "
+               "yang berlaku sejak 1 Maret 2025, sedangkan REG-02 adalah Peraturan "
+               "Bursa Nomor I-A tentang Pencatatan Saham.")
+    assert _vs.answer_uses_context(jawaban, _REG_CONTEXT) is True
+
+
+def test_refusal_is_not_treated_as_grounded():
+    """Penolakan tidak boleh membawa sitasi -- tidak ada isi dokumen yang dipakai."""
+    assert _vs.answer_uses_context(
+        "Maaf, dokumen yang tersedia tidak memuat informasi mengenai hal tersebut.",
+        _REG_CONTEXT) is False
+
+
+def test_conversational_scaffolding_that_merely_name_drops_is_not_grounded():
+    """Menyebut REG-02 sekali tidak sama dengan menyampaikan isinya (rasio 0.19)."""
+    sapaan = ("Halo, saya bisa membantu Anda dengan berbagai informasi. Misalnya "
+              "Anda bisa meminta penjelasan mengenai peraturan tertentu seperti "
+              "REG-02, atau bertanya soal jam perdagangan dan batas auto rejection.")
+    assert _vs.answer_uses_context(sapaan, _REG_CONTEXT) is False
+
+
+def test_gate_is_false_when_there_is_no_context_at_all():
+    assert _vs.answer_uses_context("Jawaban apa pun tentang sesuatu.", []) is False
+
+
+def test_gate_is_false_for_an_empty_answer():
+    assert _vs.answer_uses_context("", _REG_CONTEXT) is False
+
+
+def test_gate_survives_chunks_without_text():
+    assert _vs.answer_uses_context("Jawaban tentang sesuatu.", [{"page": 1}]) is False
+
+
+def test_gate_ignores_stopwords_when_scoring_overlap():
+    """"yang/dari/untuk/dengan" tidak boleh menyumbang kuota grounding."""
+    cuma_stopword = "Yang dari untuk dengan pada oleh serta dapat telah sudah."
+    assert _vs.answer_uses_context(cuma_stopword, _REG_CONTEXT) is False
+
+
+def test_grounding_ratio_is_measured_against_the_answer_not_the_context():
+    """Arah rasio penting: chunk konteks panjang, jawaban pendek. Kalau
+    penyebutnya konteks, jawaban grounded sependek ini pun akan gagal."""
+    pendek = "Pencatatan Saham diatur Peraturan Bursa Nomor I-A."
+    assert _vs.answer_uses_context(pendek, _REG_CONTEXT) is True
+
+
+# ------------------------------------------------- pembersihan tag <br> panel
+def test_citation_chunk_text_has_br_tags_replaced_with_spaces():
+    """pymupdf4llm menulis pemisah baris dalam sel tabel sebagai <br> literal;
+    panel sitasi dulu menampilkannya mentah ("Bursa Efek<br>Indonesia")."""
+    got = build_citations([chunk(filename="KB.pdf", page=1, is_top_match=True,
+                                 text="|REG-02|Bursa Efek<br>Indonesia|1 Januari<br>2024|")])
+    teks = got[0].chunks[0].text
+    assert "<br>" not in teks
+    assert "Bursa Efek Indonesia" in teks
+    assert "|" in teks, "bentuk baris tabel harus tetap utuh, bukan dipecah jadi banyak baris"
+
+
+def test_br_cleaning_handles_self_closing_and_spaced_variants():
+    assert "<br" not in build_citations([chunk(
+        filename="KB.pdf", page=1, is_top_match=True,
+        text="a<br/>b<br />c<BR>d")])[0].chunks[0].text
 
 
 # ---------------------------------------------------------------- standalone
