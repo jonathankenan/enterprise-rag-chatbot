@@ -1,5 +1,6 @@
 import io
 import jinja2
+from markupsafe import Markup, escape  # dependensi jinja2 sendiri, bukan paket baru
 from xhtml2pdf import pisa
 from datetime import datetime
 
@@ -45,6 +46,28 @@ def _pdf_safe(text: str) -> str:
     return text
 
 
+# 2026-09-10: export PDF tidak pernah mempertahankan baris baru dari jawaban
+# model -- daftar berpoin dan blok kode mengalir jadi satu paragraf panjang.
+# Dulu tersamar: sebelum autoescape dinyalakan, tag HTML dari model ikut
+# terender dan kebetulan memberi struktur visual. Begitu tag itu (benar)
+# dimatikan jadi teks, hilangnya newline langsung kelihatan.
+#
+# `white-space: pre-wrap` SUDAH DICOBA dan xhtml2pdf mengabaikannya total --
+# diuji langsung, div ber-pre-wrap dan div biasa sama-sama meratakan newline
+# jadi spasi. Jadi newline harus dijadikan <br/> sungguhan.
+#
+# URUTANNYA TIDAK BOLEH DIBALIK: escape() dulu supaya seluruh isi jawaban jadi
+# teks mati, BARU <br/> disisipkan sebagai markup yang kita tahu aman. Kalau
+# <br/> ditaruh duluan lalu di-escape, tag-nya ikut mati (tidak ada gunanya)
+# DAN kita kembali menyuntikkan string mentah ke HTML -- persis lubang yang
+# autoescape baru saja tutup.
+def _content_markup(text: str) -> Markup:
+    """Isi pesan siap-tempel: sudah ter-escape, newline-nya jadi <br/>."""
+    if not text:
+        return Markup("")
+    return Markup(str(escape(text)).replace("\n", "<br/>"))
+
+
 PDF_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -87,10 +110,27 @@ PDF_TEMPLATE = """
 """
 
 def generate_pdf(session_title: str, messages: list, model_used: str = "Various") -> bytes:
-    # Render HTML template
-    template = jinja2.Template(PDF_TEMPLATE)
+    # 2026-09-10: autoescape=True WAJIB di sini. jinja2.Template() default-nya
+    # autoescape=False, jadi {{ msg.content }} menyuntikkan output LLM mentah
+    # ke badan HTML. Terlihat langsung di transkrip nyata: user minta "kasih
+    # kode html untuk website sederhana", model menjawab dengan <h1>/<p>, dan
+    # di PDF hasilnya terender sebagai HEADING BETULAN, bukan sebagai teks
+    # kode -- transkripnya jadi salah menggambarkan apa yang dijawab bot.
+    #
+    # Dua akibat lain yang lebih dari kosmetik:
+    #   * tag tidak tertutup dari model bisa membuat pisa.CreatePDF() gagal ->
+    #     tombol export melempar 500 di depan penonton demo.
+    #   * isi dokumen KB ikut menyetir output model, dan output itu masuk ke
+    #     PDF tanpa disaring -- jalur injeksi markup yang nyata, meski
+    #     dampaknya kecil di PoC.
+    #
+    # Autoescape cuma menyaring substitusi {{ }}; markup PDF_TEMPLATE sendiri
+    # tidak ikut ter-escape, jadi tata letaknya tidak berubah.
+    template = jinja2.Template(PDF_TEMPLATE, autoescape=True)
+    # Cuma isi pesan yang lewat _content_markup(): judul sesi dan nama model
+    # selalu satu baris, jadi cukup di-escape otomatis oleh autoescape.
     safe_messages = [
-        {**msg, "content": _pdf_safe(msg.get("content", ""))}
+        {**msg, "content": _content_markup(_pdf_safe(msg.get("content") or ""))}
         for msg in messages
     ]
     html_out = template.render(

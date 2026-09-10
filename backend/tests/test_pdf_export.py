@@ -66,3 +66,72 @@ def test_generated_pdf_preserves_plain_ascii_content():
     pdf_bytes = generate_pdf(session_title="Sesi Biasa", messages=messages)
     text = _extract_text(pdf_bytes)
     assert "Jawaban biasa tanpa karakter khusus." in text
+
+
+# ── 2026-09-10: output model tidak boleh dirender sebagai markup ──────────────
+# Dilaporkan dari transkrip nyata: user minta "kasih kode html untuk website
+# sederhana", model menjawab dengan <h1>/<p>, dan PDF-nya menampilkan HEADING
+# BETULAN alih-alih teks kode -- transkrip jadi salah menggambarkan apa yang
+# dijawab bot. Penyebabnya jinja2.Template() yang default-nya autoescape=False.
+
+
+def test_model_html_appears_as_literal_text_not_rendered_markup():
+    messages = [{
+        "role": "assistant",
+        "content": "<h1>Keindahan Indonesia</h1><p>Indonesia negara kepulauan.</p>",
+    }]
+    text = _extract_text(generate_pdf(session_title="Sesi HTML", messages=messages))
+
+    # Tag harus terbaca apa adanya di transkrip. Kalau autoescape mati, tag-nya
+    # dikonsumsi renderer dan yang tersisa cuma teks di dalamnya.
+    assert "<h1>" in text
+    assert "</p>" in text
+    assert "Keindahan Indonesia" in text
+
+
+def test_html_in_session_title_is_escaped_too():
+    """Judul chat ikut di-generate model (auto-title), jadi jalurnya sama."""
+    text = _extract_text(generate_pdf(
+        session_title="<b>Judul</b>", messages=[{"role": "user", "content": "halo"}]))
+    assert "<b>Judul</b>" in text
+
+
+def test_newlines_in_the_answer_survive_into_the_pdf():
+    """Daftar berpoin dulu mengalir jadi satu paragraf. `white-space: pre-wrap`
+    tidak bisa dipakai -- xhtml2pdf mengabaikannya (diuji), jadi newline
+    diubah jadi <br/> setelah escaping."""
+    messages = [{"role": "assistant", "content":
+                 "- REG-01: Keterbukaan Informasi\n- REG-02: Pencatatan Saham\n- REG-03: Tata Kelola AI"}]
+    text = _extract_text(generate_pdf(session_title="Sesi Daftar", messages=messages))
+    assert "- REG-01: Keterbukaan Informasi\n- REG-02: Pencatatan Saham" in text
+
+
+def test_newline_handling_does_not_reopen_the_escaping_hole():
+    """Penjaga urutan: escape() HARUS jalan sebelum <br/> disisipkan. Kalau
+    dibalik, tag dari model hidup lagi dan autoescape jadi sia-sia."""
+    messages = [{"role": "assistant", "content": "<h1>Judul</h1>\nbaris kedua"}]
+    text = _extract_text(generate_pdf(session_title="Sesi Campur", messages=messages))
+    assert "<h1>Judul</h1>" in text, "tag model harus tetap teks mati"
+    assert "\nbaris kedua" in text, "newline harus tetap hidup"
+
+
+def test_literal_br_from_the_model_is_not_turned_into_a_line_break():
+    """Model kadang menulis <br> sebagai teks. Itu harus tampil apa adanya,
+    bukan jadi baris baru -- bukti escaping mendahului penyisipan."""
+    messages = [{"role": "assistant", "content": "Bursa Efek<br>Indonesia"}]
+    assert "Bursa Efek<br>Indonesia" in _extract_text(
+        generate_pdf(session_title="Sesi BR", messages=messages))
+
+
+def test_none_content_does_not_render_the_word_none():
+    assert "None" not in _extract_text(generate_pdf(
+        session_title="Sesi Kosong", messages=[{"role": "assistant", "content": None}]))
+
+
+def test_unclosed_tag_from_model_does_not_break_the_export():
+    """Tag menggantung dulu bisa membuat pisa.CreatePDF() gagal -> tombol
+    export melempar 500. Dengan escaping, itu cuma teks biasa."""
+    messages = [{"role": "assistant", "content": "Contoh: <div><span>tanpa penutup"}]
+    pdf_bytes = generate_pdf(session_title="Sesi Rusak", messages=messages)
+    assert pdf_bytes[:4] == b"%PDF"
+    assert "<div>" in _extract_text(pdf_bytes)
