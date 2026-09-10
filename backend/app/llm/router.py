@@ -237,7 +237,30 @@ def build_prompt(user_message: str, context_chunks: list[dict], chat_history: li
 
 
 async def analyze_query(user_message: str, chat_history: list, preferred_provider: str = "on-prem") -> dict:
-    """1 panggilan LLM, 2 tugas: rephrase jadi search query + Intent Classification lapis 2 — tidak pernah raise, selalu fallback aman."""
+    """1 panggilan LLM, 2 tugas: rephrase jadi search query + Intent Classification lapis 2 — tidak pernah raise, selalu fallback aman.
+
+    2026-09-09: standalone_query TIDAK LAGI dipaksa diterjemahkan ke Inggris.
+    Sampai hari ini instruksinya "Always translate to ENGLISH regardless of
+    the input language" -- alasan awalnya embedding model & indeks BM25
+    "efektif berorientasi Inggris", tapi korpus KB divisi 100% Bahasa
+    Indonesia. Ditemukan lewat panel klik-citation: "regulasi yang berlaku
+    di perusahaan" ditulis ulang jadi "what regulations are in place at the
+    company", dan query Inggris itu kehilangan overlap leksikal dengan
+    korpus Indonesia sampai-sampai ANCHOR similarity-nya jatuh ke chunk
+    yang salah divisi -- perbaikan prioritas-dokumen-sama-anchor hari yang
+    sama jadi ikut mengunci ke dokumen yang salah itu, bukan karena
+    perbaikannya salah, tapi anchor-nya sendiri sudah salah sebelum sampai
+    ke situ.
+
+    Bukan tebakan baru: komentar di _parse_query_analysis() di bawah sudah
+    mencatat sejak 2026-08-31 bahwa kueri Indonesia dan Inggris PRAKTIS
+    SETARA (6/8 vs 7/8) pada korpus ini -- paksa-terjemahkan tidak pernah
+    terbukti perlu, cuma diasumsikan. search_query sekarang ikut bahasa
+    input apa adanya; extract_query_identifiers()/gerbang leksikal/BM25
+    tokenizer semuanya sudah language-invariant (kerja di level string,
+    bukan makna), jadi tidak ada logika lain yang bergantung pada bahasa
+    Inggris di sini.
+    """
     fallback = {"standalone_query": user_message, "intent": Intent.QUESTION}
     if not chat_history:
         history_text = "(belum ada riwayat, ini pesan pertama di percakapan ini)\n"
@@ -249,11 +272,11 @@ async def analyze_query(user_message: str, chat_history: list, preferred_provide
 
     prompt = f"""Given the following conversation and a follow-up question, do TWO things and respond with ONLY a JSON object (no markdown, no explanation):
 
-1. "standalone_query": rephrase the follow-up question into a standalone ENGLISH search query.
+1. "standalone_query": rephrase the follow-up question into a standalone search query, IN THE SAME LANGUAGE AS THE INPUT.
    RULES for standalone_query:
    - Strip all conversational filler ('here it is', 'thanks', 'explain', 'tell me').
    - Fix obvious spelling typos (e.g., 'documen' -> 'document', 'detial' -> 'detail').
-   - Always translate to ENGLISH regardless of the input language.
+   - Do NOT translate. Keep the exact same language the user wrote in -- if they wrote Indonesian, the query stays Indonesian.
    - If asking about multiple distinct entities/IDs (e.g., 'FR-04 and FR-05'), keep them together, IDs exactly as written.
    - If the follow-up is NOT a real question (e.g. it's just chitchat that slipped through), just clean it up minimally.
 

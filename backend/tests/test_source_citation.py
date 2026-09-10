@@ -235,6 +235,36 @@ def test_empty_context_yields_no_citations():
     assert build_citations([]) == []
 
 
+def test_citations_survive_the_json_round_trip_used_for_persistence():
+    """
+    2026-09-09: sitasi dulu cuma dikirim SEKALI di respons kirim-pesan, tidak
+    pernah disimpan -- refresh halaman atau login ulang (GET /messages)
+    kehilangan badge "Referensi" meski jawabannya masih ada. Fix-nya: simpan
+    di Message.sources lewat json.dumps([c.model_dump() for c in citations])
+    (chat/routes.py) dan baca balik lewat json.loads(...) + SourceCitation(**d)
+    (get_messages()). Test ini memastikan round-trip itu tidak diam-diam
+    membuang atau mengubah data -- yang paling rawan: CitationChunk bersarang
+    (list[CitationChunk] di dalam SourceCitation) dan nomor halaman.
+    """
+    import json
+    SourceCitation = _ns["SourceCitation"]
+
+    original = build_citations([
+        chunk(filename="A.pdf", page=1, text="isi halaman satu"),
+        chunk(filename="A.pdf", page=2, text="isi halaman dua"),
+        chunk(source_type="faq", text="jawaban FAQ"),
+    ])
+    assert len(original) == 2, "satu entri per dokumen A.pdf, satu entri FAQ"
+
+    dumped = json.dumps([c.model_dump() for c in original])
+    restored = [SourceCitation(**d) for d in json.loads(dumped)]
+
+    assert [c.model_dump() for c in restored] == [c.model_dump() for c in original]
+    assert restored[0].pages == [1, 2]
+    assert [ch.text for ch in restored[0].chunks] == ["isi halaman satu", "isi halaman dua"]
+    assert restored[1].source_type == "faq"
+
+
 def test_page_zero_is_recorded_not_skipped():
     """Guards `if page is not None` against regressing to `if page`."""
     got = build_citations([chunk(filename="Z.pdf", page=0)])
@@ -337,6 +367,48 @@ def test_dedup_shape_ignores_a_heading_shared_by_every_row():
     ]
     chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
     assert all(c["is_top_match"] for c in chunks), "two distinct regulations sharing an intro heading must both be citable"
+
+
+def test_same_document_candidates_fill_slots_before_a_weaker_cross_document_match():
+    """Regression for the residual gap flagged (but deliberately unpatched)
+    2026-09-01: with the dedup_shape fix above in place, four DIFFERENT
+    regulation rows in the SAME document are correctly told apart -- but
+    TOP_MATCHES=3 only has room for the anchor + 2 more, and a weaker chunk
+    from a DIFFERENT, wrong document could still win the last slot if it
+    happened to sit earlier in ensemble order than one of the other three
+    genuinely-relevant same-document rows. Live case: "daftar regulasi yang
+    berlaku di perusahaan" cited a PTI division chunk instead of a fourth
+    Company Wide regulation.
+
+    Fix: candidates from the anchor's own document are exhausted first,
+    within the same TOP_MATCHES budget -- not a bigger budget, just the
+    right priority inside it."""
+    heading = ("### Ketentuan turunan mengenai sanksi administratif dimuat pada "
+               "REG-08, yang masih dalam proses penyusunan lebih dari seratus dua "
+               "puluh karakter panjangnya supaya benar-benar menguji batas prefix.\n\n"
+               "|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n")
+    docs = [
+        # Ensemble order deliberately interleaves the wrong-document chunk
+        # BETWEEN two same-document rows, so a naive single-pass fill loop
+        # would admit it before reaching the third and fourth REG rows.
+        Doc(heading + "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|Bursa Efek<br>Indonesia|1 Januari 2024|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(82)),
+        Doc("Pedoman Operasional Divisi Pengembangan Teknologi Informasi — dokumen internal PTI, "
+            "tidak berlaku bagi divisi lain.",
+            filename="PTI_Pedoman.pdf", page=1, _distance=dist_for(75)),  # wrong document, weaker match
+        Doc(heading + "|REG-01|POJK Nomor 4/POJK.04/2025 tentang Keterbukaan Informasi|Otoritas Jasa<br>Keuangan|1 Maret 2025|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(80)),
+        Doc(heading + "|REG-04|POJK Nomor 11/POJK.03/2022 tentang Penyelenggaraan|Otoritas Jasa<br>Keuangan|1 Juli 2022|",
+            filename="CompanyWide.pdf", page=1, _distance=dist_for(78)),
+    ]
+    chunks, _ = select(docs, search_query="daftar regulasi yang berlaku di perusahaan")
+    cited = build_citations(chunks)
+    assert len(cited) == 1, "all citable rows are the same document, so they collapse into one citation entry"
+    assert cited[0].filename == "CompanyWide.pdf"
+    assert "PTI_Pedoman.pdf" not in [c["filename"] for c in chunks if c["is_top_match"]], \
+        "the weaker wrong-document chunk must not take a slot while a same-document row is still available"
+    assert sum(1 for c in chunks if c["filename"] == "CompanyWide.pdf" and c["is_top_match"]) == 3, \
+        "all three citation slots (anchor + 2) go to the same document before any other document gets a turn"
 
 
 def test_rank_two_just_inside_and_just_outside_the_gap():

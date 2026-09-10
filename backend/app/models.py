@@ -138,6 +138,14 @@ class Message(Base):
     pii_mapping = Column(EncryptedText, nullable=True)  # placeholder -> nilai asli, JSON; wajib EncryptedText juga (nilai PII asli)
     llm_used = Column(String, nullable=True)      # "on-prem" | "commercial"
     confidence_score = Column(Integer, nullable=True)
+    # 2026-09-09: sitasi sumber (list[SourceCitation], lihat schemas.py),
+    # disimpan sebagai JSON mentah -- BUKAN EncryptedText, isinya cuma nama
+    # file/nomor halaman/cuplikan yang sudah lolos filter divisi, bukan PII.
+    # Sebelum ini sources cuma dikirim sekali di respons kirim-pesan
+    # (ChatReplyResponse), tidak pernah disimpan -- reload halaman atau
+    # login ulang manggil GET /messages, yang tidak pernah tahu sources itu
+    # ada, jadi badge "Referensi" hilang padahal jawabannya masih ada.
+    sources = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     chat = relationship("Chat", back_populates="messages")

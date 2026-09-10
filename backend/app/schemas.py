@@ -248,18 +248,6 @@ class MessageCreate(BaseModel):
         return self
 
 
-class MessageResponse(BaseModel):
-    id: str
-    sender: str
-    content: str
-    llm_used: str | None
-    confidence_score: int | None = None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class CitationChunk(BaseModel):
     """2026-09-01: satu potongan teks yang benar-benar dipakai model untuk menyusun jawaban -- dikirim apa adanya, bukan lewat endpoint baru, supaya tidak membuka jalur akses baru yang harus diperiksa ulang divisinya (teks ini sudah lolos filter divisi di retrieve_context())."""
     page: int | None = None
@@ -275,6 +263,23 @@ class SourceCitation(BaseModel):
     source_type: str  # "chat_document" | "kb_divisi" | "faq"
     pages: list[int] = []  # nomor halaman (1-indexed) sumber chunk, urut tanpa duplikat; kosong utk FAQ atau kalau halaman tidak bisa dipastikan
     chunks: list[CitationChunk] = []  # isi cuplikan yang dikutip, urut per halaman -- buat citation yang bisa "dipencet" tanpa endpoint baru
+
+
+class MessageResponse(BaseModel):
+    id: str
+    sender: str
+    content: str
+    llm_used: str | None
+    confidence_score: int | None = None
+    # 2026-09-09: sitasi disimpan di Message.sources (JSON mentah) sejak
+    # perbaikan "sumber hilang setelah refresh/login ulang" -- lihat catatan
+    # di app/models.py dan get_messages() di chat/routes.py, yang men-decode
+    # JSON itu jadi list ini sebelum dikirim.
+    sources: list[SourceCitation] = []
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class ChatReplyResponse(BaseModel):
