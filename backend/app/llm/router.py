@@ -1,5 +1,6 @@
 """LLM Switching (F1-05) + Guardrail Before/After LLM (F2-04): mask PII -> pilih & panggil LLM -> cek output -> demask."""
 import json
+import re
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -23,10 +24,105 @@ class LLMResult:
     output_blocked_category: str | None = None
 
 
-def detect_sensitive(text: str, pii_entities: list[dict]) -> bool:
-    """Sensitif kalau ada kata kunci sensitif ATAU PII — pii_entities diterima sebagai parameter, tidak dihitung ulang."""
-    lowered = text.lower()
-    has_keyword = any(keyword in lowered for keyword in settings.sensitive_keyword_list)
+# Panjang minimum kata kunci yang boleh dicocokkan toleran-typo. Di bawah
+# ini, jarak edit 1 terlalu longgar: "ktp" akan cocok dengan "kta"/"ktm"/"tp",
+# dan "npwp" dengan "nwp". Kata kunci pendek tetap dicocokkan substring persis.
+_FUZZY_MIN_LEN = 5
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _within_one_edit(a: str, b: str) -> bool:
+    """
+    True kalau a bisa jadi b dengan MAKSIMAL satu sisipan, penghapusan,
+    penggantian, atau PERTUKARAN dua huruf bersebelahan (jarak
+    Damerau-Levenshtein 1). Versi berbatas, bukan Levenshtein penuh -- yang
+    dicari cuma typo satu huruf, jadi tidak perlu dependensi baru.
+
+    Pertukaran ikut dihitung satu edit karena itu salah satu typo paling
+    umum ("rahasia" -> "rahasai"), padahal di Levenshtein biasa jaraknya 2
+    dan akan lolos. Risikonya kecil: hasil pertukaran huruf pada kata kunci
+    di daftar ini bukan kata yang bermakna, jadi tidak menambah
+    false-positive yang berarti.
+    """
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+
+    if la == lb:
+        beda = [i for i in range(la) if a[i] != b[i]]
+        if len(beda) == 1:
+            return True                       # satu huruf diganti
+        if len(beda) == 2:                     # dua huruf bersebelahan tertukar
+            i, j = beda
+            return j == i + 1 and a[i] == b[j] and a[j] == b[i]
+        return False
+
+    # Panjang beda satu huruf: cukup periksa satu penghapusan/sisipan.
+    pendek, panjang = (a, b) if la < lb else (b, a)
+    i = j = 0
+    sudah_lewat = False
+    while i < len(pendek) and j < len(panjang):
+        if pendek[i] == panjang[j]:
+            i += 1
+            j += 1
+        elif sudah_lewat:
+            return False
+        else:
+            sudah_lewat = True
+            j += 1
+    return True
+
+
+def _keyword_hit(haystack: str) -> bool:
+    """
+    Cocok kalau kata kunci muncul sebagai substring PERSIS (perilaku asli --
+    ini yang menangkap "rahasianya", "internalnya"), ATAU ada satu kata dalam
+    teks yang jaraknya satu edit dari kata kunci (menangkap typo).
+    """
+    if any(k in haystack for k in settings.sensitive_keyword_list):
+        return True
+    fuzzy = [k for k in settings.sensitive_keyword_list
+             if len(k) >= _FUZZY_MIN_LEN and " " not in k]
+    if not fuzzy:
+        return False
+    return any(_within_one_edit(w, k) for w in _WORD_RE.findall(haystack) for k in fuzzy)
+
+
+def detect_sensitive(text: str, pii_entities: list[dict], rewritten: str | None = None) -> bool:
+    """
+    Sensitif kalau ada kata kunci sensitif ATAU PII — pii_entities diterima
+    sebagai parameter, tidak dihitung ulang.
+
+    2026-09-13: `rewritten` (standalone_query hasil analyze_query) ikut
+    diperiksa, bukan cuma teks mentah. Ditemukan lewat uji terima E5: satu
+    typo melumpuhkan kontrol ini sepenuhnya -- "dokumen rahasi" TIDAK memuat
+    substring "rahasia", jadi tidak pernah ditandai sensitif. Dikonfirmasi
+    langsung, BUKAN diduga: dengan provider komersial terpilih, pertanyaan itu
+    benar-benar keluar sebagai llm_used="commercial (groq)".
+
+    Perbaikan pertama yang dicoba adalah ikut memeriksa `rewritten`
+    (standalone_query), karena analyze_query() memang punya instruksi
+    memperbaiki typo dan sempat mengubah "dokumen rahasi" -> "dokumen
+    rahasia". Itu DITOLAK sebagai jaring utama: pemanggilan ulang yang sama
+    ternyata mengembalikan typo-nya apa adanya -- typo-fixing itu keputusan
+    LLM, jadi non-deterministik, dan kontrol perlindungan data tidak boleh
+    bergantung pada apakah model sedang berbaik hati.
+
+    Jadi jaring utamanya deterministik di _keyword_hit(): substring persis
+    (perilaku asli) ditambah toleransi satu edit per kata. `rewritten` tetap
+    diperiksa sebagai lapis TAMBAHAN -- gratis, dan menangkap hal yang jarak
+    edit tidak bisa (mis. rewrite yang memekarkan singkatan).
+
+    Arah kegagalan sengaja satu arah: kedua lapis itu hanya bisa MENAMBAH
+    sensitivitas, tidak pernah menghilangkannya. Hasil terburuknya
+    over-routing ke on-prem -- sisi yang aman untuk kontrol ini.
+    """
+    haystacks = [text.lower()]
+    if rewritten:
+        haystacks.append(rewritten.lower())
+    has_keyword = any(_keyword_hit(h) for h in haystacks)
     has_pii = len(pii_entities) > 0
     return has_keyword or has_pii
 
@@ -402,13 +498,22 @@ async def route_and_generate(
     retrieval_confidence: int | None = None,
     identifier_in_example: list[str] | None = None,
     answer_must_be_grounded: bool = False,
+    search_query: str | None = None,
 ) -> LLMResult:
-    """Fungsi utama endpoint chat — mask PII, pilih LLM (on-prem kalau sensitif), cek output terlarang, demask."""
+    """
+    Fungsi utama endpoint chat — mask PII, pilih LLM (on-prem kalau sensitif),
+    cek output terlarang, demask.
+
+    `search_query` = standalone_query hasil analyze_query (sudah dibersihkan
+    dan typo-nya diperbaiki). Dipakai HANYA sebagai sinyal tambahan deteksi
+    sensitif; prompt tetap disusun dari pesan asli user. Lihat catatan
+    detect_sensitive().
+    """
     if pii_entities is None:
         pii_entities = detect_pii_entities(user_message)
     pii_detected = len(pii_entities) > 0
 
-    is_sensitive = detect_sensitive(user_message, pii_entities)
+    is_sensitive = detect_sensitive(user_message, pii_entities, rewritten=search_query)
 
     masked_message, pii_mapping = mask_pii(user_message, entities=pii_entities) if pii_detected else (user_message, {})
     final_prompt = build_prompt(masked_message, context_chunks, chat_history,

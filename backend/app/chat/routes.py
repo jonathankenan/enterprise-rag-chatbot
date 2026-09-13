@@ -539,6 +539,10 @@ async def send_message(
                 retrieval_confidence=retrieval_confidence,
                 identifier_in_example=identifier_in_example,
                 answer_must_be_grounded=answer_must_be_grounded,
+                # 2026-09-13: query yang sudah ditulis ulang ikut dikirim supaya
+                # deteksi sensitif tidak bisa dilewati satu typo -- lihat
+                # detect_sensitive() di llm/router.py.
+                search_query=search_query,
             )
         except CommercialLLMError as e:
             raise HTTPException(status_code=502, detail=str(e))
