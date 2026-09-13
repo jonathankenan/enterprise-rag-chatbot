@@ -53,6 +53,16 @@ exec(_segment(SCHEMAS_SRC, "SourceCitation"), _ns)
 exec(_segment(ROUTES_SRC, "_build_source_citations"), _ns)
 build_citations = _ns["_build_source_citations"]
 
+# 2026-09-13: penjagaan "penolakan tidak boleh bersitasi" (uji terima D3).
+# Diambil lewat AST seperti _build_source_citations supaya yang diuji adalah
+# kode yang benar-benar dikirim, bukan salinannya.
+_ns["re"] = __import__("re")
+for _name in ("_DOC_WORD", "_REFUSAL_ABOUT_CONTEXT", "_NUMBER_RE", "_IDENT_RE"):
+    exec(_assignment(ROUTES_SRC, _name), _ns)
+exec(_segment(ROUTES_SRC, "_distinctive_tokens"), _ns)
+exec(_segment(ROUTES_SRC, "_answer_is_only_a_refusal"), _ns)
+only_refusal = _ns["_answer_is_only_a_refusal"]
+
 _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
 _tail = "\n".join(l[4:] if l.startswith("    ") else l for l in _tail.split("\n"))
@@ -110,7 +120,7 @@ class _Settings:
     citation_similarity_gap = _config_default("citation_similarity_gap")
 
 
-def select(docs, top_k=10, search_query="", faq_docs=()):
+def select(docs, top_k=10, search_query="", faq_docs=(), dropped_docs=()):
     """Run the real is_top_match/confidence block over stub documents.
 
     search_query defaults to "" — no identifier token, so the 2026-08-26
@@ -120,6 +130,10 @@ def select(docs, top_k=10, search_query="", faq_docs=()):
 
     faq_docs defaults to empty, which makes the 2026-09-13 FAQ floor a no-op.
     Pass documents to exercise the floor itself.
+
+    dropped_docs adalah kandidat yang "dibuang potongan top_k" -- default kosong
+    supaya penyelamatan identifier (2026-09-13) juga jadi no-op. Kirim dokumen
+    untuk menguji penyelamatannya.
     """
     ns = dict(vars(_vs))
     # chat_id/collection_name adalah PARAMETER retrieve_context, bukan helper
@@ -128,6 +142,10 @@ def select(docs, top_k=10, search_query="", faq_docs=()):
                "chat_id": "test-chat", "collection_name": "kb_general",
                "search_query": search_query,
                "faq_retriever": _FaqStub(faq_docs),
+               # 2026-09-13: penyelamatan identifier membaca kandidat yang
+               # dibuang potongan top_k. Lokal retrieve_context, jadi harus
+               # disemai -- sama alasannya dengan faq_retriever di atas.
+               "docs_terpotong": list(dropped_docs),
                "get_collection": lambda *a, **k: _EmptyCollection()})
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
@@ -951,6 +969,140 @@ def test_faq_retriever_always_carries_a_distance():
     src = (APP / "rag" / "vectorstore.py").read_text(encoding="utf-8")
     faq_cls = _segment(src, "FaqChromaRetriever")
     assert '_distance' in faq_cls, "FaqChromaRetriever wajib mengisi _distance"
+
+
+# ================================ identifier rescue past top_k (2026-09-13)
+#
+# Uji terima B8/D7 (dan akar catatan C1): "jelaskan FR-01" pada chat yang
+# dokumennya MEMUAT FR-01 mengembalikan id_match=0, lalu penjagaan identifier
+# menolak dengan "tidak menemukan FR-01" -- false negative tentang isi korpus
+# sendiri. Leg BM25 menemukannya dengan benar; yang membunuhnya aritmetika RRF
+# + potongan top_k (leg vektor peringkat ke-10 masih mengalahkan BM25
+# peringkat ke-1 pada bobot document_query). Terukur: chunk FR-01 baru muncul
+# di top_k 20-30, tidak pernah di top_k=10 produksi.
+
+def test_identifier_chunk_dropped_by_top_k_is_rescued_to_the_front():
+    lolos = [Doc("tidak menyebut kode apa pun di sini", filename="BRD.pdf", page=1,
+                 _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-01**|Retrieval Accuracy|minimum 92% MRR@5|", filename="BRD.pdf",
+                     page=7, _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert any(c["id_match"] for c in chunks), "chunk ber-identifier harus terselamatkan"
+    assert "FR-01" in chunks[0]["text"], "disisipkan di DEPAN -- lihat pelajaran lantai FAQ"
+
+
+def test_rescue_is_inert_when_a_surviving_chunk_already_has_the_identifier():
+    """Tidak boleh menghasilkan kembaran."""
+    lolos = [Doc("|**FR-01**|Retrieval Accuracy|92%|", filename="BRD.pdf", page=7,
+                 _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-01**|Retrieval Accuracy|92%|", filename="BRD.pdf", page=7,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert len(chunks) == 1
+
+
+def test_rescue_never_invents_a_match():
+    """
+    Identifier yang memang TIDAK ADA di korpus harus tetap tidak ditemukan --
+    ini yang menjaga penolakan B1-B4 tetap benar (diverifikasi langsung pada
+    "jelaskan FR-14": id_match tetap 0 sesudah perbaikan ini).
+    """
+    lolos = [Doc("prosa tanpa kode", filename="BRD.pdf", page=1, _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-11**|Sesuatu yang lain|", filename="BRD.pdf", page=7,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-14", dropped_docs=terpotong)
+    assert not any(c["id_match"] for c in chunks)
+    assert len(chunks) == 1, "tidak boleh menarik chunk yang identifiernya beda"
+
+
+def test_rescue_leaves_queries_without_identifiers_untouched():
+    """Kasus sintesis (FR-12) harus berperilaku persis seperti sebelum perbaikan ini."""
+    lolos = [Doc("Overdraft fee is $35.00 per occurrence", filename="Fees.pdf", page=2,
+                 _distance=dist_for(95))]
+    terpotong = [Doc("Capped at 3 occurrences per calendar day", filename="Terms.pdf", page=9,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="overdraft fee policy summary", dropped_docs=terpotong)
+    assert len(chunks) == 1, "tanpa identifier di query, tidak ada yang diselamatkan"
+
+
+def test_rescue_is_capped_at_top_matches():
+    lolos = [Doc("prosa tanpa kode", filename="BRD.pdf", page=1, _distance=dist_for(80))]
+    terpotong = [Doc(f"|**FR-01**| baris ke-{i}|", filename="BRD.pdf", page=7 + i,
+                     _distance=dist_for(60)) for i in range(6)]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert sum(1 for c in chunks if c["id_match"]) <= _vs.TOP_MATCHES
+
+
+# ============================================ refusal must not cite (2026-09-13)
+#
+# Uji terima D3. SEMUA teks jawaban di bawah adalah balasan model NYATA yang
+# terkumpul saat mengukur ini (6 pertanyaan di luar korpus + 8 di dalam korpus
+# pada KB divisi Indonesia, plus 11 pada Project NEXUS yang berbahasa Inggris),
+# bukan contoh karangan. Aturannya divalidasi atas 25 jawaban itu: 0 false
+# positive, 0 penolakan lolos.
+
+CHUNK_PTI = ("|Batas persetujuan anggaran Kepala Divisi|Rp250.000.000|\n"
+             "|Waktu tanggap permintaan internal|2 hari kerja|")
+CHUNK_EN = "|NFR-PERF-01|Time To First Token (TTFT)|< 600 ms|1,200 ms|"
+
+
+def test_refusal_phrasings_actually_observed_are_detected():
+    """Dua urutan kata yang sama-sama muncul di balasan nyata, plus sentinel."""
+    assert only_refusal("Maaf, informasi tentang SKS yang diperlukan untuk lulus dari fakultas FRI "
+                        "tidak disebutkan dalam dokumen yang disediakan.", CHUNK_PTI) is True
+    assert only_refusal("Maaf, informasi tentang harga tiket pesawat Jakarta-Bali tidak terdapat "
+                        "dalam context yang disediakan.", CHUNK_PTI) is True
+    assert only_refusal("document tidak menyebutkan owner untuk DOC-FEE-2026.", CHUNK_EN) is True
+    assert only_refusal("[NO RELEVANT CONTEXT FOUND]", CHUNK_EN) is True
+
+
+def test_grounded_answers_keep_their_citations():
+    """Jawaban bersumber dokumen, dua-duanya balasan nyata -- termasuk yang berbahasa beda dari chunk-nya."""
+    assert only_refusal("Batas persetujuan anggaran Kepala Divisi adalah Rp250.000.000. "
+                        "Di atas nilai ini wajib persetujuan Direksi.", CHUNK_PTI) is False
+    assert only_refusal("Sistem inti yang menjadi tanggung jawab divisi Pengembangan Teknologi "
+                        "Informasi adalah Core Trading Engine.", CHUNK_PTI) is False
+    # Jawaban Indonesia atas chunk Inggris: tidak boleh kena. Inilah yang
+    # mematikan kandidat overlap-kata (jawaban seperti ini skor 0.00).
+    assert only_refusal("Target TTFT adalah kurang dari 600 ms dengan batas maksimum 1.200 ms.",
+                        CHUNK_EN) is False
+
+
+def test_partially_answered_reply_keeps_its_citations():
+    """
+    Pagar utama aturan ini. Jawaban yang MENJAWAB sebagian lalu menyebut sisanya
+    tidak ada tetap layak bersitasi -- yang dipakai sebagai bukti: angka yang
+    dikutipnya memang ada di potongan sumbernya.
+    """
+    reply = ("Batas persetujuan anggaran Kepala Divisi adalah Rp250.000.000. "
+             "Jangka waktu peninjauannya tidak disebutkan dalam dokumen.")
+    assert only_refusal(reply, CHUNK_PTI) is False
+
+
+def test_refusal_that_quotes_nothing_from_the_chunk_is_stripped():
+    reply = "Prioritas NFR-PERF-03 tidak disebutkan dalam konteks yang diberikan."
+    assert only_refusal(reply, CHUNK_PTI) is True
+
+
+def test_general_knowledge_answer_is_not_treated_as_a_refusal():
+    """
+    Batas yang disadari: 4 dari 6 pertanyaan di luar korpus TIDAK ditolak model
+    -- dijawab dari pengetahuan umum ("Ibu kota negara Jepang adalah Tokyo")
+    sambil tetap membawa sitasi dokumen. Aturan ini sengaja TIDAK menangkapnya:
+    itu masalah CAKUPAN JAWABAN (ADR-001), bukan penolakan, dan menebak-nebak
+    di sini berarti mencabut sitasi dari jawaban yang bentuknya sah. Dicatat
+    sebagai test supaya batasnya tidak disalahpahami sebagai kelalaian.
+    """
+    assert only_refusal("Ibu kota negara Jepang adalah Tokyo.", CHUNK_PTI) is False
+    assert only_refusal("Presiden Indonesia pada tahun 1970 adalah Soeharto.", CHUNK_PTI) is False
+
+
+def test_distinctive_tokens_ignores_single_digits():
+    """Digit tunggal lebih sering penomoran daftar ("1.", "2.") daripada kutipan nilai."""
+    tokens = _ns["_distinctive_tokens"]
+    assert tokens("langkah 1 lalu 2") == set()
+    assert "250000000" in tokens("Rp250.000.000")
+    assert "sop-02" in tokens("Isi SOP-02 adalah ...")
 
 
 # ---------------------------------------------------------------- standalone

@@ -902,8 +902,51 @@ def retrieve_context(
 
     ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
     docs = ensemble.invoke(search_query)
+    # Kandidat yang akan dibuang potongan top_k di bawah. Disimpan karena
+    # penyelamatan identifier sesudahnya memerlukannya -- tanpa ini, satu-satunya
+    # chunk yang memuat identifier yang ditanya bisa hilang tanpa jejak.
+    docs_terpotong = docs[top_k:]
 
     docs = docs[:top_k]
+
+    # ── 2026-09-13: identifier yang DITANYA tidak boleh dibuang potongan ────
+    # Ditemukan lewat uji terima B8/D7 (dan ini juga akar catatan C1). "jelaskan
+    # FR-01" pada chat yang dokumennya MEMUAT FR-01 mengembalikan 10 chunk
+    # dengan id_match=0, lalu penjagaan identifier di chat/routes.py melapor
+    # "Saya tidak menemukan FR-01 di dokumen yang tersedia" -- false negative
+    # yang meyakinkan TENTANG ISI KORPUSNYA SENDIRI.
+    #
+    # Leg BM25 sudah bekerja benar: ditanya sendiri, dia mengembalikan 4 chunk
+    # dan 2 di antaranya memuat FR-01 (termasuk baris tabel FR yang benar).
+    # Yang membunuhnya aritmetika RRF + potongan top_k: leg vektor mengembalikan
+    # 10 dokumen, dan pada bobot document_query (0.45) dokumen vektor peringkat
+    # ke-10 pun (0.45/70) masih mengalahkan BM25 peringkat ke-1 (0.15/61). Jadi
+    # hasil BM25 SELALU jatuh di luar 10 besar setiap kali leg vektor penuh --
+    # justru untuk pertanyaan yang menjadi alasan leg BM25 ada.
+    #
+    # Terukur pada "jelaskan FR-01" (chat Project NEXUS), chunk FR-01 baru
+    # muncul di top_k 20-30 dan TIDAK PERNAH di top_k=10 produksi, di SEMUA
+    # profil bobot:
+    #
+    #   weight_hint        top_k=10   top_k=20   top_k=30
+    #   document_query        0          0          1
+    #   faq_lookup            0          2          2
+    #   (default)             0          0          1
+    #
+    # Menaikkan top_k DITOLAK sebagai perbaikan: itu memperbesar konteks untuk
+    # semua pertanyaan demi memperbaiki satu kelas, dan batas 15.000 karakter
+    # build_prompt lalu memotongnya lagi di ujung yang lain.
+    #
+    # Jadi yang diselamatkan cuma chunk yang BENAR-BENAR memuat identifier yang
+    # ditanya, dan hanya kalau tidak ada satu pun yang lolos -- disisipkan di
+    # DEPAN karena pelajaran lantai FAQ di atas: sampai ke konteks saja tidak
+    # cukup, chunk harus menonjol. Query tanpa identifier tidak tersentuh sama
+    # sekali, jadi kasus sintesis (FR-12) berperilaku persis seperti sebelumnya.
+    _id_ditanya = extract_query_identifiers(search_query)
+    if _id_ditanya and not any(text_mentions_identifier(d.page_content, _id_ditanya) for d in docs):
+        _diselamatkan = [d for d in docs_terpotong
+                         if text_mentions_identifier(d.page_content, _id_ditanya)][:TOP_MATCHES]
+        docs = _diselamatkan + docs
 
     # ── 2026-09-13: lantai leg FAQ, supaya label intent yang salah tidak ────
     # menghapus FAQ dari konteks sama sekali.

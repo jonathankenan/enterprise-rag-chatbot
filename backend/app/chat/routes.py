@@ -1,5 +1,6 @@
 """Titik integrasi: autentikasi/guardrail/audit log/database + retrieval RAG/LLM switching (F1-05)."""
 import json
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -162,6 +163,69 @@ def rename_chat(
         detail=f"chat_id={chat.id}, renamed from='{old_title}' to='{chat.title}'",
     )
     return chat
+
+
+# ── 2026-09-13: penolakan tidak boleh membawa sitasi (uji terima D3) ────────
+# Ditanya hal yang tidak ada di korpus mana pun, model menjawab "informasi itu
+# tidak disebutkan dalam dokumen" -- dan jawaban itu tetap membawa baris
+# Referensi + badge keyakinan. Sitasi yang menunjuk dokumen untuk jawaban
+# "saya tidak tahu" adalah pelabelan keliru yang meyakinkan, kelas yang sama
+# dengan penjagaan divisi asing dan identifier di endpoint chat.
+#
+# TIGA kandidat sinyal lain diukur lebih dulu dan DITOLAK, semuanya karena
+# data, bukan karena selera (angka lengkap: lihat catatan vault "RAG
+# Pipeline"):
+#   * Ambang confidence -- tidak punya daya pisah. Pertanyaan di LUAR korpus
+#     justru skor lebih tinggi (76/79) daripada pertanyaan sah (69).
+#   * Overlap kata query<->chunk -- merusak sintesis FR-12. Test
+#     test_query_without_identifier_leaves_the_gate_inert memuat chunk sah
+#     yang berbagi NOL kata dengan query-nya, jadi aturan overlap sekecil
+#     apa pun mematikannya.
+#   * Overlap kata jawaban<->chunk -- terikat bahasa. Pada korpus Inggris
+#     (Project NEXUS) dengan jawaban Indonesia, tiga jawaban yang benar-benar
+#     bersumber dokumen skor 0.00-0.08, di BAWAH plafon 0.20 milik pertanyaan
+#     luar korpus. Tidak ada ambang yang berlaku di dua korpus sekaligus.
+#
+# Yang dipakai: penanda pada TEKS JAWABAN. Itu justru tidak terikat bahasa
+# dokumen, karena bahasa jawaban dipaku settings.response_language.
+# Pola di bawah disusun dari penolakan NYATA yang terkumpul (dua urutan kata
+# yang sama-sama muncul, plus sentinel yang dibeo model saat konteks kosong),
+# bukan dari dugaan.
+#
+# Divalidasi atas 25 jawaban nyata (16 bersumber dokumen di dua bahasa, 5
+# penolakan, 4 jawaban pengetahuan umum): 0 false positive, 0 penolakan lolos.
+_DOC_WORD = r"(?:konteks|context|dokumen|document)"
+_REFUSAL_ABOUT_CONTEXT = re.compile(
+    rf"tidak\s+(?:\w+\s+){{0,3}}?(?:dalam|di)\s+(?:\w+\s+){{0,2}}?{_DOC_WORD}"  # "tidak disebutkan dalam dokumen"
+    rf"|{_DOC_WORD}\s+(?:\w+\s+){{0,2}}?tidak\s+\w+"                            # "document tidak menyebutkan owner"
+    rf"|\[NO RELEVANT CONTEXT FOUND\]",                                         # sentinel build_prompt, kadang dibeo model
+    re.I,
+)
+_NUMBER_RE = re.compile(r"\d[\d.,]*")
+_IDENT_RE = re.compile(r"\b[A-Za-z]{2,}-[A-Za-z0-9./-]*\d[\w./-]*\b")
+
+
+def _distinctive_tokens(text: str) -> set[str]:
+    """Angka (>=2 digit) dan identifier -- satu-satunya hal yang bisa dicocokkan LINTAS BAHASA antara jawaban dan potongan sumbernya. Digit tunggal dibuang: itu lebih sering penomoran daftar daripada kutipan nilai."""
+    angka = {n.strip(".,").replace(".", "").replace(",", "") for n in _NUMBER_RE.findall(text)}
+    return {a for a in angka if len(a) >= 2} | {i.lower() for i in _IDENT_RE.findall(text)}
+
+
+def _answer_is_only_a_refusal(reply: str, cited_text: str) -> bool:
+    """
+    True kalau jawaban ini menolak DAN tidak mengutip apa pun dari potongan
+    yang dikutip.
+
+    Syarat kedua itu pagar untuk jawaban SEBAGIAN terjawab -- "SOP-02 mengatur
+    X, tapi jangka waktunya tidak disebutkan dalam dokumen" memuat penanda
+    penolakan tapi tetap layak bersitasi. Kalau jawaban mengutip angka atau
+    identifier yang memang ada di potongannya, sitasi dipertahankan.
+    Arah kegagalan pagar ini aman: kalau ia salah, hasilnya sitasi TETAP ADA
+    (perilaku lama), bukan sitasi hilang dari jawaban yang benar.
+    """
+    if not _REFUSAL_ABOUT_CONTEXT.search(reply or ""):
+        return False
+    return not (_distinctive_tokens(reply or "") & _distinctive_tokens(cited_text or ""))
 
 
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
@@ -616,6 +680,18 @@ async def send_message(
 
     stored_ai_content, ai_pii_mapping = _mask_for_storage(result.reply)  # teks baru hasil generate, deteksi PII-nya dihitung sendiri di sini
     citations = _build_source_citations(context_chunks)
+
+    # 2026-09-13 (uji terima D3): jawaban yang isinya cuma menolak tidak boleh
+    # membawa Referensi maupun badge keyakinan -- lihat catatan panjang di atas
+    # _answer_is_only_a_refusal(), termasuk tiga kandidat sinyal lain yang
+    # diukur dan ditolak. Diperiksa terhadap teks potongan yang BENAR-BENAR
+    # dikutip, bukan seluruh konteks: yang diklaim baris Referensi itu justru
+    # potongan-potongan inilah.
+    if citations and _answer_is_only_a_refusal(
+        result.reply, " ".join(c.get("text") or "" for c in context_chunks if c.get("is_top_match"))
+    ):
+        citations = []
+        result.confidence_score = None
 
     ai_msg = Message(
         chat_id=chat.id,
