@@ -81,6 +81,21 @@ class _EmptyCollection:
         return {"documents": [], "metadatas": []}
 
 
+# 2026-09-13: lantai leg FAQ (retrieve_context) memanggil faq_retriever.invoke()
+# kalau tidak ada chunk FAQ yang lolos potongan top_k. faq_retriever adalah
+# LOKAL retrieve_context, jadi tidak ikut terbawa lewat vars(_vs) — harus
+# disemai eksplisit di sini, persis alasan chat_id/collection_name/
+# get_collection sudah disemai. Default-nya kosong supaya lantai itu jadi
+# no-op: tes di file ini soal PEMILIHAN sitasi, bukan soal FAQ. Tes lantai
+# FAQ-nya sendiri mengirim stub berisi dokumen (lihat kelompok tesnya di bawah).
+class _FaqStub:
+    def __init__(self, docs=()):
+        self._docs = list(docs)
+
+    def invoke(self, _query):
+        return list(self._docs)
+
+
 def _config_default(name: str):
     """Read a Settings default straight out of config.py, so these tests use
     the real configured value instead of a hardcoded copy that can drift."""
@@ -95,13 +110,16 @@ class _Settings:
     citation_similarity_gap = _config_default("citation_similarity_gap")
 
 
-def select(docs, top_k=10, search_query=""):
+def select(docs, top_k=10, search_query="", faq_docs=()):
     """Run the real is_top_match/confidence block over stub documents.
 
     search_query defaults to "" — no identifier token, so the 2026-08-26
     lexical gate stays inert and these tests exercise the similarity floor on
     its own, exactly as they did before the gate existed. Pass a real query to
     test the gate itself.
+
+    faq_docs defaults to empty, which makes the 2026-09-13 FAQ floor a no-op.
+    Pass documents to exercise the floor itself.
     """
     ns = dict(vars(_vs))
     # chat_id/collection_name adalah PARAMETER retrieve_context, bukan helper
@@ -109,6 +127,7 @@ def select(docs, top_k=10, search_query=""):
     ns.update({"docs": list(docs), "top_k": top_k, "settings": _Settings,
                "chat_id": "test-chat", "collection_name": "kb_general",
                "search_query": search_query,
+               "faq_retriever": _FaqStub(faq_docs),
                "get_collection": lambda *a, **k: _EmptyCollection()})
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
@@ -834,6 +853,104 @@ def test_reanchor_respects_the_limit():
     _vs.reanchor_citable_chunks(chunks, limit=2)
     assert sum(c["is_top_match"] for c in chunks) == 2
     assert [c["is_top_match"] for c in chunks[:2]] == [True, True], "falls back to list order, table-row-preference already applied by the caller"
+
+
+# ======================================================== FAQ floor (2026-09-13)
+#
+# Uji terima D6/G5: pertanyaan yang jawabannya jelas ada di FAQ dijawab "tidak
+# disebutkan dalam dokumen". Mesin FAQ-nya sehat — dengan weight_hint
+# "faq_lookup" entri yang benar mendarat di posisi 0 dan dikutip. Yang gagal
+# klasifikasi intent: "kapan layanan AI Chatbot maintenance?" -> "question"
+# 3/3, "jadwal maintenance chatbot kapan ya" -> "general_chat" 3/3. Pada bobot
+# default leg FAQ cuma 0.175 dan entrinya tidak masuk top_k SAMA SEKALI.
+#
+# Perbaikannya struktural (satu tebakan LLM lunak tidak boleh menghapus satu
+# leg penuh), bukan menaikkan bobot global.
+
+FAQ_TEXT = "Q: Kapan layanan AI Chatbot maintenance?\nA: Setiap hari Sabtu jam 15:00"
+
+
+def _faq_doc(text=FAQ_TEXT, sim=75):
+    """
+    Chunk FAQ SELALU membawa _distance: FaqChromaRetriever mengisinya
+    (meta["_distance"] = dist) untuk setiap dokumen yang dikembalikan. Itu
+    bukan detail kosmetik — lihat test_faq_retriever_always_carries_a_distance
+    di bawah untuk kenapa penyisipan di depan bergantung padanya.
+    """
+    return Doc(text=text, faq_id="faq-1", _distance=dist_for(sim))
+
+
+def test_faq_floor_adds_the_faq_hit_at_the_front_not_the_tail():
+    """
+    Posisi DEPAN itu wajib, bukan gaya. Versi pertama menaruhnya di ekor:
+    entri FAQ sampai ke konteks dan ikut dikutip, tapi model tetap menjawab
+    "tidak disebutkan dalam konteks" -- 71 karakter FAQ tenggelam di antara
+    ~3.5k karakter tabel KB. Diuji dengan isi yang sama persis, cuma urutan
+    beda: FAQ di depan dijawab benar, di ekor ditolak. Kalau baris ini
+    dilonggarkan jadi "yang penting ada di konteks", bug itu kembali tanpa
+    satu pun test lain yang gagal.
+    """
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80)),
+            Doc(filename="PTI.pdf", page=2, _distance=dist_for(78))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    assert [c["source_type"] for c in chunks].count("faq") == 1
+    assert chunks[0]["source_type"] == "faq", "harus di DEPAN supaya tidak tenggelam"
+    assert [c["filename"] for c in chunks[1:]] == ["PTI.pdf", "PTI.pdf"], "kandidat yang sudah ada tetap urut, cuma bergeser"
+
+
+def test_faq_floor_rejects_a_faq_hit_that_does_not_match_the_query():
+    """Penjaga relevansinya sama dengan gate BM25-only — bukan heuristik kedua."""
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="berapa batas persetujuan anggaran divisi",
+                       faq_docs=[_faq_doc()])
+    assert "faq" not in [c["source_type"] for c in chunks]
+
+
+def test_faq_floor_is_inert_when_a_faq_chunk_already_survived_top_k():
+    """Tidak boleh menghasilkan entri FAQ kembar."""
+    docs = [_faq_doc(), Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    assert [c["source_type"] for c in chunks].count("faq") == 1
+
+
+def test_faq_floor_is_inert_when_the_faq_collection_is_empty():
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance", faq_docs=[])
+    assert "faq" not in [c["source_type"] for c in chunks]
+    assert len(chunks) == 1
+
+
+def test_faq_floor_does_not_displace_a_scored_candidate_from_the_citations():
+    """
+    Menyisipkan di depan menggeser POSISI, dan itu memang tujuannya — yang
+    tidak boleh adalah mengusir kandidat ber-skor dari daftar sitasi. (Versi
+    pertama test ini memeriksa "kutipan pertama", padahal itu cuma urutan
+    daftar, bukan anchor — klaim yang tidak bisa dibuktikan dari harness ini.)
+    """
+    docs = [Doc(filename="PTI.pdf", page=3, _distance=dist_for(88))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    dikutip = [c for c in chunks if c["is_top_match"]]
+    assert "PTI.pdf" in [c["filename"] for c in dikutip], "kandidat ber-skor tetap harus dikutip"
+
+
+def test_faq_retriever_always_carries_a_distance():
+    """
+    Penyisipan di depan BERGANTUNG pada ini, dan pertautannya tidak terlihat
+    dari kode lantai FAQ-nya sendiri. Kalau chunk FAQ sampai tidak punya
+    _distance, dia jadi peringkat #1 tanpa similarity -- dan aturan 2026-08-26
+    memperlakukan itu sebagai kecocokan kata PERSIS: jadi anchor dengan
+    reference=100, yang lalu menyaring habis kandidat vektor lain (terlihat
+    persis begitu saat fixture test ini belum memakai _distance: PTI similarity
+    88 ikut terbuang). FaqChromaRetriever mengisi meta["_distance"] untuk tiap
+    dokumen, jadi hari ini tidak bisa terjadi -- test ini yang menjaga supaya
+    tetap begitu.
+    """
+    src = (APP / "rag" / "vectorstore.py").read_text(encoding="utf-8")
+    faq_cls = _segment(src, "FaqChromaRetriever")
+    assert '_distance' in faq_cls, "FaqChromaRetriever wajib mengisi _distance"
 
 
 # ---------------------------------------------------------------- standalone

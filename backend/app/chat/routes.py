@@ -563,6 +563,38 @@ async def send_message(
                 "ilustrasi, bukan hasil pengukuran.\n\n"
             ) + result.reply
 
+    # ── 2026-09-13: jawaban yang BUKAN dari dokumen tidak boleh bersitasi ──
+    # Ditemukan lewat uji terima D2: "buatkan puisi singkat tentang laut"
+    # dijawab wajar, tapi tetap membawa baris Referensi dan badge keyakinan —
+    # retrieval memang tetap jalan dan selalu mengembalikan SESUATU, jadi
+    # tiga potongan KB ikut dikutip untuk jawaban yang sama sekali tidak
+    # bersumber dari situ. Itu pelabelan keliru yang meyakinkan, kelas yang
+    # sama dengan penjagaan divisi asing di atas.
+    #
+    # Sinyalnya intent GENERAL_CHAT dari lapis 2, dan itu SUDAH jadi niat
+    # desain sejak awal — docstring escalation_confidence_threshold di
+    # config.py menyebut "None (general chat) tidak pernah memicu", tapi tidak
+    # ada satu pun kode yang benar-benar mengosongkannya. Ini melengkapi itu.
+    #
+    # Diukur dulu, bukan diasumsikan: klasifikasi intent diuji 5x untuk tiap
+    # kasus dan stabil 5/5 (kreatif -> general_chat, "apa isi SOP-02" ->
+    # document_query). Beda sifat dari perbaikan typo di detect_sensitive()
+    # yang ternyata non-deterministik: di sini keluaran LLM dibatasi daftar
+    # putih LAYER2_INTENTS, bukan teks bebas.
+    #
+    # SENGAJA tidak memakai regex "buatkan/tulis/bikin ..." sebagai jaring
+    # tambahan: "buatkan ringkasan dokumen ini" akan ikut tertangkap, padahal
+    # itu summary_request yang justru WAJIB bersitasi.
+    #
+    # SENGAJA juga tidak mengosongkan context_chunks SEBELUM prompt disusun.
+    # Kalau klasifikasi sesekali salah menandai pertanyaan dokumen sebagai
+    # general_chat, akibat terburuknya cuma sitasi hilang (ringan), bukan
+    # jawaban jadi kosong tanpa konteks (berat) — arah kegagalan yang sama
+    # dengan detect_sensitive().
+    if intent == Intent.GENERAL_CHAT:
+        context_chunks = []
+        result.confidence_score = None
+
     # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM ----------
     if result.pii_detected:
         log_guardrail_event(

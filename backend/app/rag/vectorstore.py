@@ -859,6 +859,26 @@ def reanchor_citable_chunks(chunks: list[dict], limit: int = TOP_MATCHES) -> Non
         c["is_top_match"] = id(c) in keep_ids
 
 
+# Penjaga relevansi berbasis overlap kata SIGNIFIKAN (>=4 huruf). Dipakai dua
+# tempat: gate BM25-only di blok sitasi retrieve_context() (lihat catatan
+# panjang di sana soal asal-usul angka 0.5 dan daftar stopword sempit ini), dan
+# lantai leg FAQ. Keduanya WAJIB memakai definisi yang sama -- kalau salah satu
+# disalin, dua heuristik itu akan menyimpang diam-diam.
+_QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
+                    "oleh", "agar", "maka", "jika", "kalau", "serta",
+                    "dapat", "telah", "sudah", "untuk", "dengan"}
+_QUERY_OVERLAP_MIN_RATIO = 0.5
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
+
+
+def _is_faq_doc(doc) -> bool:
+    """Leg FAQ dikenali dari faq_id di metadata -- sumber kebenaran yang sama dipakai saat menyusun source_type di ujung retrieve_context()."""
+    return "faq_id" in (doc.metadata or {})
+
+
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
     user_divisi: str | None = None, weight_hint: str | None = None,
@@ -884,6 +904,68 @@ def retrieve_context(
     docs = ensemble.invoke(search_query)
 
     docs = docs[:top_k]
+
+    # ── 2026-09-13: lantai leg FAQ, supaya label intent yang salah tidak ────
+    # menghapus FAQ dari konteks sama sekali.
+    #
+    # Ditemukan lewat uji terima D6/G5. Mesin FAQ-nya SEHAT: dengan
+    # weight_hint="faq_lookup" (leg FAQ 0.45) entri yang benar mendarat di
+    # posisi 0 dan ikut dikutip. Yang gagal ada di HULU -- klasifikasi intent.
+    # Terukur 3x per pertanyaan dan hasilnya konsisten (bukan acak):
+    #
+    #   "bagaimana cara mengajukan cuti"        -> faq_lookup  3/3
+    #   "apa kebijakan perusahaan soal jam kerja"-> faq_lookup  3/3
+    #   "kapan layanan AI Chatbot maintenance?" -> question    3/3
+    #   "berapa lama proses reset password"     -> question    3/3
+    #   "jadwal maintenance chatbot kapan ya"   -> general_chat 3/3
+    #
+    # Batasnya: pertanyaan PROSEDURAL kena, pertanyaan OPERASIONAL ("kapan",
+    # "berapa lama") jatuh ke fallback. Dengan bobot default leg FAQ cuma
+    # 0.175, dan itu bukan sekadar turun peringkat -- entri FAQ-nya TIDAK
+    # MASUK top_k sama sekali, jadi model menjawab "tidak disebutkan dalam
+    # dokumen" untuk hal yang jelas-jelas ada di FAQ.
+    #
+    # Perbaikannya STRUKTURAL, bukan menaikkan bobot: satu tebakan LLM yang
+    # lunak tidak boleh menghapus seluruh leg. Naiknya bobot juga terukur
+    # butuh ~0.40 (dari 0.20) supaya masuk, dan menggeser sebanyak itu untuk
+    # SEMUA query berdasar dua contoh justru jenis tebakan yang sudah
+    # berkali-kali jadi masalah di file ini. Matematika RRF-nya: skor entri
+    # FAQ terbaik selalu w_faq x 1/(60+1), jadi tebing ini tidak tergantung
+    # berapa banyak entri FAQ yang ada -- menambah entri tidak menolong.
+    #
+    # Yang ditambahkan cuma hit TERATAS leg FAQ, dan hanya kalau lolos penjaga
+    # relevansi yang SAMA dengan gate BM25-only. Layak-kutip tetap diputuskan
+    # gate sitasi yang sudah ada, bukan oleh penambahan ini.
+    #
+    # Disisipkan di DEPAN, dan itu bukan pilihan gaya. Versi pertama menaruhnya
+    # di ekor supaya tidak mungkin merebut anchor -- entri FAQ-nya memang sampai
+    # ke konteks dan ikut dikutip, TAPI model tetap menjawab "tidak disebutkan
+    # dalam konteks". Bukan soal terpotong (konteksnya cuma 3.615 karakter,
+    # jauh di bawah batas 15.000 build_prompt, dan teks FAQ-nya terbukti ADA di
+    # prompt). Diisolasi dengan tiga panggilan model atas isi yang sama persis:
+    #
+    #   konteks HANYA chunk FAQ   -> "Setiap hari Sabtu jam 15:00"   (benar)
+    #   11 chunk, FAQ di EKOR     -> "tidak disebutkan dalam konteks" (salah)
+    #   11 chunk, FAQ di DEPAN    -> "Setiap hari Sabtu jam 15:00"   (benar)
+    #
+    # Jadi 71 karakter FAQ tenggelam di antara ~3.5k karakter tabel KB yang
+    # tidak relevan: sampai ke konteks saja TIDAK cukup, dia harus menonjol.
+    # Sitasi yang menunjuk sumber yang model-nya sendiri tidak pakai justru
+    # kelas masalah yang penjagaan di file ini berusaha dihapus.
+    #
+    # Anchor tetap aman: anchor dipilih dari similarity TERTINGGI, bukan dari
+    # posisi di daftar (lihat blok sitasi di bawah), dan kelayakan kutip chunk
+    # FAQ ini masih harus lewat gate yang sama seperti kandidat lain.
+    if not any(_is_faq_doc(d) for d in docs):
+        faq_words = _content_words(search_query)
+        for kandidat in faq_retriever.invoke(search_query)[:1]:
+            cocok = (
+                not faq_words
+                or len(faq_words & _content_words(kandidat.page_content)) / len(faq_words)
+                >= _QUERY_OVERLAP_MIN_RATIO
+            )
+            if cocok:
+                docs.insert(0, kandidat)
 
     # ── 2026-08-31: lengkapi baris tabel untuk pertanyaan sintesis ──────────
     # Ditanya "functional requirement", jawaban cuma memuat 5 dari 12 FR dan
@@ -1141,14 +1223,10 @@ def retrieve_context(
     # kecil ini sengaja SEMPIT (kata sambung/depan yang jelas tidak
     # bermakna), bukan daftar stopword NLP umum -- kata seperti "wajib",
     # "tidak", "harus" tetap dihitung karena membawa makna di teks kepatuhan.
-    _QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
-                        "oleh", "agar", "maka", "jika", "kalau", "serta",
-                        "dapat", "telah", "sudah", "untuk", "dengan"}
-    _QUERY_OVERLAP_MIN_RATIO = 0.5
-
-    def _content_words(text: str) -> set[str]:
-        return {w for w in (m.lower() for m in re.findall(r"[a-zA-Z]{4,}", text)) if w not in _QUERY_STOPWORDS}
-
+    # 2026-09-13: _QUERY_STOPWORDS / _QUERY_OVERLAP_MIN_RATIO / _content_words
+    # dipindah ke level modul (nilai dan perilakunya TIDAK berubah) supaya
+    # lantai leg FAQ di atas memakai penjaga relevansi yang SAMA, bukan
+    # menyalinnya jadi heuristik kedua yang bisa menyimpang sendiri.
     _query_words = _content_words(search_query)
 
     def _bm25_only_matches_query(i: int) -> bool:
