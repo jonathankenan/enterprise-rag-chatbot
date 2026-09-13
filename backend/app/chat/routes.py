@@ -228,6 +228,30 @@ def _answer_is_only_a_refusal(reply: str, cited_text: str) -> bool:
     return not (_distinctive_tokens(reply or "") & _distinctive_tokens(cited_text or ""))
 
 
+# ── 2026-09-13: <br> mentah di panel kutipan (uji terima D4) ────────────────
+# pymupdf4llm menulis pembungkus baris DI DALAM sel tabel sebagai <br>, jadi
+# teks potongan memuat "Bursa Efek<br>Indonesia", "1 Januari<br>2024",
+# "Kode<br>SOP", "di<br>luar itu wajib ...". Panel kutipan menampilkan teks itu
+# apa adanya (bukan sebagai HTML), jadi tag-nya terbaca mentah oleh user.
+#
+# Diganti SPASI, bukan dihapus: setiap kemunculan yang ditemukan pada korpus
+# nyata adalah wrap di tengah frasa, dan menghapusnya akan merekatkan kata
+# ("di<br>luar" -> "diluar").
+#
+# Dibersihkan di lapis SITASI saja, bukan saat indexing. Alasannya sama dengan
+# seluruh penjagaan lain di file ini: chunk_text()/indexing adalah area yang
+# pernah meregresikan E1, dan teks yang dikirim ke model TIDAK diubah -- jadi
+# hasil eval dan grounding tidak ikut bergeser oleh perbaikan kosmetik.
+_BR_TAG = re.compile(r"<\s*br\s*/?\s*>", re.I)
+
+
+def _readable_chunk(text: str) -> str:
+    """Rapikan artefak render yang cuma mengganggu MATA, bukan model."""
+    if not text:
+        return text
+    return re.sub(r"[ \t]{2,}", " ", _BR_TAG.sub(" ", text))
+
+
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
     """SRS poin 12.a — dedup context_chunks jadi satu entri per dokumen/FAQ unik, kumpulkan semua nomor halaman jadi label "file.pdf (hal. 2, 5)"."""
     order: list[str] = []          # key insertion order, buat urutan citation stabil
@@ -302,7 +326,7 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         citations.append(SourceCitation(
             label=label, filename=filenames[key], display_title=display_titles[key],
             doc_type=doc_types[key], source_type=source_types[key], pages=sorted_pages,
-            chunks=[CitationChunk(page=p, text=t) for p, t in ordered_chunks],
+            chunks=[CitationChunk(page=p, text=_readable_chunk(t)) for p, t in ordered_chunks],
         ))
     return citations
 

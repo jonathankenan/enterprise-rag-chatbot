@@ -63,6 +63,11 @@ exec(_segment(ROUTES_SRC, "_distinctive_tokens"), _ns)
 exec(_segment(ROUTES_SRC, "_answer_is_only_a_refusal"), _ns)
 only_refusal = _ns["_answer_is_only_a_refusal"]
 
+# 2026-09-13: perapian teks potongan untuk panel kutipan (uji terima D4).
+exec(_assignment(ROUTES_SRC, "_BR_TAG"), _ns)
+exec(_segment(ROUTES_SRC, "_readable_chunk"), _ns)
+readable = _ns["_readable_chunk"]
+
 _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
 _tail = "\n".join(l[4:] if l.startswith("    ") else l for l in _tail.split("\n"))
@@ -969,6 +974,63 @@ def test_faq_retriever_always_carries_a_distance():
     src = (APP / "rag" / "vectorstore.py").read_text(encoding="utf-8")
     faq_cls = _segment(src, "FaqChromaRetriever")
     assert '_distance' in faq_cls, "FaqChromaRetriever wajib mengisi _distance"
+
+
+# ==================================== citation panel readability (2026-09-13)
+#
+# Uji terima D4: panel kutipan menampilkan "<br>" mentah. pymupdf4llm menulis
+# wrap DI DALAM sel tabel sebagai <br>. Semua contoh di bawah adalah teks chunk
+# NYATA dari KB fixture, diambil apa adanya saat mengukur ini.
+
+CHUNK_ASLI_REG = ("|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n"
+                  "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|"
+                  "Bursa Efek<br>Indonesia|1 Januari<br>2024|")
+CHUNK_ASLI_SOP = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-03|Rilis ke Produksi|Rilis hanya boleh dijalankan Selasa dan Kamis "
+                  "pukul 19.00-22.00 WIB, di<br>luar itu wajib emergency change request.|")
+
+
+def test_br_tags_from_real_chunks_become_spaces():
+    hasil = readable(CHUNK_ASLI_REG)
+    assert "<br>" not in hasil
+    assert "Bursa Efek Indonesia" in hasil
+    assert "1 Januari 2024" in hasil
+    assert "Berlaku Sejak" in hasil
+
+
+def test_br_is_replaced_not_deleted():
+    """
+    Menghapus (bukan mengganti spasi) akan merekatkan kata: "di<br>luar" ->
+    "diluar". Kasus itu nyata, ada di chunk SOP-03.
+    """
+    hasil = readable(CHUNK_ASLI_SOP)
+    assert "di luar itu wajib" in hasil
+    assert "diluar" not in hasil
+    assert "Kode SOP" in hasil
+
+
+def test_br_variants_are_handled():
+    assert readable("a<br/>b") == "a b"
+    assert readable("a<br />b") == "a b"
+    assert readable("a<BR>b") == "a b"
+
+
+def test_readable_chunk_leaves_ordinary_text_alone():
+    biasa = "|SOP-01|Prosedur Penanganan Insiden|Eskalasi maksimal 30 menit.|"
+    assert readable(biasa) == biasa
+    assert readable("") == ""
+    assert readable(None) is None
+
+
+def test_table_pipes_and_newlines_are_preserved():
+    """
+    Sengaja TIDAK membongkar markdown tabelnya -- yang dilaporkan cuma <br>,
+    dan pipa/baris barunya justru yang membuat panel masih terbaca sebagai
+    tabel di frontend.
+    """
+    hasil = readable(CHUNK_ASLI_REG)
+    assert hasil.count("\n") == CHUNK_ASLI_REG.count("\n")
+    assert "|---|---|---|---|" in hasil
 
 
 # ================================ identifier rescue past top_k (2026-09-13)
