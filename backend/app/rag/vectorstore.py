@@ -815,9 +815,20 @@ def _is_render_duplicate(text_a: str, text_b: str, threshold: float = 0.75) -> b
 # Dihoist ke level modul 2026-09-10: sebelumnya lokal di retrieve_context()
 # untuk saringan BM25-only, sekarang dipakai juga oleh answer_uses_context()
 # yang dipanggil chat/routes.py SETELAH jawaban selesai dibuat.
+#
+# 2026-09-13: _QUERY_OVERLAP_MIN_RATIO ikut dinaikkan ke sini. Dipakai DUA
+# tempat -- gate BM25-only di blok sitasi retrieve_context() (lihat catatan
+# panjang di sana soal asal-usul angka 0.5) dan lantai leg FAQ (juga di
+# retrieve_context()). Keduanya WAJIB memakai definisi yang sama; kalau salah
+# satu disalin jadi konstanta lokal sendiri, dua heuristik itu bisa menyimpang
+# diam-diam tanpa ada yang sadar. Sengaja TETAP TERPISAH dari
+# ANSWER_GROUNDING_MIN_RATIO di bawah -- itu overlap JAWABAN lawan konteks,
+# sumbu perbandingan yang berbeda dari overlap QUERY lawan satu chunk di sini,
+# jadi kedua angka tidak dipaksa sama.
 _QUERY_STOPWORDS = {"yang", "dari", "atau", "akan", "juga", "saja", "pada",
                     "oleh", "agar", "maka", "jika", "kalau", "serta",
                     "dapat", "telah", "sudah", "untuk", "dengan"}
+_QUERY_OVERLAP_MIN_RATIO = 0.5
 
 
 def _content_words(text: str) -> set[str]:
@@ -930,6 +941,15 @@ def reanchor_citable_chunks(chunks: list[dict], limit: int = TOP_MATCHES) -> Non
         c["is_top_match"] = id(c) in keep_ids
 
 
+# _QUERY_STOPWORDS / _QUERY_OVERLAP_MIN_RATIO / _content_words() sudah
+# didefinisikan di level modul, dekat answer_uses_context() -- lihat catatan
+# di sana. Dipakai di sini juga (gate BM25-only + lantai leg FAQ di bawah)
+# supaya ketiga pemakai berbagi satu definisi, bukan tiga yang bisa menyimpang.
+def _is_faq_doc(doc) -> bool:
+    """Leg FAQ dikenali dari faq_id di metadata -- sumber kebenaran yang sama dipakai saat menyusun source_type di ujung retrieve_context()."""
+    return "faq_id" in (doc.metadata or {})
+
+
 def retrieve_context(
     search_query: str, chat_id: str, collection_name: str = "kb_general", top_k: int = 10,
     user_divisi: str | None = None, weight_hint: str | None = None,
@@ -953,8 +973,113 @@ def retrieve_context(
 
     ensemble = EnsembleRetriever(retrievers=retrievers, weights=weights)
     docs = ensemble.invoke(search_query)
+    # Kandidat yang akan dibuang potongan top_k di bawah. Disimpan karena
+    # penyelamatan identifier sesudahnya memerlukannya -- tanpa ini, satu-satunya
+    # chunk yang memuat identifier yang ditanya bisa hilang tanpa jejak.
+    docs_terpotong = docs[top_k:]
 
     docs = docs[:top_k]
+
+    # ── 2026-09-13: identifier yang DITANYA tidak boleh dibuang potongan ────
+    # Ditemukan lewat uji terima B8/D7 (dan ini juga akar catatan C1). "jelaskan
+    # FR-01" pada chat yang dokumennya MEMUAT FR-01 mengembalikan 10 chunk
+    # dengan id_match=0, lalu penjagaan identifier di chat/routes.py melapor
+    # "Saya tidak menemukan FR-01 di dokumen yang tersedia" -- false negative
+    # yang meyakinkan TENTANG ISI KORPUSNYA SENDIRI.
+    #
+    # Leg BM25 sudah bekerja benar: ditanya sendiri, dia mengembalikan 4 chunk
+    # dan 2 di antaranya memuat FR-01 (termasuk baris tabel FR yang benar).
+    # Yang membunuhnya aritmetika RRF + potongan top_k: leg vektor mengembalikan
+    # 10 dokumen, dan pada bobot document_query (0.45) dokumen vektor peringkat
+    # ke-10 pun (0.45/70) masih mengalahkan BM25 peringkat ke-1 (0.15/61). Jadi
+    # hasil BM25 SELALU jatuh di luar 10 besar setiap kali leg vektor penuh --
+    # justru untuk pertanyaan yang menjadi alasan leg BM25 ada.
+    #
+    # Terukur pada "jelaskan FR-01" (chat Project NEXUS), chunk FR-01 baru
+    # muncul di top_k 20-30 dan TIDAK PERNAH di top_k=10 produksi, di SEMUA
+    # profil bobot:
+    #
+    #   weight_hint        top_k=10   top_k=20   top_k=30
+    #   document_query        0          0          1
+    #   faq_lookup            0          2          2
+    #   (default)             0          0          1
+    #
+    # Menaikkan top_k DITOLAK sebagai perbaikan: itu memperbesar konteks untuk
+    # semua pertanyaan demi memperbaiki satu kelas, dan batas 15.000 karakter
+    # build_prompt lalu memotongnya lagi di ujung yang lain.
+    #
+    # Jadi yang diselamatkan cuma chunk yang BENAR-BENAR memuat identifier yang
+    # ditanya, dan hanya kalau tidak ada satu pun yang lolos -- disisipkan di
+    # DEPAN karena pelajaran lantai FAQ di atas: sampai ke konteks saja tidak
+    # cukup, chunk harus menonjol. Query tanpa identifier tidak tersentuh sama
+    # sekali, jadi kasus sintesis (FR-12) berperilaku persis seperti sebelumnya.
+    _id_ditanya = extract_query_identifiers(search_query)
+    if _id_ditanya and not any(text_mentions_identifier(d.page_content, _id_ditanya) for d in docs):
+        _diselamatkan = [d for d in docs_terpotong
+                         if text_mentions_identifier(d.page_content, _id_ditanya)][:TOP_MATCHES]
+        docs = _diselamatkan + docs
+
+    # ── 2026-09-13: lantai leg FAQ, supaya label intent yang salah tidak ────
+    # menghapus FAQ dari konteks sama sekali.
+    #
+    # Ditemukan lewat uji terima D6/G5. Mesin FAQ-nya SEHAT: dengan
+    # weight_hint="faq_lookup" (leg FAQ 0.45) entri yang benar mendarat di
+    # posisi 0 dan ikut dikutip. Yang gagal ada di HULU -- klasifikasi intent.
+    # Terukur 3x per pertanyaan dan hasilnya konsisten (bukan acak):
+    #
+    #   "bagaimana cara mengajukan cuti"        -> faq_lookup  3/3
+    #   "apa kebijakan perusahaan soal jam kerja"-> faq_lookup  3/3
+    #   "kapan layanan AI Chatbot maintenance?" -> question    3/3
+    #   "berapa lama proses reset password"     -> question    3/3
+    #   "jadwal maintenance chatbot kapan ya"   -> general_chat 3/3
+    #
+    # Batasnya: pertanyaan PROSEDURAL kena, pertanyaan OPERASIONAL ("kapan",
+    # "berapa lama") jatuh ke fallback. Dengan bobot default leg FAQ cuma
+    # 0.175, dan itu bukan sekadar turun peringkat -- entri FAQ-nya TIDAK
+    # MASUK top_k sama sekali, jadi model menjawab "tidak disebutkan dalam
+    # dokumen" untuk hal yang jelas-jelas ada di FAQ.
+    #
+    # Perbaikannya STRUKTURAL, bukan menaikkan bobot: satu tebakan LLM yang
+    # lunak tidak boleh menghapus seluruh leg. Naiknya bobot juga terukur
+    # butuh ~0.40 (dari 0.20) supaya masuk, dan menggeser sebanyak itu untuk
+    # SEMUA query berdasar dua contoh justru jenis tebakan yang sudah
+    # berkali-kali jadi masalah di file ini. Matematika RRF-nya: skor entri
+    # FAQ terbaik selalu w_faq x 1/(60+1), jadi tebing ini tidak tergantung
+    # berapa banyak entri FAQ yang ada -- menambah entri tidak menolong.
+    #
+    # Yang ditambahkan cuma hit TERATAS leg FAQ, dan hanya kalau lolos penjaga
+    # relevansi yang SAMA dengan gate BM25-only. Layak-kutip tetap diputuskan
+    # gate sitasi yang sudah ada, bukan oleh penambahan ini.
+    #
+    # Disisipkan di DEPAN, dan itu bukan pilihan gaya. Versi pertama menaruhnya
+    # di ekor supaya tidak mungkin merebut anchor -- entri FAQ-nya memang sampai
+    # ke konteks dan ikut dikutip, TAPI model tetap menjawab "tidak disebutkan
+    # dalam konteks". Bukan soal terpotong (konteksnya cuma 3.615 karakter,
+    # jauh di bawah batas 15.000 build_prompt, dan teks FAQ-nya terbukti ADA di
+    # prompt). Diisolasi dengan tiga panggilan model atas isi yang sama persis:
+    #
+    #   konteks HANYA chunk FAQ   -> "Setiap hari Sabtu jam 15:00"   (benar)
+    #   11 chunk, FAQ di EKOR     -> "tidak disebutkan dalam konteks" (salah)
+    #   11 chunk, FAQ di DEPAN    -> "Setiap hari Sabtu jam 15:00"   (benar)
+    #
+    # Jadi 71 karakter FAQ tenggelam di antara ~3.5k karakter tabel KB yang
+    # tidak relevan: sampai ke konteks saja TIDAK cukup, dia harus menonjol.
+    # Sitasi yang menunjuk sumber yang model-nya sendiri tidak pakai justru
+    # kelas masalah yang penjagaan di file ini berusaha dihapus.
+    #
+    # Anchor tetap aman: anchor dipilih dari similarity TERTINGGI, bukan dari
+    # posisi di daftar (lihat blok sitasi di bawah), dan kelayakan kutip chunk
+    # FAQ ini masih harus lewat gate yang sama seperti kandidat lain.
+    if not any(_is_faq_doc(d) for d in docs):
+        faq_words = _content_words(search_query)
+        for kandidat in faq_retriever.invoke(search_query)[:1]:
+            cocok = (
+                not faq_words
+                or len(faq_words & _content_words(kandidat.page_content)) / len(faq_words)
+                >= _QUERY_OVERLAP_MIN_RATIO
+            )
+            if cocok:
+                docs.insert(0, kandidat)
 
     # ── 2026-08-31: lengkapi baris tabel untuk pertanyaan sintesis ──────────
     # Ditanya "functional requirement", jawaban cuma memuat 5 dari 12 FR dan
@@ -1205,13 +1330,9 @@ def retrieve_context(
     # ini) -- beri tahu siapa pun yang menaikkan/menurunkan ini untuk
     # mengukur dulu, bukan menebak, seperti CITATION_SIMILARITY_GAP.
     #
-    # _QUERY_STOPWORDS dan _content_words() sekarang di level modul (lihat
-    # catatan di sana) -- dipakai bersama oleh saringan ini dan oleh
-    # answer_uses_context(). Ambang di bawah tetap milik saringan ini sendiri:
-    # ini overlap QUERY lawan chunk, beda urusan dari overlap JAWABAN lawan
-    # konteks, jadi kedua angka sengaja tidak dipaksa sama.
-    _QUERY_OVERLAP_MIN_RATIO = 0.5
-
+    # _QUERY_STOPWORDS / _QUERY_OVERLAP_MIN_RATIO / _content_words() ada di
+    # level modul, dekat answer_uses_context() -- lihat catatan lengkap di
+    # sana soal kenapa keduanya dipisah dari ANSWER_GROUNDING_MIN_RATIO.
     _query_words = _content_words(search_query)
 
     def _bm25_only_matches_query(i: int) -> bool:

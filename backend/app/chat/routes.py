@@ -165,22 +165,91 @@ def rename_chat(
     return chat
 
 
-# 2026-09-10: pymupdf4llm menulis pemisah baris DI DALAM sel tabel sebagai
-# tag <br> literal, dan panel sitasi menampilkan teks chunk apa adanya -- jadi
-# user melihat "Bursa Efek<br>Indonesia" dan "Berlaku<br>Sejak" persis di
-# bagian yang paling sering dipamerkan. Diganti spasi, BUKAN newline: newline
-# akan memecah baris pipe-table jadi beberapa baris dan merusak bentuk
-# tabelnya di panel.
+# ── 2026-09-13: penolakan tidak boleh membawa sitasi (uji terima D3) ────────
+# Ditanya hal yang tidak ada di korpus mana pun, model menjawab "informasi itu
+# tidak disebutkan dalam dokumen" -- dan jawaban itu tetap membawa baris
+# Referensi + badge keyakinan. Sitasi yang menunjuk dokumen untuk jawaban
+# "saya tidak tahu" adalah pelabelan keliru yang meyakinkan, kelas yang sama
+# dengan penjagaan divisi asing dan identifier di endpoint chat.
 #
-# Dibersihkan saat TAMPIL, bukan saat indexing: memperbaikinya di
-# index_kb_document() memang menyeluruh (konteks LLM ikut bersih) tapi menuntut
-# re-index seluruh dokumen KB, dan model sendiri sudah menangani <br> dengan
-# baik. Tidak sepadan dilakukan menjelang demo.
-_BR_TAG_RE = re.compile(r"<br\s*/?>", re.I)
+# TIGA kandidat sinyal lain diukur lebih dulu dan DITOLAK, semuanya karena
+# data, bukan karena selera (angka lengkap: lihat catatan vault "RAG
+# Pipeline"):
+#   * Ambang confidence -- tidak punya daya pisah. Pertanyaan di LUAR korpus
+#     justru skor lebih tinggi (76/79) daripada pertanyaan sah (69).
+#   * Overlap kata query<->chunk -- merusak sintesis FR-12. Test
+#     test_query_without_identifier_leaves_the_gate_inert memuat chunk sah
+#     yang berbagi NOL kata dengan query-nya, jadi aturan overlap sekecil
+#     apa pun mematikannya.
+#   * Overlap kata jawaban<->chunk -- terikat bahasa. Pada korpus Inggris
+#     (Project NEXUS) dengan jawaban Indonesia, tiga jawaban yang benar-benar
+#     bersumber dokumen skor 0.00-0.08, di BAWAH plafon 0.20 milik pertanyaan
+#     luar korpus. Tidak ada ambang yang berlaku di dua korpus sekaligus.
+#
+# Yang dipakai: penanda pada TEKS JAWABAN. Itu justru tidak terikat bahasa
+# dokumen, karena bahasa jawaban dipaku settings.response_language.
+# Pola di bawah disusun dari penolakan NYATA yang terkumpul (dua urutan kata
+# yang sama-sama muncul, plus sentinel yang dibeo model saat konteks kosong),
+# bukan dari dugaan.
+#
+# Divalidasi atas 25 jawaban nyata (16 bersumber dokumen di dua bahasa, 5
+# penolakan, 4 jawaban pengetahuan umum): 0 false positive, 0 penolakan lolos.
+_DOC_WORD = r"(?:konteks|context|dokumen|document)"
+_REFUSAL_ABOUT_CONTEXT = re.compile(
+    rf"tidak\s+(?:\w+\s+){{0,3}}?(?:dalam|di)\s+(?:\w+\s+){{0,2}}?{_DOC_WORD}"  # "tidak disebutkan dalam dokumen"
+    rf"|{_DOC_WORD}\s+(?:\w+\s+){{0,2}}?tidak\s+\w+"                            # "document tidak menyebutkan owner"
+    rf"|\[NO RELEVANT CONTEXT FOUND\]",                                         # sentinel build_prompt, kadang dibeo model
+    re.I,
+)
+_NUMBER_RE = re.compile(r"\d[\d.,]*")
+_IDENT_RE = re.compile(r"\b[A-Za-z]{2,}-[A-Za-z0-9./-]*\d[\w./-]*\b")
 
 
-def _clean_chunk_text(text: str) -> str:
-    return _BR_TAG_RE.sub(" ", text)
+def _distinctive_tokens(text: str) -> set[str]:
+    """Angka (>=2 digit) dan identifier -- satu-satunya hal yang bisa dicocokkan LINTAS BAHASA antara jawaban dan potongan sumbernya. Digit tunggal dibuang: itu lebih sering penomoran daftar daripada kutipan nilai."""
+    angka = {n.strip(".,").replace(".", "").replace(",", "") for n in _NUMBER_RE.findall(text)}
+    return {a for a in angka if len(a) >= 2} | {i.lower() for i in _IDENT_RE.findall(text)}
+
+
+def _answer_is_only_a_refusal(reply: str, cited_text: str) -> bool:
+    """
+    True kalau jawaban ini menolak DAN tidak mengutip apa pun dari potongan
+    yang dikutip.
+
+    Syarat kedua itu pagar untuk jawaban SEBAGIAN terjawab -- "SOP-02 mengatur
+    X, tapi jangka waktunya tidak disebutkan dalam dokumen" memuat penanda
+    penolakan tapi tetap layak bersitasi. Kalau jawaban mengutip angka atau
+    identifier yang memang ada di potongannya, sitasi dipertahankan.
+    Arah kegagalan pagar ini aman: kalau ia salah, hasilnya sitasi TETAP ADA
+    (perilaku lama), bukan sitasi hilang dari jawaban yang benar.
+    """
+    if not _REFUSAL_ABOUT_CONTEXT.search(reply or ""):
+        return False
+    return not (_distinctive_tokens(reply or "") & _distinctive_tokens(cited_text or ""))
+
+
+# ── 2026-09-13: <br> mentah di panel kutipan (uji terima D4) ────────────────
+# pymupdf4llm menulis pembungkus baris DI DALAM sel tabel sebagai <br>, jadi
+# teks potongan memuat "Bursa Efek<br>Indonesia", "1 Januari<br>2024",
+# "Kode<br>SOP", "di<br>luar itu wajib ...". Panel kutipan menampilkan teks itu
+# apa adanya (bukan sebagai HTML), jadi tag-nya terbaca mentah oleh user.
+#
+# Diganti SPASI, bukan dihapus: setiap kemunculan yang ditemukan pada korpus
+# nyata adalah wrap di tengah frasa, dan menghapusnya akan merekatkan kata
+# ("di<br>luar" -> "diluar").
+#
+# Dibersihkan di lapis SITASI saja, bukan saat indexing. Alasannya sama dengan
+# seluruh penjagaan lain di file ini: chunk_text()/indexing adalah area yang
+# pernah meregresikan E1, dan teks yang dikirim ke model TIDAK diubah -- jadi
+# hasil eval dan grounding tidak ikut bergeser oleh perbaikan kosmetik.
+_BR_TAG = re.compile(r"<\s*br\s*/?\s*>", re.I)
+
+
+def _readable_chunk(text: str) -> str:
+    """Rapikan artefak render yang cuma mengganggu MATA, bukan model."""
+    if not text:
+        return text
+    return re.sub(r"[ \t]{2,}", " ", _BR_TAG.sub(" ", text))
 
 
 def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
@@ -242,7 +311,7 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         # 80 karakter pertama) dipakai membuang duplikat render (lihat
         # _dedup_shape di vectorstore.py) supaya user tidak melihat "isi
         # yang sama" dua kali di panel yang sama.
-        chunk_text_bersih = _clean_chunk_text(chunk.get("text", ""))
+        chunk_text_bersih = _readable_chunk(chunk.get("text", ""))
         shape = f"{page}|{' '.join(chunk_text_bersih.split())[:80].lower()}"
         if shape not in chunk_seen_shapes[key]:
             chunk_seen_shapes[key].add(shape)
@@ -258,6 +327,9 @@ def _build_source_citations(context_chunks: list[dict]) -> list[SourceCitation]:
         citations.append(SourceCitation(
             label=label, filename=filenames[key], display_title=display_titles[key],
             doc_type=doc_types[key], source_type=source_types[key], pages=sorted_pages,
+            # t sudah dibersihkan sekali di atas (dipakai juga untuk shape dedup) --
+            # tidak perlu _readable_chunk() lagi di sini, itu cuma menerapkan
+            # regex yang sama dua kali pada teks yang sama.
             chunks=[CitationChunk(page=p, text=t) for p, t in ordered_chunks],
         ))
     return citations
@@ -559,6 +631,10 @@ async def send_message(
                 retrieval_confidence=retrieval_confidence,
                 identifier_in_example=identifier_in_example,
                 answer_must_be_grounded=answer_must_be_grounded,
+                # 2026-09-13: query yang sudah ditulis ulang ikut dikirim supaya
+                # deteksi sensitif tidak bisa dilewati satu typo -- lihat
+                # detect_sensitive() di llm/router.py.
+                search_query=search_query,
             )
         except CommercialLLMError as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -578,6 +654,38 @@ async def send_message(
                 "yang menyertainya — skor, nominal, tanggal — adalah angka "
                 "ilustrasi, bukan hasil pengukuran.\n\n"
             ) + result.reply
+
+    # ── 2026-09-13: jawaban yang BUKAN dari dokumen tidak boleh bersitasi ──
+    # Ditemukan lewat uji terima D2: "buatkan puisi singkat tentang laut"
+    # dijawab wajar, tapi tetap membawa baris Referensi dan badge keyakinan —
+    # retrieval memang tetap jalan dan selalu mengembalikan SESUATU, jadi
+    # tiga potongan KB ikut dikutip untuk jawaban yang sama sekali tidak
+    # bersumber dari situ. Itu pelabelan keliru yang meyakinkan, kelas yang
+    # sama dengan penjagaan divisi asing di atas.
+    #
+    # Sinyalnya intent GENERAL_CHAT dari lapis 2, dan itu SUDAH jadi niat
+    # desain sejak awal — docstring escalation_confidence_threshold di
+    # config.py menyebut "None (general chat) tidak pernah memicu", tapi tidak
+    # ada satu pun kode yang benar-benar mengosongkannya. Ini melengkapi itu.
+    #
+    # Diukur dulu, bukan diasumsikan: klasifikasi intent diuji 5x untuk tiap
+    # kasus dan stabil 5/5 (kreatif -> general_chat, "apa isi SOP-02" ->
+    # document_query). Beda sifat dari perbaikan typo di detect_sensitive()
+    # yang ternyata non-deterministik: di sini keluaran LLM dibatasi daftar
+    # putih LAYER2_INTENTS, bukan teks bebas.
+    #
+    # SENGAJA tidak memakai regex "buatkan/tulis/bikin ..." sebagai jaring
+    # tambahan: "buatkan ringkasan dokumen ini" akan ikut tertangkap, padahal
+    # itu summary_request yang justru WAJIB bersitasi.
+    #
+    # SENGAJA juga tidak mengosongkan context_chunks SEBELUM prompt disusun.
+    # Kalau klasifikasi sesekali salah menandai pertanyaan dokumen sebagai
+    # general_chat, akibat terburuknya cuma sitasi hilang (ringan), bukan
+    # jawaban jadi kosong tanpa konteks (berat) — arah kegagalan yang sama
+    # dengan detect_sensitive().
+    if intent == Intent.GENERAL_CHAT:
+        context_chunks = []
+        result.confidence_score = None
 
     # ---------- Audit log untuk kejadian F2-04 di dalam alur LLM ----------
     if result.pii_detected:
@@ -617,6 +725,19 @@ async def send_message(
     grounded_in_context = answer_uses_context(result.reply, context_chunks)
     citations = _build_source_citations(context_chunks) if grounded_in_context else []
     confidence_score = result.confidence_score if grounded_in_context else None
+
+    # 2026-09-13 (uji terima D3): jawaban yang isinya cuma menolak tidak boleh
+    # membawa Referensi maupun badge keyakinan -- lihat catatan panjang di atas
+    # _answer_is_only_a_refusal(), termasuk tiga kandidat sinyal lain yang
+    # diukur dan ditolak. Diperiksa terhadap teks potongan yang BENAR-BENAR
+    # dikutip, bukan seluruh konteks: yang diklaim baris Referensi itu justru
+    # potongan-potongan inilah.
+    if citations and _answer_is_only_a_refusal(
+        result.reply, " ".join(c.get("text") or "" for c in context_chunks if c.get("is_top_match"))
+    ):
+        citations = []
+        confidence_score = None  # variabel LOKAL yang benar-benar dipakai di bawah (ai_msg, ChatReplyResponse) --
+        # bukan result.confidence_score, yang tidak pernah dibaca lagi setelah baris 743 menyalinnya ke sini.
 
     ai_msg = Message(
         chat_id=chat.id,

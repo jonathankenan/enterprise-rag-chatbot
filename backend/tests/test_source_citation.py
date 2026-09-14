@@ -51,13 +51,30 @@ exec("from pydantic import BaseModel", _ns)
 exec("import re", _ns)
 exec(_segment(SCHEMAS_SRC, "CitationChunk"), _ns)
 exec(_segment(SCHEMAS_SRC, "SourceCitation"), _ns)
-# _build_source_citations() membersihkan tag <br> milik pymupdf4llm sebelum
-# teks chunk masuk ke panel sitasi -- keduanya ikut di-exec supaya yang diuji
-# tetap kode yang dikirim, bukan salinannya.
-exec(_assignment(ROUTES_SRC, "_BR_TAG_RE"), _ns)
-exec(_segment(ROUTES_SRC, "_clean_chunk_text"), _ns)
+# _build_source_citations() membersihkan tag <br> milik pymupdf4llm (lewat
+# _readable_chunk(), lihat di bawah) sebelum teks chunk masuk ke panel sitasi
+# -- di-exec dalam urutan definisi/pemakaian aslinya supaya yang diuji tetap
+# kode yang dikirim, bukan salinannya. _readable_chunk() sendiri baru
+# didaftarkan setelah blok ini (2026-09-13), tapi Python me-resolve nama bebas
+# di badan fungsi saat DIPANGGIL, bukan saat didefinisikan -- jadi urutan exec
+# di sini aman selama semuanya sudah masuk _ns sebelum test benar-benar jalan.
 exec(_segment(ROUTES_SRC, "_build_source_citations"), _ns)
 build_citations = _ns["_build_source_citations"]
+
+# 2026-09-13: penjagaan "penolakan tidak boleh bersitasi" (uji terima D3).
+# Diambil lewat AST seperti _build_source_citations supaya yang diuji adalah
+# kode yang benar-benar dikirim, bukan salinannya.
+_ns["re"] = __import__("re")
+for _name in ("_DOC_WORD", "_REFUSAL_ABOUT_CONTEXT", "_NUMBER_RE", "_IDENT_RE"):
+    exec(_assignment(ROUTES_SRC, _name), _ns)
+exec(_segment(ROUTES_SRC, "_distinctive_tokens"), _ns)
+exec(_segment(ROUTES_SRC, "_answer_is_only_a_refusal"), _ns)
+only_refusal = _ns["_answer_is_only_a_refusal"]
+
+# 2026-09-13: perapian teks potongan untuk panel kutipan (uji terima D4).
+exec(_assignment(ROUTES_SRC, "_BR_TAG"), _ns)
+exec(_segment(ROUTES_SRC, "_readable_chunk"), _ns)
+readable = _ns["_readable_chunk"]
 
 _fn = _segment(VECTOR_SRC, "retrieve_context")
 _tail = _fn[_fn.index("    docs = docs[:top_k]"):]
@@ -87,6 +104,21 @@ class _EmptyCollection:
         return {"documents": [], "metadatas": []}
 
 
+# 2026-09-13: lantai leg FAQ (retrieve_context) memanggil faq_retriever.invoke()
+# kalau tidak ada chunk FAQ yang lolos potongan top_k. faq_retriever adalah
+# LOKAL retrieve_context, jadi tidak ikut terbawa lewat vars(_vs) — harus
+# disemai eksplisit di sini, persis alasan chat_id/collection_name/
+# get_collection sudah disemai. Default-nya kosong supaya lantai itu jadi
+# no-op: tes di file ini soal PEMILIHAN sitasi, bukan soal FAQ. Tes lantai
+# FAQ-nya sendiri mengirim stub berisi dokumen (lihat kelompok tesnya di bawah).
+class _FaqStub:
+    def __init__(self, docs=()):
+        self._docs = list(docs)
+
+    def invoke(self, _query):
+        return list(self._docs)
+
+
 def _config_default(name: str):
     """Read a Settings default straight out of config.py, so these tests use
     the real configured value instead of a hardcoded copy that can drift."""
@@ -101,13 +133,20 @@ class _Settings:
     citation_similarity_gap = _config_default("citation_similarity_gap")
 
 
-def select(docs, top_k=10, search_query=""):
+def select(docs, top_k=10, search_query="", faq_docs=(), dropped_docs=()):
     """Run the real is_top_match/confidence block over stub documents.
 
     search_query defaults to "" — no identifier token, so the 2026-08-26
     lexical gate stays inert and these tests exercise the similarity floor on
     its own, exactly as they did before the gate existed. Pass a real query to
     test the gate itself.
+
+    faq_docs defaults to empty, which makes the 2026-09-13 FAQ floor a no-op.
+    Pass documents to exercise the floor itself.
+
+    dropped_docs adalah kandidat yang "dibuang potongan top_k" -- default kosong
+    supaya penyelamatan identifier (2026-09-13) juga jadi no-op. Kirim dokumen
+    untuk menguji penyelamatannya.
     """
     ns = dict(vars(_vs))
     # chat_id/collection_name adalah PARAMETER retrieve_context, bukan helper
@@ -115,6 +154,11 @@ def select(docs, top_k=10, search_query=""):
     ns.update({"docs": list(docs), "top_k": top_k, "settings": _Settings,
                "chat_id": "test-chat", "collection_name": "kb_general",
                "search_query": search_query,
+               "faq_retriever": _FaqStub(faq_docs),
+               # 2026-09-13: penyelamatan identifier membaca kandidat yang
+               # dibuang potongan top_k. Lokal retrieve_context, jadi harus
+               # disemai -- sama alasannya dengan faq_retriever di atas.
+               "docs_terpotong": list(dropped_docs),
                "get_collection": lambda *a, **k: _EmptyCollection()})
     exec(_helper, ns)
     exec(_tail.replace("return chunks, confidence", "__r__ = (chunks, confidence)"), ns)
@@ -929,6 +973,295 @@ def test_br_cleaning_handles_self_closing_and_spaced_variants():
     assert "<br" not in build_citations([chunk(
         filename="KB.pdf", page=1, is_top_match=True,
         text="a<br/>b<br />c<BR>d")])[0].chunks[0].text
+
+
+# ======================================================== FAQ floor (2026-09-13)
+#
+# Uji terima D6/G5: pertanyaan yang jawabannya jelas ada di FAQ dijawab "tidak
+# disebutkan dalam dokumen". Mesin FAQ-nya sehat — dengan weight_hint
+# "faq_lookup" entri yang benar mendarat di posisi 0 dan dikutip. Yang gagal
+# klasifikasi intent: "kapan layanan AI Chatbot maintenance?" -> "question"
+# 3/3, "jadwal maintenance chatbot kapan ya" -> "general_chat" 3/3. Pada bobot
+# default leg FAQ cuma 0.175 dan entrinya tidak masuk top_k SAMA SEKALI.
+#
+# Perbaikannya struktural (satu tebakan LLM lunak tidak boleh menghapus satu
+# leg penuh), bukan menaikkan bobot global.
+
+FAQ_TEXT = "Q: Kapan layanan AI Chatbot maintenance?\nA: Setiap hari Sabtu jam 15:00"
+
+
+def _faq_doc(text=FAQ_TEXT, sim=75):
+    """
+    Chunk FAQ SELALU membawa _distance: FaqChromaRetriever mengisinya
+    (meta["_distance"] = dist) untuk setiap dokumen yang dikembalikan. Itu
+    bukan detail kosmetik — lihat test_faq_retriever_always_carries_a_distance
+    di bawah untuk kenapa penyisipan di depan bergantung padanya.
+    """
+    return Doc(text=text, faq_id="faq-1", _distance=dist_for(sim))
+
+
+def test_faq_floor_adds_the_faq_hit_at_the_front_not_the_tail():
+    """
+    Posisi DEPAN itu wajib, bukan gaya. Versi pertama menaruhnya di ekor:
+    entri FAQ sampai ke konteks dan ikut dikutip, tapi model tetap menjawab
+    "tidak disebutkan dalam konteks" -- 71 karakter FAQ tenggelam di antara
+    ~3.5k karakter tabel KB. Diuji dengan isi yang sama persis, cuma urutan
+    beda: FAQ di depan dijawab benar, di ekor ditolak. Kalau baris ini
+    dilonggarkan jadi "yang penting ada di konteks", bug itu kembali tanpa
+    satu pun test lain yang gagal.
+    """
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80)),
+            Doc(filename="PTI.pdf", page=2, _distance=dist_for(78))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    assert [c["source_type"] for c in chunks].count("faq") == 1
+    assert chunks[0]["source_type"] == "faq", "harus di DEPAN supaya tidak tenggelam"
+    assert [c["filename"] for c in chunks[1:]] == ["PTI.pdf", "PTI.pdf"], "kandidat yang sudah ada tetap urut, cuma bergeser"
+
+
+def test_faq_floor_rejects_a_faq_hit_that_does_not_match_the_query():
+    """Penjaga relevansinya sama dengan gate BM25-only — bukan heuristik kedua."""
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="berapa batas persetujuan anggaran divisi",
+                       faq_docs=[_faq_doc()])
+    assert "faq" not in [c["source_type"] for c in chunks]
+
+
+def test_faq_floor_is_inert_when_a_faq_chunk_already_survived_top_k():
+    """Tidak boleh menghasilkan entri FAQ kembar."""
+    docs = [_faq_doc(), Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    assert [c["source_type"] for c in chunks].count("faq") == 1
+
+
+def test_faq_floor_is_inert_when_the_faq_collection_is_empty():
+    docs = [Doc(filename="PTI.pdf", page=1, _distance=dist_for(80))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance", faq_docs=[])
+    assert "faq" not in [c["source_type"] for c in chunks]
+    assert len(chunks) == 1
+
+
+def test_faq_floor_does_not_displace_a_scored_candidate_from_the_citations():
+    """
+    Menyisipkan di depan menggeser POSISI, dan itu memang tujuannya — yang
+    tidak boleh adalah mengusir kandidat ber-skor dari daftar sitasi. (Versi
+    pertama test ini memeriksa "kutipan pertama", padahal itu cuma urutan
+    daftar, bukan anchor — klaim yang tidak bisa dibuktikan dari harness ini.)
+    """
+    docs = [Doc(filename="PTI.pdf", page=3, _distance=dist_for(88))]
+    chunks, _ = select(docs, search_query="kapan layanan chatbot maintenance",
+                       faq_docs=[_faq_doc()])
+    dikutip = [c for c in chunks if c["is_top_match"]]
+    assert "PTI.pdf" in [c["filename"] for c in dikutip], "kandidat ber-skor tetap harus dikutip"
+
+
+def test_faq_retriever_always_carries_a_distance():
+    """
+    Penyisipan di depan BERGANTUNG pada ini, dan pertautannya tidak terlihat
+    dari kode lantai FAQ-nya sendiri. Kalau chunk FAQ sampai tidak punya
+    _distance, dia jadi peringkat #1 tanpa similarity -- dan aturan 2026-08-26
+    memperlakukan itu sebagai kecocokan kata PERSIS: jadi anchor dengan
+    reference=100, yang lalu menyaring habis kandidat vektor lain (terlihat
+    persis begitu saat fixture test ini belum memakai _distance: PTI similarity
+    88 ikut terbuang). FaqChromaRetriever mengisi meta["_distance"] untuk tiap
+    dokumen, jadi hari ini tidak bisa terjadi -- test ini yang menjaga supaya
+    tetap begitu.
+    """
+    src = (APP / "rag" / "vectorstore.py").read_text(encoding="utf-8")
+    faq_cls = _segment(src, "FaqChromaRetriever")
+    assert '_distance' in faq_cls, "FaqChromaRetriever wajib mengisi _distance"
+
+
+# ==================================== citation panel readability (2026-09-13)
+#
+# Uji terima D4: panel kutipan menampilkan "<br>" mentah. pymupdf4llm menulis
+# wrap DI DALAM sel tabel sebagai <br>. Semua contoh di bawah adalah teks chunk
+# NYATA dari KB fixture, diambil apa adanya saat mengukur ini.
+
+CHUNK_ASLI_REG = ("|Kode|Peraturan|Penerbit|Berlaku<br>Sejak|\n|---|---|---|---|\n"
+                  "|REG-02|Peraturan Bursa Nomor I-A tentang Pencatatan Saham|"
+                  "Bursa Efek<br>Indonesia|1 Januari<br>2024|")
+CHUNK_ASLI_SOP = ("|Kode<br>SOP|Judul Prosedur|Ketentuan|\n|---|---|---|\n"
+                  "|SOP-03|Rilis ke Produksi|Rilis hanya boleh dijalankan Selasa dan Kamis "
+                  "pukul 19.00-22.00 WIB, di<br>luar itu wajib emergency change request.|")
+
+
+def test_br_tags_from_real_chunks_become_spaces():
+    hasil = readable(CHUNK_ASLI_REG)
+    assert "<br>" not in hasil
+    assert "Bursa Efek Indonesia" in hasil
+    assert "1 Januari 2024" in hasil
+    assert "Berlaku Sejak" in hasil
+
+
+def test_br_is_replaced_not_deleted():
+    """
+    Menghapus (bukan mengganti spasi) akan merekatkan kata: "di<br>luar" ->
+    "diluar". Kasus itu nyata, ada di chunk SOP-03.
+    """
+    hasil = readable(CHUNK_ASLI_SOP)
+    assert "di luar itu wajib" in hasil
+    assert "diluar" not in hasil
+    assert "Kode SOP" in hasil
+
+
+def test_br_variants_are_handled():
+    assert readable("a<br/>b") == "a b"
+    assert readable("a<br />b") == "a b"
+    assert readable("a<BR>b") == "a b"
+
+
+def test_readable_chunk_leaves_ordinary_text_alone():
+    biasa = "|SOP-01|Prosedur Penanganan Insiden|Eskalasi maksimal 30 menit.|"
+    assert readable(biasa) == biasa
+    assert readable("") == ""
+    assert readable(None) is None
+
+
+def test_table_pipes_and_newlines_are_preserved():
+    """
+    Sengaja TIDAK membongkar markdown tabelnya -- yang dilaporkan cuma <br>,
+    dan pipa/baris barunya justru yang membuat panel masih terbaca sebagai
+    tabel di frontend.
+    """
+    hasil = readable(CHUNK_ASLI_REG)
+    assert hasil.count("\n") == CHUNK_ASLI_REG.count("\n")
+    assert "|---|---|---|---|" in hasil
+
+
+# ================================ identifier rescue past top_k (2026-09-13)
+#
+# Uji terima B8/D7 (dan akar catatan C1): "jelaskan FR-01" pada chat yang
+# dokumennya MEMUAT FR-01 mengembalikan id_match=0, lalu penjagaan identifier
+# menolak dengan "tidak menemukan FR-01" -- false negative tentang isi korpus
+# sendiri. Leg BM25 menemukannya dengan benar; yang membunuhnya aritmetika RRF
+# + potongan top_k (leg vektor peringkat ke-10 masih mengalahkan BM25
+# peringkat ke-1 pada bobot document_query). Terukur: chunk FR-01 baru muncul
+# di top_k 20-30, tidak pernah di top_k=10 produksi.
+
+def test_identifier_chunk_dropped_by_top_k_is_rescued_to_the_front():
+    lolos = [Doc("tidak menyebut kode apa pun di sini", filename="BRD.pdf", page=1,
+                 _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-01**|Retrieval Accuracy|minimum 92% MRR@5|", filename="BRD.pdf",
+                     page=7, _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert any(c["id_match"] for c in chunks), "chunk ber-identifier harus terselamatkan"
+    assert "FR-01" in chunks[0]["text"], "disisipkan di DEPAN -- lihat pelajaran lantai FAQ"
+
+
+def test_rescue_is_inert_when_a_surviving_chunk_already_has_the_identifier():
+    """Tidak boleh menghasilkan kembaran."""
+    lolos = [Doc("|**FR-01**|Retrieval Accuracy|92%|", filename="BRD.pdf", page=7,
+                 _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-01**|Retrieval Accuracy|92%|", filename="BRD.pdf", page=7,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert len(chunks) == 1
+
+
+def test_rescue_never_invents_a_match():
+    """
+    Identifier yang memang TIDAK ADA di korpus harus tetap tidak ditemukan --
+    ini yang menjaga penolakan B1-B4 tetap benar (diverifikasi langsung pada
+    "jelaskan FR-14": id_match tetap 0 sesudah perbaikan ini).
+    """
+    lolos = [Doc("prosa tanpa kode", filename="BRD.pdf", page=1, _distance=dist_for(80))]
+    terpotong = [Doc("|**FR-11**|Sesuatu yang lain|", filename="BRD.pdf", page=7,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="jelaskan FR-14", dropped_docs=terpotong)
+    assert not any(c["id_match"] for c in chunks)
+    assert len(chunks) == 1, "tidak boleh menarik chunk yang identifiernya beda"
+
+
+def test_rescue_leaves_queries_without_identifiers_untouched():
+    """Kasus sintesis (FR-12) harus berperilaku persis seperti sebelum perbaikan ini."""
+    lolos = [Doc("Overdraft fee is $35.00 per occurrence", filename="Fees.pdf", page=2,
+                 _distance=dist_for(95))]
+    terpotong = [Doc("Capped at 3 occurrences per calendar day", filename="Terms.pdf", page=9,
+                     _distance=dist_for(60))]
+    chunks, _ = select(lolos, search_query="overdraft fee policy summary", dropped_docs=terpotong)
+    assert len(chunks) == 1, "tanpa identifier di query, tidak ada yang diselamatkan"
+
+
+def test_rescue_is_capped_at_top_matches():
+    lolos = [Doc("prosa tanpa kode", filename="BRD.pdf", page=1, _distance=dist_for(80))]
+    terpotong = [Doc(f"|**FR-01**| baris ke-{i}|", filename="BRD.pdf", page=7 + i,
+                     _distance=dist_for(60)) for i in range(6)]
+    chunks, _ = select(lolos, search_query="jelaskan FR-01", dropped_docs=terpotong)
+    assert sum(1 for c in chunks if c["id_match"]) <= _vs.TOP_MATCHES
+
+
+# ============================================ refusal must not cite (2026-09-13)
+#
+# Uji terima D3. SEMUA teks jawaban di bawah adalah balasan model NYATA yang
+# terkumpul saat mengukur ini (6 pertanyaan di luar korpus + 8 di dalam korpus
+# pada KB divisi Indonesia, plus 11 pada Project NEXUS yang berbahasa Inggris),
+# bukan contoh karangan. Aturannya divalidasi atas 25 jawaban itu: 0 false
+# positive, 0 penolakan lolos.
+
+CHUNK_PTI = ("|Batas persetujuan anggaran Kepala Divisi|Rp250.000.000|\n"
+             "|Waktu tanggap permintaan internal|2 hari kerja|")
+CHUNK_EN = "|NFR-PERF-01|Time To First Token (TTFT)|< 600 ms|1,200 ms|"
+
+
+def test_refusal_phrasings_actually_observed_are_detected():
+    """Dua urutan kata yang sama-sama muncul di balasan nyata, plus sentinel."""
+    assert only_refusal("Maaf, informasi tentang SKS yang diperlukan untuk lulus dari fakultas FRI "
+                        "tidak disebutkan dalam dokumen yang disediakan.", CHUNK_PTI) is True
+    assert only_refusal("Maaf, informasi tentang harga tiket pesawat Jakarta-Bali tidak terdapat "
+                        "dalam context yang disediakan.", CHUNK_PTI) is True
+    assert only_refusal("document tidak menyebutkan owner untuk DOC-FEE-2026.", CHUNK_EN) is True
+    assert only_refusal("[NO RELEVANT CONTEXT FOUND]", CHUNK_EN) is True
+
+
+def test_grounded_answers_keep_their_citations():
+    """Jawaban bersumber dokumen, dua-duanya balasan nyata -- termasuk yang berbahasa beda dari chunk-nya."""
+    assert only_refusal("Batas persetujuan anggaran Kepala Divisi adalah Rp250.000.000. "
+                        "Di atas nilai ini wajib persetujuan Direksi.", CHUNK_PTI) is False
+    assert only_refusal("Sistem inti yang menjadi tanggung jawab divisi Pengembangan Teknologi "
+                        "Informasi adalah Core Trading Engine.", CHUNK_PTI) is False
+    # Jawaban Indonesia atas chunk Inggris: tidak boleh kena. Inilah yang
+    # mematikan kandidat overlap-kata (jawaban seperti ini skor 0.00).
+    assert only_refusal("Target TTFT adalah kurang dari 600 ms dengan batas maksimum 1.200 ms.",
+                        CHUNK_EN) is False
+
+
+def test_partially_answered_reply_keeps_its_citations():
+    """
+    Pagar utama aturan ini. Jawaban yang MENJAWAB sebagian lalu menyebut sisanya
+    tidak ada tetap layak bersitasi -- yang dipakai sebagai bukti: angka yang
+    dikutipnya memang ada di potongan sumbernya.
+    """
+    reply = ("Batas persetujuan anggaran Kepala Divisi adalah Rp250.000.000. "
+             "Jangka waktu peninjauannya tidak disebutkan dalam dokumen.")
+    assert only_refusal(reply, CHUNK_PTI) is False
+
+
+def test_refusal_that_quotes_nothing_from_the_chunk_is_stripped():
+    reply = "Prioritas NFR-PERF-03 tidak disebutkan dalam konteks yang diberikan."
+    assert only_refusal(reply, CHUNK_PTI) is True
+
+
+def test_general_knowledge_answer_is_not_treated_as_a_refusal():
+    """
+    Batas yang disadari: 4 dari 6 pertanyaan di luar korpus TIDAK ditolak model
+    -- dijawab dari pengetahuan umum ("Ibu kota negara Jepang adalah Tokyo")
+    sambil tetap membawa sitasi dokumen. Aturan ini sengaja TIDAK menangkapnya:
+    itu masalah CAKUPAN JAWABAN (ADR-001), bukan penolakan, dan menebak-nebak
+    di sini berarti mencabut sitasi dari jawaban yang bentuknya sah. Dicatat
+    sebagai test supaya batasnya tidak disalahpahami sebagai kelalaian.
+    """
+    assert only_refusal("Ibu kota negara Jepang adalah Tokyo.", CHUNK_PTI) is False
+    assert only_refusal("Presiden Indonesia pada tahun 1970 adalah Soeharto.", CHUNK_PTI) is False
+
+
+def test_distinctive_tokens_ignores_single_digits():
+    """Digit tunggal lebih sering penomoran daftar ("1.", "2.") daripada kutipan nilai."""
+    tokens = _ns["_distinctive_tokens"]
+    assert tokens("langkah 1 lalu 2") == set()
+    assert "250000000" in tokens("Rp250.000.000")
+    assert "sop-02" in tokens("Isi SOP-02 adalah ...")
 
 
 # ---------------------------------------------------------------- standalone
